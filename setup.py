@@ -9,7 +9,7 @@ setuptools.setup(
     version="0.0.1",
     description="New implementation of localnmf with advanced background models and initialization options",
     packages=setuptools.find_packages(),
-    install_requires=[,"numpy", "scipy","cvxpy","Cython", "networkx","scikit-learn", "torch", "matplotlib", "opencv-python", "scikit-image"],
+    install_requires=["numpy", "scipy","cvxpy","Cython", "networkx","scikit-learn", "torch", "matplotlib", "opencv-python", "scikit-image"],
     classifiers=(
         "Programming Language :: Python :: 3",
     ),
