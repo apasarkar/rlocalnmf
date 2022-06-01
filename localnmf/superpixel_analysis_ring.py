@@ -37,10 +37,15 @@ print(os.getcwd())
 
 
 #Repo-specific imports:
-import constrained_ring
-from constrained_ring.cnmf_e import update_ring_model_w_full, update_ring_model_w_const, init_w
-import ca_utils
-import regression_update
+from localnmf import ca_utils
+from localnmf.constrained_ring.cnmf_e import update_ring_model_w_full, update_ring_model_w_const, init_w
+from localnmf import regression_update
+
+
+# import constrained_ring
+# from constrained_ring.cnmf_e import update_ring_model_w_full, update_ring_model_w_const, init_w
+# import ca_utils
+# import regression_update
 
 
 import multiprocessing
