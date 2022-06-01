@@ -39,7 +39,6 @@ print(os.getcwd())
 #Repo-specific imports:
 import constrained_ring
 from constrained_ring.cnmf_e import update_ring_model_w_full, update_ring_model_w_const, init_w
-import mnmf
 import ca_utils
 import regression_update
 
@@ -1862,69 +1861,140 @@ def dilate_mask(mask_a, dilation_size):
     return new_mask
         
 
+def process_custom_signals(a_init, U_sparse, V):
+    '''
+    Custom initialization: Given a set of neuron spatial footprints ('a'), this provides initial estimates to the other component (temporal traces, baseline, fluctuating background)
+    Terms:
+        d1, d2: the dimensions of the FOV
+        K: number of neurons identified
+        R: rank of the PMD decomposition
     
-def process_custom_signals(a, c, b, U, V, dims, dilation = 2,  scale_divisor = 10):
-    """
-    Function to initialize "a" and "c" matrices. "a" and "c" are estimated outside of the standard demixing pipeline
-    params: 
-        a: ndarray, d x K. K = number of neurons, d = number of pixels in spatial support
-        c: ndarray, T x K. T = number of frames in imaging movie, K = number of neurons
-        b: ndarray, d x 1. d = number of pixels in spatial support
-        U: ndarray, d x r. d = number of pixels in spatial support, r = rank of compressed movie. U is a spatial representation for the movie
-        V: ndarray, r x T. r = rank of compressed movie. T = number of frames in imaging movie. V is a temporal representation for the movie  
-        dims: tuple (x, y). x * y = d (x and y are the dimensions of the field of view)
-    """
-    
-    #First scale a*c to be compatible with the U*V movie. Using a constant scale factor, this becomes a 1d regression problem
-#     print("WE ARE NOW PRINTINIG A")
-#     for k in range(a.shape[1]):
-#         plt.figure()
-#         plt.imshow(a[:, k].reshape((dims[0], dims[1]), order = 'F'))
-#         plt.show()
-    a_sum = np.sum(a, axis = 1) > 0
-    U_crop = U[a_sum, :].dot(V.sum(axis = 1, keepdims = True))
-    Yd_sum = np.sum(U_crop.flatten())
+    Params:
+        a: np.ndarray, dimensions (d1, d2, K) where K is the number of neurons, 
     
     
-    ac_interm = a.dot(c.T.sum(axis = 1, keepdims = True))
-    ac_sum = np.sum(ac_interm.flatten())
+    TODO: Eliminate awkward naming issues in 'process custom signals'
+    '''
+    dims = (a_init.shape[0], a_init.shape[1], V.shape[1])
     
-    scale = Yd_sum / ac_sum
-    scale /= scale_divisor
+    A = a_init
+    A_mask = (a_init>0)
     
-    uv_mean = (U*((V.T).mean(axis=0,keepdims=True))).sum(axis=1,keepdims=True)
+    A_re = A.reshape(dims[0]*dims[1],-1, order="F")
+    A_mask_re = A_mask.reshape(dims[0]*dims[1],-1,order="F")
+
+    c = np.zeros((dims[2], A_re.shape[1]))
     
-    #Rescale ac based on above estimate
-    c = c * scale
+    a = A_re
+    a_mask=A_mask_re
     
-    mask_a = (a > 0)*1
-    b = b * scale
-#     c = ls_solve_acc_ring(a, U - bg_basis, V.T, mask=None, beta_LS=c).T;
     
-#     mask_a = (a>0)*1
-#     for k in range(0):
-#         bg_basis = b.dot((V.T).sum(axis = 0, keepdims = True))
-#         c = ls_solve_acc_ring(a, U - bg_basis, V.T, mask=None, beta_LS=c).T;
-        
-#         b = np.maximum(0, uv_mean-(a*(c.mean(axis=0,keepdims=True))).sum(axis=1,keepdims=True));
-#         bg_basis = b.dot((V.T).sum(axis = 0, keepdims = True))
-        
-#         a = ls_solve_ac(c, V.T, U - bg_basis, mask=mask_a.T, beta_LS=a).T;
-#         b = np.maximum(0, uv_mean-(a*(c.mean(axis=0,keepdims=True))).sum(axis=1,keepdims=True));
-        
+    W = scipy.sparse.csr_matrix((U_sparse.shape[0],U_sparse.shape[0]))
+    X = np.zeros((A_re.shape[1], V.shape[0]))
+    b = np.zeros((U_sparse.shape[0], 1))
     
-    #Now perform a baseline update
+    C_new = regression_update.temporal_update_HALS(U_sparse, V, W, X, A_re, c, b)
+    c = C_new
+    
+      
+    ####Delete any zero components
+    ####TODO: completely eliminate 
+    deletions = []
+    for k in range(a.shape[1]):
+        curr_trace = c[:, k]
+        if np.count_nonzero(curr_trace) == 0:
+            deletions.append(k)
+            print("delete {}".format(k))
+    keeps = []
+    for m in range(a.shape[1]):
+        if m in deletions:
+            continue
+        else:
+            keeps.append(m)
+    a = a[:, keeps]
+    a_mask=a_mask[:,keeps]
+    c = c[:, keeps]
+    print("THIS IS THE SHAPE AFTER DELETIONS")
+    print(a.shape)
+    print(c.shape)
+ 
+    ###
+    # Estimate background (stationary and fluctuating) for localNMF 
+    ###
+    ##We estimate stationary background
+    uv_mean = U_sparse.dot((V.mean(axis = 1, keepdims = True))) #Pixel-wise mean
+    b = regression_update.baseline_update(uv_mean, a, c)
+    
+    
+    a_used = a.astype("double")
+    b_used = b.astype("double")
+    c_used = c.astype("double")
+    
+    return a_used, a_mask, b_used, c_used
+
+    
+# def process_custom_signals(a, c, b, U, V, dims, dilation = 2,  scale_divisor = 10):
+#     """
+#     Function to initialize "a" and "c" matrices. "a" and "c" are estimated outside of the standard demixing pipeline
+#     params: 
+#         a: ndarray, d x K. K = number of neurons, d = number of pixels in spatial support
+#         c: ndarray, T x K. T = number of frames in imaging movie, K = number of neurons
+#         b: ndarray, d x 1. d = number of pixels in spatial support
+#         U: ndarray, d x r. d = number of pixels in spatial support, r = rank of compressed movie. U is a spatial representation for the movie
+#         V: ndarray, r x T. r = rank of compressed movie. T = number of frames in imaging movie. V is a temporal representation for the movie  
+#         dims: tuple (x, y). x * y = d (x and y are the dimensions of the field of view)
+#     """
+    
+#     #First scale a*c to be compatible with the U*V movie. Using a constant scale factor, this becomes a 1d regression problem
+# #     print("WE ARE NOW PRINTINIG A")
+# #     for k in range(a.shape[1]):
+# #         plt.figure()
+# #         plt.imshow(a[:, k].reshape((dims[0], dims[1]), order = 'F'))
+# #         plt.show()
+#     a_sum = np.sum(a, axis = 1) > 0
+#     U_crop = U[a_sum, :].dot(V.sum(axis = 1, keepdims = True))
+#     Yd_sum = np.sum(U_crop.flatten())
+    
+    
+#     ac_interm = a.dot(c.T.sum(axis = 1, keepdims = True))
+#     ac_sum = np.sum(ac_interm.flatten())
+    
+#     scale = Yd_sum / ac_sum
+#     scale /= scale_divisor
+    
 #     uv_mean = (U*((V.T).mean(axis=0,keepdims=True))).sum(axis=1,keepdims=True)
     
-    new_mask = dilate_mask(mask_a.reshape((dims[0], dims[1], -1), order = "F"), dilation_size = dilation)
+#     #Rescale ac based on above estimate
+#     c = c * scale
     
-#     for k in range(new_mask.shape[2]):
-#         plt.figure()
-#         plt.imshow(new_mask[:, :, k])
-#         plt.show()
-    new_mask = new_mask.reshape((dims[0]*dims[1], -1), order = "F")
+#     mask_a = (a > 0)*1
+#     b = b * scale
+# #     c = ls_solve_acc_ring(a, U - bg_basis, V.T, mask=None, beta_LS=c).T;
     
-    return a, b, c, new_mask
+# #     mask_a = (a>0)*1
+# #     for k in range(0):
+# #         bg_basis = b.dot((V.T).sum(axis = 0, keepdims = True))
+# #         c = ls_solve_acc_ring(a, U - bg_basis, V.T, mask=None, beta_LS=c).T;
+        
+# #         b = np.maximum(0, uv_mean-(a*(c.mean(axis=0,keepdims=True))).sum(axis=1,keepdims=True));
+# #         bg_basis = b.dot((V.T).sum(axis = 0, keepdims = True))
+        
+# #         a = ls_solve_ac(c, V.T, U - bg_basis, mask=mask_a.T, beta_LS=a).T;
+# #         b = np.maximum(0, uv_mean-(a*(c.mean(axis=0,keepdims=True))).sum(axis=1,keepdims=True));
+        
+    
+#     #Now perform a baseline update
+# #     uv_mean = (U*((V.T).mean(axis=0,keepdims=True))).sum(axis=1,keepdims=True)
+    
+#     new_mask = dilate_mask(mask_a.reshape((dims[0], dims[1], -1), order = "F"), dilation_size = dilation)
+    
+# #     for k in range(new_mask.shape[2]):
+# #         plt.figure()
+# #         plt.imshow(new_mask[:, :, k])
+# #         plt.show()
+#     new_mask = new_mask.reshape((dims[0]*dims[1], -1), order = "F")
+    
+#     return a, b, c, new_mask
   
 
 
@@ -2476,15 +2546,12 @@ def demix_whole_data_robust_ring_lowrank(U,V_PMD,r=10, cut_off_point=[0.95,0.9],
             print("prepare iteration!")
             
             print("time: " + str(time.time()-start));
-
-        elif init[ii] == 'custom' and ii == 0:
-            #Here we use custom-provided components
-            a_custom = custom_init['a'].copy()
-            c_custom = custom_init['c'].copy()
-            b_custom = custom_init['b'].copy()
-            a, b, c, mask_a = process_custom_signals(a_custom, c_custom, b_custom, U_used, V, dims, dilation = 1)
-
-        
+                
+        elif init[ii]=='custom' and ii == 0:
+            a_ini, mask_a, b, c_ini = process_custom_signals(custom_init['a'].copy(), U_sparse, V_PMD)
+            a = a_ini
+            c = c_ini
+       
         
 
         
