@@ -20,6 +20,17 @@ import matplotlib.ticker as ticker
 from localnmf import ca_utils
 
 
+#Multiprocessing utils
+import os
+import multiprocessing
+import functools
+import subprocess
+import shutil
+
+import time
+
+
+
 '''
 Provides figure generation for: 
 Simulated Data:
@@ -31,6 +42,53 @@ Demixing Videos
 - Standard video generation based on ring localNMF results
 - Generic, Customizable Video Generation
 '''
+
+
+
+def runpar(f, X, nprocesses=None, **kwargs):
+    '''
+    res = runpar(function,          # function to execute
+                 data,              # data to be passed to the function
+                 nprocesses = None, # defaults to the number of cores on the machine
+                 **kwargs)          # additional arguments passed to the function (dictionary)
+    '''
+    
+    #Change affinity (if needed) to enable full multicore processing
+    
+    
+    val = len(os.sched_getaffinity(os.getpid()))
+    print("the CPU affinity BEFORE runpar is {}".format(val))
+
+    if nprocesses is None:
+        nprocesses = int(multiprocessing.cpu_count()) 
+        print("the number of processes is {}".format(nprocesses))
+#         val = len(os.sched_getaffinity(os.getpid()))
+#         print('the number of usable cpu cores is {}'.format(val))
+    
+    with multiprocessing.Pool(initializer=parinit, processes=nprocesses) as pool:
+        res = pool.map(functools.partial(f, **kwargs), X)
+    pool.join()
+    pool.close()
+
+
+    val = len(os.sched_getaffinity(os.getpid()))
+    print("after the multicore, the affinity is {}".format(val))
+
+    num_cpu = multiprocessing.cpu_count()
+    os.system('taskset -cp 0-%d %s' % (num_cpu, os.getpid()))
+    val = len(os.sched_getaffinity(os.getpid()))
+    print("the cpu affinity after the process (intro fix) is {}".format(val))
+    return res
+
+def parinit():
+    import os
+    os.environ['MKL_NUM_THREADS'] = "1"
+    os.environ['OMP_NUM_THREADS'] = "1"
+    os.environ['OPENBLAS_NUM_THREADS'] = '1'
+
+    num_cpu = multiprocessing.cpu_count()
+    os.system('taskset -cp 0-%d %s' % (num_cpu, os.getpid()))
+
 
 
 
@@ -1016,16 +1074,17 @@ def generate_movie_maxproj(a_use, c_use, dims, random_values, slice_val=2,seed=9
 
 
 
+
 def write_mpl_no_compress_comparisons(mov_list, 
               filename, img_types,
               fr=3, 
-              titles=None, scale=1, titlesize=20, ticksize=14, colorticksize=12, width_const = 4):
+              titles=None, scale=1, titlesize=20, ticksize=14, colorticksize=12, width_const = 4, offset = 0):
     """ Functionality to create customized triptych demixing videos
     Args:
         mov_list: list of movies to be included in triptych
         filename: desired filename of triptych file
         img_types: list of integers. For each movie, this list describes its image type (RGB, grayscale, etc.)
-            value of 0 indicates grayscale, 1 indicates RGB
+            value of 1 indicates grayscale, 2 indicates RGB
         fr: frame rate (used for FFMPEG video generation)
         titles: list, strings. List of titles for each movie
         scale: integer. This function generates all frames which are a multiple of scale. Scale = 1 means all frames included in triptych.
@@ -1038,82 +1097,78 @@ def write_mpl_no_compress_comparisons(mov_list,
     T = mov_list[0].shape[2]
     if titles is None:
         titles = ['']*n_mov
+        
+    for mdx, mov in enumerate(mov_list):
+        if img_types[mdx] == 1:
+            mov_list[mdx] -= np.amin(mov_list[mdx], axis = 2, keepdims = True)
     
     #Compute scales
     mins = np.empty(n_mov)
     maxs = np.empty(n_mov)
+    print("GETTING MOVIE")
     for mdx, mov in enumerate(mov_list):
-        mins[mdx] = np.min(mov)
-        maxs[mdx] = np.max(mov)
+        print(mdx)
+        print(mov[mdx].shape)
+        mins[mdx] = np.min(mov) 
+        maxs[mdx] = np.max(mov) 
     realmin = np.amin(mins)
     realmax = np.amax(maxs)
 
-    # Create tmp directory as workspace
-    if not os.path.exists('tmp'):
-        os.makedirs('tmp')
+    # Decide where to save intermediate results
+    start_directory = os.getcwd()
+    
+    if os.path.exists('tmp'):
+        raise FileExistsError("Remove the tmp directory before running this visualization code")
+    else:
+        save_directory = 'tmp'
+        os.makedirs(save_directory)
         delete_tmp = True
 
+    start = time.time()
     # Plot & Save Frames
     T = int(np.floor(T/scale))
-    for i in range(T):
-        t = scale*i
-        print(t)
-        first_mov = mov_list[0]
-        max_scale = np.amax(first_mov[:, :, t])
-        min_scale = np.amin(first_mov[:, :, t])
-        
-        gs = gridspec.GridSpec(2, ceil(n_mov/2), height_ratios=(1,1), width_ratios=(tuple([1 for i in range(ceil(n_mov/2))])))
-        fig = plt.figure(figsize=(width_const*n_mov,11))
-
-        
-        # Display Current Frame From Each Mov
-        for mdx, mov in enumerate(mov_list):
-            oddness = (mdx) % 2
-            ax = fig.add_subplot(gs[oddness,  mdx//2])
-            divider = make_axes_locatable(ax)
-
-            # Display standard grayscale image
-            if img_types[mdx] == 1:
-                im = ax.imshow(mov[:,:,t], vmin=mins[mdx], vmax=maxs[mdx])
-                divider = make_axes_locatable(ax)
-                cax = divider.append_axes('right', size='5%', pad=0.05)
-                cbar = fig.colorbar(im, cax=cax, orientation='vertical')
-                
-
-                if mdx % 2 == 0:
-                    ax.set_xticklabels([])
-                else:
-                    for tick in ax.xaxis.get_major_ticks():
-                        tick.label.set_fontsize(ticksize) 
-                    cbar.ax.tick_params(labelsize=colorticksize)
-                if mdx > 1:
-                    ax.set_yticklabels([])
-                else:
-                    for tick in ax.yaxis.get_major_ticks():
-                        tick.label.set_fontsize(ticksize)
-                    cbar.ax.tick_params(labelsize=colorticksize)
-                    
-            
-            elif img_types[mdx] == 2: #We display color image
-                im = ax.imshow(mov[:,:,:,t])
-                if mdx > 1: 
-                    ax.set_yticklabels([])
-                if mdx % 2 == 0:
-                    ax.set_xticklabels([])
-            
-            if mdx == 0:
-                ax.set_title(titles[mdx] + " Frame:{}".format(t), fontsize=titlesize)
-            else:
-                ax.set_title(titles[mdx], fontsize=titlesize)
-                
-        # Save Figure As PNG
-        plt.savefig(os.path.join("tmp", filename + "%04d.png" % i))
-        
-        # Close Figure
-        plt.close('all')
-        
+    data_list = []
+    batch_limit = 500
+    count = 0 
     
-    os.chdir("tmp")
+    
+    
+    for i in range(T):
+        temp_mov_list = []
+        t = scale * i
+        for mdx, mov in enumerate(mov_list):
+            if img_types[mdx] == 2: 
+                temp_mov_list.append(mov_list[mdx][:, :, :, [t]])
+            elif img_types[mdx] == 1:
+                temp_mov_list.append(mov_list[mdx][:, :, [t]])
+            else:
+                print("INVALID IMG TYPE PROVIDED")
+        curr_data = dict()
+        curr_data['mov_list'] = temp_mov_list
+        curr_data['titles'] = titles
+        curr_data['img_types'] = img_types
+        curr_data['mins'] = mins
+        curr_data['maxs'] = maxs
+        curr_data['i'] = i
+        curr_data['scale'] = scale
+        curr_data['width_const'] = width_const
+        curr_data['ticksize'] = ticksize
+        curr_data['colorticksize'] = colorticksize
+        curr_data['titlesize'] = titlesize
+        curr_data['save_directory'] = save_directory
+        curr_data['filename'] = filename
+        curr_data['offset'] = offset
+        data_list.append(curr_data)
+        
+        count += 1
+        if count == batch_limit or i == T-1:
+            count = 0
+            runpar(make_frame_par, data_list)
+            data_list = []
+       
+    print('Generating the files took this many seconds: {}'.format(time.time() - start))
+    
+    os.chdir(save_directory)
     
     # Call FFMPEG to compile PNGs
     subprocess.call(['ffmpeg',
@@ -1125,13 +1180,93 @@ def write_mpl_no_compress_comparisons(mov_list,
                  filename + '.mp4'])
     
     #Move the .png file out of the folder and delete the folder
-    shutil.copy2(filename + ".mp4", "..")
-    os.chdir("..")
-    shutil.rmtree('tmp')
+    shutil.copy2(filename + ".mp4", start_directory)
+    os.chdir(start_directory)
+    shutil.rmtree(save_directory)
+
+def make_frame_par(curr_data):
+    '''
+    Helper function for generating the frames of the MP4 file
+    '''
+    
+    mov_list = curr_data['mov_list']
+    titles = curr_data['titles'] 
+    img_types = curr_data['img_types'] 
+    mins = curr_data['mins']
+    maxs = curr_data['maxs']
+    i = curr_data['i']
+    scale = curr_data['scale']
+    width_const = curr_data['width_const']
+    ticksize = curr_data['ticksize']
+    colorticksize = curr_data['colorticksize']
+    titlesize = curr_data['titlesize']
+    save_directory = curr_data['save_directory']
+    filename = curr_data['filename']
+    offset_frame = curr_data['offset']
     
     
-    
-    
+    n_mov = len(mov_list)
+    t = scale*i
+    first_mov = mov_list[0]
+    max_scale = np.amax(first_mov[:, :, 0])
+    min_scale = np.amin(first_mov[:, :, 0])
+
+    gs = gridspec.GridSpec(2, ceil(n_mov/2), height_ratios=(1,1), width_ratios=(tuple([1 for i in range(ceil(n_mov/2))])))
+    fig = plt.figure(figsize=(width_const*n_mov,11))
+
+
+    # Display Current Frame From Each Mov
+    # print("we reached start of inner for loop")
+    for mdx, mov in enumerate(mov_list):
+        oddness = (mdx) % 2
+        ax = fig.add_subplot(gs[oddness,  mdx//2])
+        divider = make_axes_locatable(ax)
+
+        # Display standard grayscale image
+        if img_types[mdx] == 1:
+            im = ax.imshow(mov[:,:,0], vmin=mins[mdx], vmax=maxs[mdx])
+            divider = make_axes_locatable(ax)
+            cax = divider.append_axes('right', size='5%', pad=0.05)
+            cbar = fig.colorbar(im, cax=cax, orientation='vertical')
+
+
+            if mdx % 2 == 0:
+                ax.set_xticklabels([])
+            else:
+                for tick in ax.xaxis.get_major_ticks():
+                    tick.label.set_fontsize(ticksize) 
+                cbar.ax.tick_params(labelsize=colorticksize)
+            if mdx > 1:
+                ax.set_yticklabels([])
+            else:
+                for tick in ax.yaxis.get_major_ticks():
+                    tick.label.set_fontsize(ticksize)
+                cbar.ax.tick_params(labelsize=colorticksize)           
+                
+        elif img_types[mdx] == 2: #We display color image
+            im = ax.imshow(mov[:,:,:,0])
+            if mdx > 1: 
+                ax.set_yticklabels([])
+            if mdx % 2 == 0:
+                ax.set_xticklabels([])
+            divider = make_axes_locatable(ax)
+            cax = divider.append_axes('right', size='5%', pad=0.05)
+            cbar = fig.colorbar(im, cax=cax, orientation='vertical')
+            cbar.remove()
+
+        if mdx == 0:
+            ax.set_title(titles[mdx] + " Frame:{}".format(t + offset_frame), fontsize=titlesize)
+        else:
+            ax.set_title(titles[mdx], fontsize=titlesize)
+
+    # Save Figure As PNG
+    plt.tight_layout()
+    plt.savefig(os.path.join(save_directory, filename + "%04d.png" % i))
+
+
+    # Close Figure
+    plt.close('all')
+  
     
 def standard_demix_vid(rlt, mov_raw, mov_denoised, filename, fr=30, \
               titles=None, threshold = [], scale=1, titlesize=20, ticksize=14, colorticksize=12, a_real = None, c_real = None, \
