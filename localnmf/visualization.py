@@ -1099,8 +1099,8 @@ def write_mpl_no_compress_comparisons(mov_list,
         titles = ['']*n_mov
         
     for mdx, mov in enumerate(mov_list):
-        if img_types[mdx] == 1:
-            mov_list[mdx] -= np.amin(mov_list[mdx], axis = 2, keepdims = True)
+        if img_types[mdx] == 1 and mdx < len(mov_list) - 2:
+            mov_list[mdx] -= np.amin(mov_list[mdx])
     
     #Compute scales
     mins = np.empty(n_mov)
