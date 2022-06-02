@@ -6,7 +6,7 @@ with open("README.md", "r") as fh:
 
 setuptools.setup(
     name="rlocalnmf",
-    version="0.0.2",
+    version="0.0.4",
     description="New implementation of localnmf with advanced background models and initialization options",
     packages=setuptools.find_packages(),
     install_requires=["numpy", "scipy","cvxpy","Cython", "networkx","scikit-learn", "torch", "matplotlib", "opencv-python", "scikit-image"],
