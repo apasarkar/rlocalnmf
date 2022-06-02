@@ -10,7 +10,6 @@ def baseline_update(uv_mean, a, c):
     '''
     
     b = uv_mean-(a*(c.mean(axis=0,keepdims=True))).sum(axis=1,keepdims=True)
-    b[b<0] = 0
     return b
           
 
