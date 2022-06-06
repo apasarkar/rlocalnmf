@@ -361,11 +361,104 @@ def update_ring_model_w_const(U_sparse, R, V, A, X, b, W, d1, d2, T, r, mask_a=N
     
     print("A_sum at {}".format(time.time() - start_time))
     
-    W = update_w_1p_const(U_sparse, R, V, W.tocsr(), X, b, A_sparse, A_sum, d1, d2, batch_size = batch_size) #For now leave out batch size..
-    return W
-     
 
-def update_w_1p_const(U_sparse, R, V, W, X, b, A_sparse, A_sum, d1, d2, batch_size = 10000):
+    W = update_w_1p_const(U_sparse, R, V, W.tocsr(), X, b, A_sparse, A_sum, d1, d2, batch_size = batch_size)
+    return W
+ 
+    
+    
+def update_w_1p_const(U_sparse, R, V, W, X, b, A_sparse, A_sum, d1, d2, batch_size = 10000, num_samples=1000):
+    """Constant Ring Model codebase 
+    params:
+        U_sparse: scipy.sparse.csr_matrix. Dimensions d x r
+        R: np.ndarray. Dimensions r x r
+        V: np.ndarray. Dimensions r x T
+        W: scipy.sparse.csr_matrix. Dimensions d x d
+        A_sparse: scipy.sparse.csr_matrix. Dimensions d x k (k neurons)
+        A_sum: the "summed" A onto 1 plane
+        d1: x axis frame size
+        d2: y axis frame size
+        batch_size: number of ring indices to simultaneously update
+    return:
+        W: Sparse matrix (d x d) representing ring weights
+    
+    This is the CONST pipeline
+    """
+    first_time = time.time()
+    d = d1 * d2
+    weights = np.zeros((d, 1))
+
+    iters = math.ceil(d / batch_size)
+    
+    start_time = time.time()
+    #Preprocess W
+    print("WE ARE IN THE SPATIAL W")
+    W = W.tocoo()
+    rows, cols, values = (W.row, W.col, W.data)
+    indices = (values > 0)
+    rows = rows[indices]
+    cols = cols[indices]
+    values[indices] = 1
+    values = values[indices]
+    
+    #Turn off pixels in columns in which neurons are active
+    support = (A_sum > 0)
+    intersection = support[cols]
+    inter_keep = (intersection == 0)
+    
+    rows = rows[inter_keep]
+    cols = cols[inter_keep]
+    values = values[inter_keep]
+    
+    W = coo_matrix((values, (rows, cols)), shape = (d,d))
+    W = W.tocsr() #Convert to csr for quick multiply
+    print("THE NUMBER OF NONZERO HERE IS {}".format(W.count_nonzero()))
+    W.eliminate_zeros()
+    
+    sampled_indices = np.random.choice(V.shape[1], size=num_samples, replace=False)
+    V_crop = V[:, sampled_indices]
+    
+    #Option: Can trivially use accelerated software/hardware for below code
+    
+    print("The number of nonzero U elements is {} and size of mat is {}".format(U_sparse.count_nonzero(), np.prod(U_sparse.shape)))
+    RV = R.dot(V_crop)
+    URV = U_sparse.dot(RV)
+    # WURV = W.dot(URV)
+    
+    XV  = X.dot(V_crop)
+    AXV = A_sparse.dot(XV)
+    # WAXV = W.dot(AXV)
+    
+    # Wb = W.dot(b)
+    # sV = s.dot(V_crop)
+    # bsV = b.dot(sV)
+    # WbsV = Wb.dot(sV)
+    
+    
+    R_movie = URV - AXV - b
+    WR_movie = W.dot(R_movie)
+    
+    denominator = np.sum(WR_movie * WR_movie, axis = 1)
+    numerator = np.sum(WR_movie * R_movie, axis=1)
+    
+    values = np.nan_to_num(numerator/denominator, nan=0.0, posinf=0.0, neginf=0.0)
+    values[values < 0] = 0
+           
+    #Add weights
+    weights = values
+    
+    #Create new CSR matrix   
+    pos = W.nonzero()
+    rows = pos[0]
+    values = weights[rows]
+    W = csr_matrix((values.squeeze(), (pos[0], pos[1])), shape = (d, d))
+    
+    print("we are done. took {}".format(time.time() - first_time))
+    return W.tocoo()
+
+
+
+def update_w_1p_const_orig(U_sparse, R, V, W, X, b, A_sparse, A_sum, d1, d2, batch_size = 10000):
     """Constant Ring Model codebase 
     params:
         U_sparse: scipy.sparse.csr_matrix. Dimensions d x r
