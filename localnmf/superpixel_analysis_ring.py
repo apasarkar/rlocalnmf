@@ -2456,9 +2456,8 @@ def demix_whole_data_robust_ring_lowrank(U,V_PMD,r=10, cut_off_point=[0.95,0.9],
     V, R = orthogonalize_UV(V_PMD, device=device) #Now we use U_sparse * R * V as our representation
     
     ##TODO: Eliminate U_used entirely and use (U_sparse, R instead)
-    U_used = np.zeros((U_sparse.shape[0], R.shape[1]))
-    if not plot_en:
-        del U_used
+    if plot_en:
+        U_used = U_sparse.dot(R)
     
     superpixel_rlt = [];
     
@@ -2529,7 +2528,6 @@ def demix_whole_data_robust_ring_lowrank(U,V_PMD,r=10, cut_off_point=[0.95,0.9],
                 c = np.hstack((c, c_ini));
             elif ii == 0:
                 a, c, brightness_rank = prepare_iteration_UV((dims[0], dims[1], T), connect_mat_1, permute_col, pure_pix, a_ini, c_ini, more=True);
-#                 uv_mean = (U_used*((V.T).mean(axis=0,keepdims=True))).sum(axis=1,keepdims=True);
                 uv_mean = U_sparse.dot(R.dot(V.mean(axis = 1, keepdims = True))) #Pixel-wise mean
                 b = regression_update.baseline_update(uv_mean, a, c)
             
