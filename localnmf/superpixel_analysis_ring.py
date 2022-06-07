@@ -2002,20 +2002,30 @@ def process_custom_signals(a_init, U_sparse, V):
 #     return a, b, c, new_mask
   
 
-
-def orthogonalize_UV(U, V):
+def orthogonalize_UV(V, device='cpu'):
     """
-    U: scipy.sparse.csr matrix, dimensions (d x R)
+    U: scipy.sparse.coo matrix, dimensions (d x R)
     V: np.ndarray, dimensions (R x T)
     
+    Returns: 
+    Rt: ndarray of size (R, min(R, T))
+    Qt: ndarray of size (min(R, T), T)
+        Key: Rt.dot(Qt) yields V 
+    
     """
+    
     print("Orthogonalizing UV")
     start_time = time.time()
-    Q, R = np.linalg.qr(V.T) #Now UV = U(R^t)(Q^t)
-    U_orth = U.dot(R.T)
-    V = Q.T 
+    V_torch = torch.from_numpy(V).float().to(device)
+    V_torch = V_torch.t()
+    Q, R = torch.linalg.qr(V_torch, mode='reduced')
+    Qt = Q.cpu().numpy().T
+    Rt = R.cpu().numpy().T
+    
     print("Orthogonalization took {}".format(time.time() - start_time))
-    return U_orth, V, R.T
+    
+    return Qt, Rt
+
 
 
 def scipy_coo_to_torch_coo(scipy_coo_mat):
@@ -2443,8 +2453,10 @@ def demix_whole_data_robust_ring_lowrank(U,V_PMD,r=10, cut_off_point=[0.95,0.9],
     V_PMD = np.hstack((V_PMD.T, -1*np.ones((V_PMD.shape[1], 1)))).T
     
     
-    U_used, V, R = orthogonalize_UV(U_sparse, V_PMD)   
+    V, R = orthogonalize_UV(V_PMD, device=device) #Now we use U_sparse * R * V as our representation
     
+    ##TODO: Eliminate U_used entirely and use (U_sparse, R instead)
+    U_used = np.zeros((U_sparse.shape[0], R.shape[1]))
     if not plot_en:
         del U_used
     
