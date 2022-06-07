@@ -2018,58 +2018,53 @@ def orthogonalize_UV(U, V):
     return U_orth, V, R.T
 
 
+def scipy_coo_to_torch_coo(scipy_coo_mat):
+    values = scipy_coo_mat.data
+    indices = np.vstack((scipy_coo_mat.row, scipy_coo_mat.col))
+    i = torch.LongTensor(indices)
+    v = torch.FloatTensor(values)
+    shape = scipy_coo_mat.shape
 
+    return torch.sparse.FloatTensor(i, v, torch.Size(shape))
 
-#Define min_subtraction function
-def get_min_vals_torch(U, V, device = 'cpu', batch_size = 10000):
-    '''
-    Function which min_subtracts the product UV
-    params: 
-        U: np.ndarray. d x R matrix
-        V: np.ndarray. R x T matrix
-        device: the device on which these computations will be executed (as defined in PyTorch)
-        batch_size: 
-    '''
+def get_min_vals(U_sparse, V, batch_size=1000, device='cpu'):
+    '''Wrapper for pytorch function
+    Extracts minimum values of U_sparse * V
     
-    batch_values = math.ceil(U.shape[0]/batch_size)
-    V_t = torch.from_numpy(V).float().to(device)
-    prod_vals = np.zeros((U.shape[0],1))
-    for j in range(batch_values):
-        start = j*batch_size
-        end = start + batch_size
-        U_t = torch.from_numpy(U[start:end, :]).float().to(device)
-        prod_orig = torch.matmul(U_t, V_t)
-        prod = torch.min(prod_orig, dim = 1)[0]
-        prod_store = prod.to('cpu').detach().numpy().astype("double")
-        prod_vals[start:end,0] = prod_store
-    torch.cuda.empty_cache()
-
-    return prod_vals
-        
-    
-def get_min_vals(U_sparse, V, batch_size = 10000):
+    Inputs: 
+        U_sparse: Sparse (d1*d2, R) shape scipy.sparse.coo_matrix object. 
+        V: (R, T) shape np.ndarray
+        batch_size: Number of frames we expand 
     '''
-    Function which calculates the pixel-wise minimum of every pixel in the movie, U_sparse * V
-    params: 
-        U_sparse: scipy.sparse.csr_matrix. d x r matrix
-        V: np.ndarray. r x d matrix
-        batch_size: number of pixels to use at a time
-    '''
+    print("Get min vals pytorch wrapper")
     start_time = time.time()
-    d = U_sparse.shape[0]
-    min_vals = np.zeros((d, 1))
-    batches = math.ceil(d/batch_size)
-    for k in range(batches):
-        start = k*batch_size
-        end = start+batch_size
-        U_crop = U_sparse[start:end, :]
-        UV_crop = U_crop.dot(V)
-        UV_crop_min = np.amin(UV_crop, axis = 1, keepdims = True)
-        
-        min_vals[start:end, :] = UV_crop_min
-        
-    print("took {} seconds to find min_vals".format(time.time() - start_time))
-    return min_vals
+    U_sparse_torch = scipy_coo_to_torch_coo(U_sparse).to(device)
+    V_torch = torch.from_numpy(V).float().to(device)
+    
+    mins = get_min_vals_pytorch(U_sparse_torch, V_torch, batch_size=batch_size).cpu().numpy()
+    print("that took {}".format(time.time() - start_time))
+    return mins
+
+def get_min_vals_pytorch(U_sparse_torch, V_torch, batch_size=1000):
+    
+    print("get_min_valspytorch")
+    start_time = time.time()
+    iters = math.ceil(V_torch.shape[1]/batch_size)
+
+    
+    final_tensor = torch.zeros(U_sparse_torch.shape[0],0, device=U_sparse_torch.device )
+    for k in range(iters):
+        start = batch_size*k
+        end = start + batch_size
+        data = V_torch[:, start:end]
+        prod = torch.sparse.mm(U_sparse_torch, data)
+        min_prod = torch.min(prod, dim=1, keepdim=True)[0]
+        final_tensor = torch.hstack((final_tensor, min_prod))
+
+    print("the internal part took {}".format(time.time() - start_time))
+    return torch.min(final_tensor, dim=1, keepdim=True)[0]
+
+
 
 def get_median(tensor, axis):
     max_val = torch.max(tensor, dim=axis, keepdim=True)[0]
@@ -2442,8 +2437,8 @@ def demix_whole_data_robust_ring_lowrank(U,V_PMD,r=10, cut_off_point=[0.95,0.9],
     ## if data has negative values then do pixel-wise minimum subtraction ##
     
     
-    U_sparse = ca_utils.construct_sparse(U_used).tocsr()
-    min_vals = get_min_vals(U_sparse, V_PMD, batch_size = batch_size)
+    U_sparse = ca_utils.construct_sparse(U_used)#.tocsr()
+    min_vals = get_min_vals(U_sparse, V_PMD, batch_size = batch_size, device=device)
     U_sparse = scipy.sparse.hstack([U_sparse.tocsc(), min_vals], format = 'csc').tocsr()
     V_PMD = np.hstack((V_PMD.T, -1*np.ones((V_PMD.shape[1], 1)))).T
     
