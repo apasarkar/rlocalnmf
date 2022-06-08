@@ -1,6 +1,13 @@
 import scipy.sparse
 import numpy as np
+import torch
 import time
+
+
+def fast_matmul(a, b, device='cuda'):
+    a_torch = torch.from_numpy(a).to(device)
+    b_torch = torch.from_numpy(b).to(device)
+    return torch.mm(a_torch, b_torch).cpu().numpy()
 
 
 def baseline_update(uv_mean, a, c):
@@ -28,9 +35,22 @@ def estimate_X(c, V, VVt):
     x, _, _, _ = np.linalg.lstsq(VVt.T,cV.T)
     return x.T
 
+def sparse_coo_threshold(a, threshold=0):
+    data = a.data
+    rows = a.row
+    cols = a.col
+    good_indices = data >= threshold
+    
+    data_new = data[good_indices]
+    rows_new = a.row[good_indices]
+    cols_new = a.col[good_indices]
+    
+    a.data = data_new
+    a.row = rows_new
+    a.col = cols_new
+    return a
 
-
-def spatial_update_HALS(U_sparse, V, W, X, a, c, b, mask_ab = None):
+def spatial_update_HALS(U_sparse, V, W, X, a, c, b, device='cpu', mask_ab = None):
     '''
     Computes a temporal HALS updates: 
     Params: 
@@ -49,9 +69,12 @@ def spatial_update_HALS(U_sparse, V, W, X, a, c, b, mask_ab = None):
     
     #Precompute relevant quantities
     start_time = time.time()
-    C_prime = c.T.dot(c) #Ouput: k x k matrix (low-rank)
-    cV = c.T.dot(V.T) #Output: k x R matrix (low-rank)
-    cVX = cV.dot(X.T)
+    # C_prime = c.T.dot(c) #Ouput: k x k matrix (low-rank)
+    C_prime = fast_matmul(c.T, c, device=device) #Output: k x k matrix (low-rank)
+    cV = fast_matmul(c.T, V.T, device=device)
+    # cV = c.T.dot(V.T) #Output: k x R matrix (low-rank)
+    cVX = fast_matmul(cV, X.T, device=device)
+    # cVX = cV.dot(X.T)
     
     a_sparse = scipy.sparse.csr_matrix(a)
     
@@ -127,13 +150,16 @@ def spatial_update_HALS(U_sparse, V, W, X, a, c, b, mask_ab = None):
         rows = np.argwhere(ind>0)
         col = [i for k in range(len(values))]
         a_sparse = a_sparse.tocoo()
+        
         a_sparse.data = np.append(a_sparse.data, values)
         a_sparse.row = np.append(a_sparse.row, rows)
         a_sparse.col = np.append(a_sparse.col, col)
+        
+        a_sparse = sparse_coo_threshold(a_sparse, 0)
         a_sparse = a_sparse.tocsr()
         
         ##TODO: make this faster: 
-        a_sparse[a_sparse < 0] = 0
+        # a_sparse[a_sparse < 0] = 0
         
         
         
