@@ -2038,43 +2038,27 @@ def scipy_coo_to_torch_coo(scipy_coo_mat):
 
     return torch.sparse.FloatTensor(i, v, torch.Size(shape))
 
-def get_min_vals(U_sparse, V, batch_size=1000, device='cpu'):
-    '''Wrapper for pytorch function
-    Extracts minimum values of U_sparse * V
-    
-    Inputs: 
-        U_sparse: Sparse (d1*d2, R) shape scipy.sparse.coo_matrix object. 
-        V: (R, T) shape np.ndarray
-        batch_size: Number of frames we expand 
-    '''
-    print("Get min vals pytorch wrapper")
-    start_time = time.time()
-    U_sparse_torch = scipy_coo_to_torch_coo(U_sparse).to(device)
-    V_torch = torch.from_numpy(V).float().to(device)
-    
-    mins = get_min_vals_pytorch(U_sparse_torch, V_torch, batch_size=batch_size).cpu().numpy()
-    print("that took {}".format(time.time() - start_time))
-    return mins
 
-def get_min_vals_pytorch(U_sparse_torch, V_torch, batch_size=1000):
+
+def get_min_vals(U_sparse, V, batch_size = 1000, device = 'cpu'):
     
-    print("get_min_valspytorch")
-    start_time = time.time()
+    U_sparse_torch = scipy_coo_to_torchsparse_coo(U_sparse).to(device)
+    V_torch = torch.Tensor(V).to(device)
+    
     iters = math.ceil(V_torch.shape[1]/batch_size)
-
+    final_tensor = torch.zeros(U_sparse.shape[0],0, device=device)
     
-    final_tensor = torch.zeros(U_sparse_torch.shape[0],0, device=U_sparse_torch.device )
     for k in range(iters):
         start = batch_size*k
         end = start + batch_size
         data = V_torch[:, start:end]
-        prod = torch.sparse.mm(U_sparse_torch, data)
+        prod = torch_sparse.matmul(U_sparse_torch, data)
         min_prod = torch.min(prod, dim=1, keepdim=True)[0]
         final_tensor = torch.hstack((final_tensor, min_prod))
 
-    print("the internal part took {}".format(time.time() - start_time))
-    return torch.min(final_tensor, dim=1, keepdim=True)[0]
 
+    
+    return torch.min(final_tensor, dim=1, keepdim=True)[0].cpu().numpy()
 
 
 def get_median(tensor, axis):
@@ -2325,183 +2309,6 @@ def find_superpixel_UV(U_sparse, V, dims, cut_off_point, length_cut, th, eight_n
     connect_mat_1 = connect_mat.reshape(dims[0],dims[1],order='F');
     return connect_mat_1, idx, comps, permute_col
 
-
-# def find_superpixel_UV(U_sparse, V, dims, cut_off_point, length_cut, th, eight_neighbours=True, \
-#                         device = 'cuda', a = None, c = None, batch_size = 10000, pseudo = 0, tol = 0.000001):
-#     """
-#     Find superpixels in Yt.  For each pixel, calculate its correlation with neighborhood pixels.
-#     If it's larger than threshold, we connect them together.  In this way, we form a lot of connected components.
-#     If its length is larger than threshold, we keep it as a superpixel.
-#     Parameters:
-#     ----------------
-#     Yt: 3d np.darray, dimension d1 x d2 x T
-#         thresholded data
-#     cut_off_point: double scalar
-#         correlation threshold
-#     length_cut: double scalar
-#         length threshold
-#     eight_neighbours: Boolean
-#         Use 8 neighbors if true.  Defalut value is True.
-#     Return:
-#     ----------------
-#     connect_mat_1: 2d np.darray, d1 x d2
-#         illustrate position of each superpixel.
-#         Each superpixel has a random number "indicator".  Same number means same superpixel.
-#     idx: double scalar
-#         number of superpixels
-#     comps: list, length = number of superpixels
-#         comp on comps is also list, its value is position of each superpixel in Yt_r = Yt.reshape(np.prod(dims[:2]),-1,order="F")
-#     permute_col: list, length = number of superpixels
-#         all the random numbers used to idicate superpixels in connect_mat_1
-#     """
-
-#     dims = (dims[0], dims[1], V.shape[1])
-#     T = V.shape[1]
-#     ref_mat = np.arange(np.prod(dims[:-1])).reshape(dims[:-1],order='F')
-    
-#     if a is not None and c is not None: 
-#         resid_flag = True
-#     else:
-#         resid_flag = False
-        
-    
-#     tiles = math.floor(math.sqrt(batch_size))
-    
-#     iters_x = math.ceil((dims[0]/(tiles-1)))
-#     iters_y = math.ceil((dims[1]/(tiles-1)))
-    
-    
-#     if resid_flag: 
-#         a_sparse = scipy.sparse.csr_matrix(a)
-        
-    
-    
-#     #Pixel-to-pixel coordinates for highly-correlated neighbors
-#     A_indices = []
-#     B_indices = []
-    
-#     for tile_x in range(iters_x):
-#         for tile_y in range(iters_y):
-#             x_pt = (tiles-1)*tile_x
-#             x_end = x_pt + tiles
-#             y_pt = (tiles - 1)*tile_y
-#             y_end = y_pt + tiles
-            
-#             indices_curr_2d = ref_mat[x_pt:x_end, y_pt:y_end]
-#             x_interval = indices_curr_2d.shape[0]
-#             y_interval = indices_curr_2d.shape[1]
-#             indices_curr = indices_curr_2d.reshape((x_interval*y_interval,), order = "F")
-            
-#             ##REMOVE THIS: 
-#             # np.savez("find_superpixel_UV_port.npz", U_sparse = U_sparse, V = V, x_interval = x_interval, y_interval=y_interval,\
-#             #          indices_curr = indices_curr, cut_off_point=cut_off_point, length_cut=length_cut, th=th,pseudo=pseudo, allow_pickle=True)
-#             # input()
-#             Yd = U_sparse[indices_curr, :].dot(V).reshape((x_interval,y_interval, -1), order = "F")
-#             if resid_flag:
-#                 ac_mov = a_sparse[indices_curr, :].dot(c.T)
-#                 ac_mov = ac_mov.reshape((x_interval, y_interval, -1), order = "F")
-#                 Yd -= ac_mov
-            
-#             print("{}{}".format(tile_x, tile_y))
-                
-#             Yd = torch.from_numpy(Yd).to(device)   
-            
-#             #Get MAD-thresholded movie in-place
-#             Yd = threshold_data_inplace(Yd, th)
-            
-#             #Permute the movie
-#             Yd = Yd.permute(2,0,1)
-            
-#             #Normalize each trace in-place, using robust correlation statistic
-#             torch.sub(Yd, torch.mean(Yd, dim=0, keepdim = True), out = Yd)
-#             divisor = torch.std(Yd, dim = 0, unbiased = False, keepdim = True)
-#             final_divisor = torch.sqrt(divisor*divisor + pseudo**2)
-            
-#             #If divisor is 0, that implies that the std of a 0-mean pixel is 0, whcih means the 
-#             #pixel is 0 everywhere. In this case, set divisor to 1, so Yd/divisor = 0, as expected
-#             final_divisor[divisor < tol] = 1  #Temporarily set all small values to 1..
-#             torch.reciprocal(final_divisor, out=final_divisor)
-#             final_divisor[divisor < tol] = 0  ##Now set these small values to 0
-            
-#             torch.mul(Yd, final_divisor, out = Yd)
-           
-#             #Vertical pixel correlations
-#             rho = torch.mean(Yd[:, :-1, :] * Yd[:, 1:, :], dim = 0)
-#             print("vertical. after the elt wise mult, rho shape is {}".format(rho.shape))
-#             rho = torch.cat( (rho,torch.zeros([1, rho.shape[1]]).double().to(device)), dim = 0)
-#             temp_rho = rho.cpu().numpy()
-#             temp_indices = np.where(temp_rho > cut_off_point)
-#             A_curr = ref_mat[(temp_indices[0] + x_pt, temp_indices[1] + y_pt)]
-#             B_curr = ref_mat[(temp_indices[0] + x_pt + 1, temp_indices[1] + y_pt)]
-#             A_indices.append(A_curr)
-#             B_indices.append(B_curr)
-            
-            
-#             #Horizonal pixel correlations
-#             rho = torch.mean(Yd[:, :, :-1] * Yd[:, :, 1:], dim = 0)
-#             print("horizontal. after the element-wise multiply, rrho shape is {}".format(rho.shape))
-#             rho = torch.cat( (rho,torch.zeros([rho.shape[0], 1]).double().to(device)), dim = 1)
-#             temp_rho = rho.cpu().numpy()
-#             print("the shape of rho in horizonttal is {}".format(temp_rho.shape))
-#             temp_indices = np.where(temp_rho > cut_off_point)
-#             A_curr = ref_mat[(temp_indices[0] + x_pt, temp_indices[1] + y_pt)]
-#             B_curr = ref_mat[(temp_indices[0] + x_pt, temp_indices[1] + y_pt + 1)]
-#             A_indices.append(A_curr)
-#             B_indices.append(B_curr)
-            
-#             if eight_neighbours:
-#                 #Right-sided pixel correlations
-#                 rho = torch.mean(Yd[:, :-1, :-1]*Yd[:, 1:, 1:], dim=0)
-#                 rho = torch.cat((rho, torch.zeros([rho.shape[0],1]).double().to(device)), dim=1)
-#                 rho = torch.cat((rho, torch.zeros([1, rho.shape[1]]).double().to(device)), dim=0)
-#                 temp_rho = rho.cpu().numpy()
-#                 temp_indices = np.where(temp_rho > cut_off_point)
-#                 A_curr = ref_mat[(temp_indices[0] + x_pt, temp_indices[1] + y_pt)]
-#                 B_curr = ref_mat[(temp_indices[0] + x_pt + 1, temp_indices[1] + y_pt + 1)]
-#                 A_indices.append(A_curr)
-#                 B_indices.append(B_curr)
-                
-#                 #Left-sided pixel correlations
-#                 rho = torch.mean(Yd[:, 1:, :-1]*Yd[:, :-1, 1:], dim=0)
-#                 rho = torch.cat( (torch.zeros([rho.shape[0],1]).double().to(device), rho), dim=1)
-#                 rho = torch.cat((rho, torch.zeros([1, rho.shape[1]]).double().to(device)), dim=0)
-#                 temp_rho = rho.cpu().numpy()
-#                 temp_indices = np.where(temp_rho > cut_off_point)
-#                 A_curr = ref_mat[(temp_indices[0] + x_pt, temp_indices[1] + y_pt)]
-#                 B_curr = ref_mat[(temp_indices[0] + x_pt + 1, temp_indices[1] + y_pt - 1)]
-#                 A_indices.append(A_curr)
-#                 B_indices.append(B_curr)
-                
-#             del rho
-#             del Yd
-#             torch.cuda.empty_cache()
-            
-     
-#     torch.cuda.empty_cache()
-#     A = np.concatenate(A_indices)
-#     B = np.concatenate(B_indices)
-
-#     ########### form connected componnents #########
-#     G = nx.Graph();
-#     G.add_edges_from(list(zip(A, B)))
-#     comps=list(nx.connected_components(G))
-
-#     connect_mat=np.zeros(np.prod(dims[:2]));
-#     idx=0;
-#     for comp in comps:
-#         if(len(comp) > length_cut):
-#             idx = idx+1;
-
-#     np.random.seed(2) #Reproducibility of superpixels image
-#     permute_col = np.random.permutation(idx)+1;
-
-#     ii=0;
-#     for comp in comps:
-#         if(len(comp) > length_cut):
-#             connect_mat[list(comp)] = permute_col[ii];
-#             ii = ii+1;
-#     connect_mat_1 = connect_mat.reshape(dims[0],dims[1],order='F');
-#     return connect_mat_1, idx, comps, permute_col
 
 
 
