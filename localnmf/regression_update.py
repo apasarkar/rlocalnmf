@@ -21,28 +21,24 @@ def baseline_update(uv_mean, a, c):
           
 
 
-# def estimate_X(c, V, VVt):
-#     '''
-#     Function for finding an approximate solution to c^t = XV
-#     Params:
-#         c: np.ndarray, dimensions (T, k)
-#         V: np.ndarray, dimensions (R, T)
-#         VVt: np.ndarrray, dimensions (R, R)
-#     Returns:
-#         X: np.ndarray, dimensionis (k x R)
-#     '''
-#     cV = c.T.dot(V.T) #Output: k x R matrix
-#     x, _, _, _ = np.linalg.lstsq(VVt.T,cV.T)
-#     return x.T
 
 def estimate_X(c, V, VVt, device='cpu'):
+    '''
+    Function for finding an approximate solution to c^t = XV
+    Params:
+        c: np.ndarray, dimensions (T, k)
+        V: np.ndarray, dimensions (R, T)
+        VVt: np.ndarrray, dimensions (R, R)
+        device: device on which computations occur ('cuda', 'cpu', etc.) 
+    Returns:
+        X: np.ndarray, dimensionis (k x R)
+    '''
+
     c_torch = torch.from_numpy(c).float().to(device)
     V_torch = torch.from_numpy(V).float().to(device)
-    # VVt = torch.matmul(V_torch, V_torch.t()).t()
     VVt_torch = torch.from_numpy(VVt).float().to(device)
     
     cV_T = torch.matmul(V_torch, c_torch)
-    # output, _ = torch.lstsq(cV_T, VVt)
     output = torch.linalg.lstsq(VVt_torch, cV_T).solution
     
     return output.cpu().numpy().T
