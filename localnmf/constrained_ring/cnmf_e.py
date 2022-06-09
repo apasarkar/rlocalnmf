@@ -19,6 +19,8 @@ from sklearn.decomposition import non_negative_factorization
 import scipy.optimize as optimization
 import os
 
+import torch_sparse
+
 print(os.getcwd())
 print("that was in cnmf_e.py")
 from . import nnls
@@ -348,11 +350,12 @@ def update_ring_model_w_const(U_sparse, R, V, A, X, b, W, d1, d2, T, r, mask_a=N
         W: updated weighting matrix
         b0: constant baseline of background image
     """
+    print("DEVICE USED ON CONST W UPDATE IS {}".format(device))
     
     start_time = time.time()
     if W is None:
         W = init_w(d1, d2, r)
-    A_sparse = scipy.sparse.csr_matrix(A)
+    A_sparse = scipy.sparse.coo_matrix(A)
     
     if mask_a is None:
         A_sum = np.sum(A, axis=1)
@@ -361,13 +364,22 @@ def update_ring_model_w_const(U_sparse, R, V, A, X, b, W, d1, d2, T, r, mask_a=N
     
     print("A_sum at {}".format(time.time() - start_time))
     
-
-    W = update_w_1p_const(U_sparse, R, V, W.tocsr(), X, b, A_sparse, A_sum, d1, d2, batch_size = batch_size)
+    W = update_w_1p_const(U_sparse.tocoo(), R, V, W, X, b, A_sparse, A_sum, d1, d2, batch_size = batch_size, device=device)
     return W
  
     
+def scipy_coo_to_torchsparse_coo(scipy_coo_mat):
+    values = scipy_coo_mat.data
+    row = torch.LongTensor(scipy_coo_mat.row)
+    col = torch.LongTensor(scipy_coo_mat.col)
+    value = torch.FloatTensor(scipy_coo_mat.data)
+
+    return torch_sparse.tensor.SparseTensor(row=row, col=col, value=value, sparse_sizes = scipy_coo_mat.shape)
+    # return torch.sparse.FloatTensor(i, v, torch.Size(shape))
+
     
-def update_w_1p_const(U_sparse, R, V, W, X, b, A_sparse, A_sum, d1, d2, batch_size = 10000, num_samples=1000):
+    
+def update_w_1p_const(U_sparse, R, V, W, X, b, A_sparse, A_sum, d1, d2, batch_size = 10000, num_samples=2000, device='cpu'):
     """Constant Ring Model codebase 
     params:
         U_sparse: scipy.sparse.csr_matrix. Dimensions d x r
@@ -392,8 +404,6 @@ def update_w_1p_const(U_sparse, R, V, W, X, b, A_sparse, A_sum, d1, d2, batch_si
     
     start_time = time.time()
     #Preprocess W
-    print("WE ARE IN THE SPATIAL W")
-    W = W.tocoo()
     rows, cols, values = (W.row, W.col, W.data)
     indices = (values > 0)
     rows = rows[indices]
@@ -411,41 +421,33 @@ def update_w_1p_const(U_sparse, R, V, W, X, b, A_sparse, A_sum, d1, d2, batch_si
     values = values[inter_keep]
     
     W = coo_matrix((values, (rows, cols)), shape = (d,d))
-    W = W.tocsr() #Convert to csr for quick multiply
-    print("THE NUMBER OF NONZERO HERE IS {}".format(W.count_nonzero()))
-    W.eliminate_zeros()
     
     sampled_indices = np.random.choice(V.shape[1], size=num_samples, replace=False)
-    V_crop = V[:, sampled_indices]
+    V_crop = torch.from_numpy(V[:, sampled_indices]).float().to(device)
+    X_torch = torch.from_numpy(X).float().to(device)
+    W_torch = scipy_coo_to_torchsparse_coo(W).to(device)
+    U_sparse_torch = scipy_coo_to_torchsparse_coo(U_sparse).to(device)
+    A_sparse_torch = scipy_coo_to_torchsparse_coo(A_sparse).to(device)
+    R = torch.from_numpy(R).float().to(device)
+    b_torch = torch.from_numpy(b).float().to(device)
     
-    #Option: Can trivially use accelerated software/hardware for below code
+    RV = torch.matmul(R, V_crop)
+    URV = torch_sparse.matmul(U_sparse_torch, RV)
     
-    print("The number of nonzero U elements is {} and size of mat is {}".format(U_sparse.count_nonzero(), np.prod(U_sparse.shape)))
-    RV = R.dot(V_crop)
-    URV = U_sparse.dot(RV)
-    # WURV = W.dot(URV)
+    XV = torch.matmul(X_torch, V_crop)
+    AXV = torch_sparse.matmul(A_sparse_torch, XV)
     
-    XV  = X.dot(V_crop)
-    AXV = A_sparse.dot(XV)
-    # WAXV = W.dot(AXV)
+    R_movie = URV - AXV - b_torch
+    WR_movie = torch_sparse.matmul(W_torch, R_movie)
     
-    # Wb = W.dot(b)
-    # sV = s.dot(V_crop)
-    # bsV = b.dot(sV)
-    # WbsV = Wb.dot(sV)
+    denominator = torch.sum(WR_movie * WR_movie, dim=1)
+    numerator = torch.sum(WR_movie * R_movie, dim=1)
     
+    values = torch.nan_to_num(numerator/denominator, nan=0.0, posinf=0.0, neginf=0.0)
+    threshold_function = torch.nn.ReLU()
+    values = threshold_function(values)
     
-    R_movie = URV - AXV - b
-    WR_movie = W.dot(R_movie)
-    
-    denominator = np.sum(WR_movie * WR_movie, axis = 1)
-    numerator = np.sum(WR_movie * R_movie, axis=1)
-    
-    values = np.nan_to_num(numerator/denominator, nan=0.0, posinf=0.0, neginf=0.0)
-    values[values < 0] = 0
-           
-    #Add weights
-    weights = values
+    weights = values.cpu().numpy()
     
     #Create new CSR matrix   
     pos = W.nonzero()
@@ -453,7 +455,7 @@ def update_w_1p_const(U_sparse, R, V, W, X, b, A_sparse, A_sum, d1, d2, batch_si
     values = weights[rows]
     W = csr_matrix((values.squeeze(), (pos[0], pos[1])), shape = (d, d))
     
-    print("we are done. took {}".format(time.time() - first_time))
+    print("we are done with W update. took {}".format(time.time() - first_time))
     return W.tocoo()
 
 

@@ -2811,7 +2811,7 @@ def update_AC_bg_l2_Y_ring_lowrank(U_sparse, R, V, V_orig,r,dims, a, c, b, patch
             
             print("X estimate")
             Xtime = time.time()
-            X = regression_update.estimate_X(c, V, VVt) #Estimate using orthogonal V, not regular V
+            X = regression_update.estimate_X(c, V, VVt, device=device) #Estimate using orthogonal V, not regular V
             print("X estimate {}".format(time.time() - Xtime))
 
             #Specify which ring model update we want
@@ -2819,7 +2819,7 @@ def update_AC_bg_l2_Y_ring_lowrank(U_sparse, R, V, V_orig,r,dims, a, c, b, patch
                 raise ValueError('Full Ring Model no longer supported')
             elif update_type == "Constant":
                 update_start = time.time()
-                W = update_ring_model_w_const(U_sparse, R, V, a, X, b, W, d1, d2, T, r, mask_a=None, batch_size = 10000)
+                W = update_ring_model_w_const(U_sparse, R, V, a, X, b, W, d1, d2, T, r, device=device, mask_a=None, batch_size = 10000)
 #                 W = csr_matrix(avg_interpolation(W.toarray(), d1, d2))
                 print("THE W UPDATE TOOK {}".format(time.time() - update_start))
             else:
@@ -2836,7 +2836,7 @@ def update_AC_bg_l2_Y_ring_lowrank(U_sparse, R, V, V_orig,r,dims, a, c, b, patch
         
         
         #Approximate c as XV for some X:
-        X = regression_update.estimate_X(c, V_orig, VVt_orig)       
+        X = regression_update.estimate_X(c, V_orig, VVt_orig, device=device)       
         a = regression_update.spatial_update_HALS(U_sparse, V_orig, W.tocsr(), X, a, c, b,  device=device, mask_ab=mask_ab.T).toarray()
         
 
@@ -2844,7 +2844,7 @@ def update_AC_bg_l2_Y_ring_lowrank(U_sparse, R, V, V_orig,r,dims, a, c, b, patch
         temp = (a.sum(axis=0) == 0);
         if sum(temp):
             a, c, corr_img_all_reg, corr_img_all, mask_ab, num_list = delete_comp(a, c, corr_img_all_reg, corr_img_all, mask_ab, num_list, temp, "zero a!", plot_en, (d1, d2));
-            X = regression_update.estimate_X(c, V_orig, VVt_orig)
+            X = regression_update.estimate_X(c, V_orig, VVt_orig, device=device)
         print("spatial update took {}".format(time.time() - test_time))
         
         
