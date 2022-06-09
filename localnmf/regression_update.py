@@ -5,8 +5,8 @@ import time
 
 
 def fast_matmul(a, b, device='cuda'):
-    a_torch = torch.from_numpy(a).to(device)
-    b_torch = torch.from_numpy(b).to(device)
+    a_torch = torch.from_numpy(a).float().to(device)
+    b_torch = torch.from_numpy(b).float().to(device)
     return torch.mm(a_torch, b_torch).cpu().numpy()
 
 

@@ -31,6 +31,7 @@ from scipy.sparse import lil_matrix
 from scipy import ndimage as ndimage
 import math
 
+import torchnmf
 
 import os
 import sys
@@ -2064,12 +2065,12 @@ def get_min_vals(U_sparse, V, batch_size = 1000, device = 'cpu'):
 def get_median(tensor, axis):
     max_val = torch.max(tensor, dim=axis, keepdim=True)[0]
     tensor_med_1 = torch.median(torch.cat((tensor, max_val), dim = axis), dim = axis, keepdim=True)[0]
-    tensor_med_2 = torch.median(tensor, dim = 2, keepdim = True)[0]
+    tensor_med_2 = torch.median(tensor, dim = axis, keepdim = True)[0]
     
     tensor_med = torch.mul(tensor_med_1 + tensor_med_2, 0.5)
     return tensor_med
 
-def threshold_data_inplace(Yd, th = 2):
+def threshold_data_inplace(Yd, th = 2, axisVal = 2):
     '''
     Threshold data: in each pixel, compute the median and median absolute deviation (MAD),
     then zero all bins (x,t) such that Yd(x,t) < med(x) + th * MAD(x).  Default value of th is 2.
@@ -2080,12 +2081,12 @@ def threshold_data_inplace(Yd, th = 2):
     '''
     
     #Get per-pixel medians
-    Yd_med = get_median(Yd, axis = 2)
+    Yd_med = get_median(Yd, axis = axisVal)
     diff = torch.sub(Yd, Yd_med)
     
     #Calculate MAD values
     torch.abs(diff, out=diff)
-    MAD = get_median(diff, axis = 2)
+    MAD = get_median(diff, axis = axisVal)
     
     #Calculate actual threshold
     torch.mul(MAD, th, out=MAD)
@@ -2310,38 +2311,77 @@ def find_superpixel_UV(U_sparse, V, dims, cut_off_point, length_cut, th, eight_n
     return connect_mat_1, idx, comps, permute_col
 
 
-
-
-
 def spatial_temporal_ini_UV(U,V, dims, th, comps, idx, length_cut, a = None, c = None, device = 'cpu'):
     """
     Apply rank 1 NMF to find spatial and temporal initialization for each superpixel in Yt.
     """
-
     dims = (dims[0], dims[1], V.shape[1])
     T = V.shape[1]
     ii = 0;
-    U_mat = np.zeros([np.prod(dims[:2]),idx]);
-    V_mat = np.zeros([T,idx]);
+
+    
+    V_mat = torch.zeros([T, idx], device=device);
+    #Note: We define H_mat later to save space
+    
+    
+    V_torch = torch.from_numpy(V).to(device)
+    U_sparse_torch = scipy_coo_to_torchsparse_coo(U).to(device)
+    
+    if a is not None and c is not None: 
+        c = torch.Tensor(c).t().to(device)
+        # a_sparse = scipy.sparse.coo_matrix(a)
+        a_sparse = scipy_coo_to_torchsparse_coo(scipy.sparse.coo_matrix(a)).to(device)
+    
+
+    
+    
+    #Define a sparse row, column, value data structure for storing the U_mat 
+    final_rows = torch.zeros(0, device=device)
+    final_columns = torch.zeros(0, device=device)
+    final_values = torch.zeros(0, device=device)
+    final_shape = [np.prod(dims[:2]), idx]
 
     for comp in comps:
         if(len(comp) > length_cut):
             if ii % 100 == 0:
                 print("we are initializing component {} out of {}".format(ii, idx))
-            y_temp = U[list(comp), :].dot(V)
+            comp_tensor = torch.LongTensor(list(comp)).to(device)
+            U_subset = torch_sparse.index_select(U_sparse_torch, 0, comp_tensor)
+            y_temp = torch_sparse.matmul(U_subset, V_torch)
             
             if a is not None and c is not None:
-                y_temp = y_temp - a[list(comp), :].dot(c.T)
-            y_temp = threshold_data(y_temp[:, None, :], th)
-#             y_temp[y_temp<0] = 0
-            y_temp = y_temp.squeeze()
-            model = NMF(n_components=1, init='custom');
-            U_mat[list(comp),ii] = model.fit_transform(y_temp, W=y_temp.mean(axis=1,keepdims=True),
-                                        H = y_temp.mean(axis=0,keepdims=True))[:,0];
-            V_mat[:,ii] = model.components_;
-            ii = ii+1;
+                a_subset = torch_sparse.index_select(a_sparse, 0, comp_tensor)
+                ac_prod = torch_sparse.matmul(a_subset, c)
+                y_temp = torch.sub(y_temp, ac_prod)
             
+            y_temp = threshold_data_inplace(y_temp, th, axisVal=1)
+
+            model = torchnmf.nmf.NMF(y_temp.shape, rank=1, H = torch.mean(y_temp, dim=1, keepdim=True), \
+                                     W = y_temp.mean(axis=0, keepdim=True).t()).to(device)
+            outputs = model.fit(y_temp)
+            
+            ##Keep constructing H
+            final_rows = torch.cat((final_rows, comp_tensor), dim=0)
+            curr_rows = torch.zeros_like(comp_tensor, device=device) 
+            curr_cols = torch.add(curr_rows, ii)
+            final_columns = torch.cat((final_columns, curr_cols), dim=0)
+            curr_values = model.H[:, 0]
+            final_values = torch.cat((final_values, curr_values), dim=0)
+            
+            
+            V_mat[:,[ii]] = model.W
+            ii = ii+1;
+     
+    final_rows = final_rows.cpu().numpy()
+    final_columns = final_columns.cpu().numpy()
+    final_values = final_values.detach().cpu().numpy()
+    
+    U_mat = scipy.sparse.coo_matrix((final_values, (final_rows, final_columns)), shape = final_shape)
+    U_mat = np.array(U_mat.todense())
+    V_mat = V_mat.detach().cpu().numpy()
     return V_mat, U_mat
+
+
 
 
 def prune_zero_columns_UV(U, V):
@@ -2517,9 +2557,10 @@ def demix_whole_data_robust_ring_lowrank(U,V_PMD,r=10, cut_off_point=[0.95,0.9],
             start = time.time();
             print("rank 1 svd!")
             if ii == 0:
-                c_ini, a_ini = spatial_temporal_ini_UV(U_sparse.tocsr(), V_PMD, dims, th[ii], comps, idx, length_cut[ii])
+                # print("the type of U_sparse before this step is {}".format(type(U_sparse)))
+                c_ini, a_ini = spatial_temporal_ini_UV(U_sparse.tocoo(), V_PMD, dims, th[ii], comps, idx, length_cut[ii])
             else:
-                c_ini, a_ini = spatial_temporal_ini_UV(U_sparse.tocsr(), V_PMD, dims, th[ii], comps, idx, length_cut[ii], a = a, c = c)
+                c_ini, a_ini = spatial_temporal_ini_UV(U_sparse.tocoo(), V_PMD, dims, th[ii], comps, idx, length_cut[ii], a = a, c = c)
                 
             
             mask_a=None ## Disable the mask after first pass over data
