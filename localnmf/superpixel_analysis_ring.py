@@ -2329,7 +2329,6 @@ def spatial_temporal_ini_UV(U,V, dims, th, comps, idx, length_cut, a = None, c =
     
     if a is not None and c is not None: 
         c = torch.Tensor(c).t().to(device)
-        # a_sparse = scipy.sparse.coo_matrix(a)
         a_sparse = scipy_coo_to_torchsparse_coo(scipy.sparse.coo_matrix(a)).to(device)
     
 
