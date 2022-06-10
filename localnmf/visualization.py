@@ -1428,9 +1428,11 @@ def standard_demix_vid(a, c, b, raw_mov, denoised_mov, fluctuating_bg_terms, fil
     print("done with fluctuating calculation")
     print("included b now")
     net_bg = fluctuating_bg + b
-    titles.append("Net Background")
+    titles.append("Centered Net Background")
     img_types.append(1)
-    mov_list.append(net_bg[dim1_range[0]:dim1_range[1], dim2_range[0]:dim2_range[1], :])
+    mov_to_show_bg = net_bg[dim1_range[0]:dim1_range[1], dim2_range[0]:dim2_range[1], :]
+    mov_to_show_bg = mov_to_show_bg - np.mean(mov_to_show_bg, axis = 2, keepdims=True)
+    mov_list.append(mov_to_show_bg)
     
     #Add residual:
     res = denoised_mov - AC - net_bg
