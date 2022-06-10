@@ -1,6 +1,7 @@
 import scipy.sparse
 import numpy as np
 import torch
+import torch_sparse
 import time
 
 
@@ -36,9 +37,9 @@ def estimate_X(c, V, VVt, device='cpu'):
 
     c_torch = torch.from_numpy(c).float().to(device)
     V_torch = torch.from_numpy(V).float().to(device)
-    VVt_torch = torch.from_numpy(VVt).float().to(device)
-    
     cV_T = torch.matmul(V_torch, c_torch)
+    
+    VVt_torch = torch.from_numpy(VVt).float().to(device)
     output = torch.linalg.lstsq(VVt_torch, cV_T).solution
     
     return output.cpu().numpy().T
@@ -58,6 +59,132 @@ def sparse_coo_threshold(a, threshold=0):
     a.col = cols_new
     return a
 
+# def spatial_update_HALS(U_sparse, V, W, X, a, c, b, device='cpu', mask_ab = None):
+#     '''
+#     Computes a temporal HALS updates: 
+#     Params: 
+#         U_sparse: scipy.sparse.coo matrix. Sparse U matrix, dimensions d x R 
+#         V: PMD V matrix, dimensions R x T
+#             V has as its last row a vector of all -1's
+#         X: Approximate solution to c^t = XV. Dimensions k x R (k neurons in a/c)
+#         a_sparse: scipy.sparse.csr_matrix. dimensions d x k
+#         c: np.ndarray. dimensions T x k
+#         b: np.ndarray. dimensions d x 1. represents static background
+#         mask_a: np.ndarray. dimensions (k x d). For each neuron, indicates the allowed support of neuron
+        
+#     TODO: Make 'a' input a sparse matrix
+#     '''
+#     ##TODO for further speedup: do not repeatedly construct a sparse array
+    
+#     #Precompute relevant quantities
+#     start_time = time.time()
+#     # C_prime = c.T.dot(c) #Ouput: k x k matrix (low-rank)
+#     C_prime = fast_matmul(c.T, c, device=device) #Output: k x k matrix (low-rank)
+#     cV = fast_matmul(c.T, V.T, device=device)
+#     # cV = c.T.dot(V.T) #Output: k x R matrix (low-rank)
+#     cVX = fast_matmul(cV, X.T, device=device)
+#     # cVX = cV.dot(X.T)
+    
+#     a_sparse = scipy.sparse.csr_matrix(a)
+    
+#     if mask_ab is None:
+#         mask_ab = (a > 0).T
+#     print("mask_ab done at {}".format(time.time() - start_time))
+#     #Init s such that bsV = static background
+#     s = np.zeros((1, V.shape[0]))
+#     s[:, -1] = -1 
+
+    
+#     for i in range(c.shape[1]):
+        
+#         #Identify positive support of a_i
+#         ind = (mask_ab[i, :] > 0)
+#         in_time = time.time()
+#         #In this notation, * refers to matrix multiplication
+        
+#         '''
+#         Step 1: Find (c^t)_i * V^t * U^t, where
+#         U = U_PMD - W*(U_PMD - a*X - b*s) - b*s
+#         '''
+#         #(1) First compute (c^t)_i * V^t * (U_PMD)^t
+#         cVU = U_sparse.dot(cV[i, ].T).T #1 x d vector
+# #         if print_text:
+# #             print("1 done at {}".format(time.time() - in_time))
+        
+#         #(2) Get static bg component: (c^t)_i * V^t * (s^t * b^t)
+#         bg = cV[i, :].dot(s.T)
+#         bg = bg.dot(b.T)  #Output: 1 x d vector
+        
+        
+#         '''
+#         Step (3) Calculate (c^t)_i * V^t * (W * (U_PMD - a * X - b * s))^t
+#         This is equal to (c^t)_i * V^t * (U_PMD - a * X - b * s)^t * W^t
+#         we refer to (c^t)_i * V^t as h_i.
+#         We need to calculate
+#         (a) h_i * U_PMD^t
+#         (b) h_i * X^t * a^t
+#         (c) h_i * s^t * b^t
+        
+#         Note that (a) has already been computed above (cVU)
+#         Also note (c) has been computed above (bg)
+        
+#         So all we need to compute is (b) 
+        
+#         These are all 1 x d vectors, so we add them, and then multiply by W^t to get our 
+#         final result
+#         '''
+        
+#         #Get (b)
+# #         cVX = cV[i, :].dot(X.T)
+#         cVXa = (a_sparse.dot(cVX[i, :].T)).T
+        
+#         #Add (a) - (b) - (c) 
+#         W_sum = cVU - cVXa - bg
+#         W_temp = W[ind, :]
+#         W_term = (W_temp.dot(W_sum.T)).T
+        
+#         #Final step: get (c^t)_i * c * a^t
+#         cca = (a_sparse.dot(C_prime[i, :].T)).T        
+#         final_vec = (cVU - bg - cca)/C_prime[i, i]
+                
+#         #Crop final_vec
+#         final_vec = final_vec.T
+#         final_vec = final_vec[ind]
+#         final_vec -= W_term/C_prime[i,i]
+       
+       
+        
+#         a_sparse = a_sparse.tocoo()
+#         values = final_vec # final_vec[ind]
+#         rows = np.argwhere(ind>0)
+#         col = [i for k in range(len(values))]
+#         a_sparse = a_sparse.tocoo()
+        
+#         a_sparse.data = np.append(a_sparse.data, values)
+#         a_sparse.row = np.append(a_sparse.row, rows)
+#         a_sparse.col = np.append(a_sparse.col, col)
+        
+#         a_sparse = sparse_coo_threshold(a_sparse, 0)
+#         a_sparse = a_sparse.tocsr()
+        
+#         ##TODO: make this faster: 
+#         # a_sparse[a_sparse < 0] = 0
+        
+        
+        
+#     return a_sparse
+    
+    
+def scipy_coo_to_torchsparse_coo(scipy_coo_mat):
+    values = scipy_coo_mat.data
+    row = torch.LongTensor(scipy_coo_mat.row)
+    col = torch.LongTensor(scipy_coo_mat.col)
+    value = torch.FloatTensor(scipy_coo_mat.data)
+
+    return torch_sparse.tensor.SparseTensor(row=row, col=col, value=value, sparse_sizes = scipy_coo_mat.shape)
+    # return torch.sparse.FloatTensor(i, v, torch.Size(shape))
+
+    
 def spatial_update_HALS(U_sparse, V, W, X, a, c, b, device='cpu', mask_ab = None):
     '''
     Computes a temporal HALS updates: 
@@ -73,48 +200,55 @@ def spatial_update_HALS(U_sparse, V, W, X, a, c, b, device='cpu', mask_ab = None
         
     TODO: Make 'a' input a sparse matrix
     '''
-    ##TODO for further speedup: do not repeatedly construct a sparse array
+    #Load all values onto device in torch
+    U_sparse = scipy_coo_to_torchsparse_coo(U_sparse.tocoo()).to(device)
+    V = torch.from_numpy(V).float().to(device)
+    W = scipy_coo_to_torchsparse_coo(W.tocoo()).to(device)
+    X = torch.from_numpy(X).float().to(device)
+    c = torch.from_numpy(c).float().to(device)
+    b = torch.from_numpy(b).float().to(device)
     
-    #Precompute relevant quantities
-    start_time = time.time()
-    # C_prime = c.T.dot(c) #Ouput: k x k matrix (low-rank)
-    C_prime = fast_matmul(c.T, c, device=device) #Output: k x k matrix (low-rank)
-    cV = fast_matmul(c.T, V.T, device=device)
-    # cV = c.T.dot(V.T) #Output: k x R matrix (low-rank)
-    cVX = fast_matmul(cV, X.T, device=device)
-    # cVX = cV.dot(X.T)
     
-    a_sparse = scipy.sparse.csr_matrix(a)
-    
-    if mask_ab is None:
+    if mask_ab is None: 
         mask_ab = (a > 0).T
-    print("mask_ab done at {}".format(time.time() - start_time))
-    #Init s such that bsV = static background
-    s = np.zeros((1, V.shape[0]))
-    s[:, -1] = -1 
+        mask_ab = scipy_coo_to_torchsparse_coo(mask_ab).to(device)
+    else: 
+        mask_ab = scipy.sparse.coo_matrix(mask_ab)
+        mask_ab = scipy_coo_to_torchsparse_coo(mask_ab).to(device) 
+        
+        
 
+    a = scipy.sparse.coo_matrix(a)
+    a_sparse = scipy_coo_to_torchsparse_coo(a).to(device)
+    
+    #Init s such that bsV = static background
+    s = torch.zeros([1, V.shape[0]], device=device)
+    s[:, -1] = -1
+    
+    #Init s such that bsV = static background
+    C_prime = torch.matmul(c.t(), c)
+    cV = torch.matmul(V, c).t()
+    cVX = torch.matmul(cV, X.t())
+    
+    index_select_tensor = torch.LongTensor([0]).to(device)
     
     for i in range(c.shape[1]):
         
-        #Identify positive support of a_i
-        ind = (mask_ab[i, :] > 0)
-        in_time = time.time()
-        #In this notation, * refers to matrix multiplication
+        index_select_tensor[0] = i
+        mask_ab_torchsparse_sub = torch_sparse.index_select(mask_ab, 0,\
+                                                            index_select_tensor)
+        ind_torch = mask_ab_torchsparse_sub.storage.col()
+
         
-        '''
-        Step 1: Find (c^t)_i * V^t * U^t, where
-        U = U_PMD - W*(U_PMD - a*X - b*s) - b*s
-        '''
         #(1) First compute (c^t)_i * V^t * (U_PMD)^t
-        cVU = U_sparse.dot(cV[i, ].T).T #1 x d vector
-#         if print_text:
-#             print("1 done at {}".format(time.time() - in_time))
+        cVU = torch_sparse.matmul(U_sparse, cV[[i], ].t()).t()
+        bg = torch.matmul(cV[[i], :], s.t())
+        bg = torch.matmul(bg, b.t())
         
         #(2) Get static bg component: (c^t)_i * V^t * (s^t * b^t)
-        bg = cV[i, :].dot(s.T)
-        bg = bg.dot(b.T)  #Output: 1 x d vector
-        
-        
+        # bg = cV[[i], :].dot(s.t())
+        # bg = bg.dot(b.T)  #Output: 1 x d vector
+
         '''
         Step (3) Calculate (c^t)_i * V^t * (W * (U_PMD - a * X - b * s))^t
         This is equal to (c^t)_i * V^t * (U_PMD - a * X - b * s)^t * W^t
@@ -134,45 +268,49 @@ def spatial_update_HALS(U_sparse, V, W, X, a, c, b, device='cpu', mask_ab = None
         '''
         
         #Get (b)
-#         cVX = cV[i, :].dot(X.T)
-        cVXa = (a_sparse.dot(cVX[i, :].T)).T
+        cVXa = torch_sparse.matmul(a_sparse, cVX[[i], :].t()).t()
+        # cVXa = (a_sparse.dot(cVX[i, :].T)).T
         
         #Add (a) - (b) - (c) 
         W_sum = cVU - cVXa - bg
-        W_temp = W[ind, :]
-        W_term = (W_temp.dot(W_sum.T)).T
+        W_temp = torch_sparse.index_select(W, 0, ind_torch) ##
+        W_term = torch_sparse.matmul(W_temp, W_sum.t()).t()
         
-        #Final step: get (c^t)_i * c * a^t
-        cca = (a_sparse.dot(C_prime[i, :].T)).T        
+        cca = torch_sparse.matmul(a_sparse, C_prime[[i], :].t()).t()
         final_vec = (cVU - bg - cca)/C_prime[i, i]
-                
+
+        
         #Crop final_vec
-        final_vec = final_vec.T
-        final_vec = final_vec[ind]
-        final_vec -= W_term/C_prime[i,i]
-       
-       
+        final_vec = torch.squeeze(final_vec.t())
+        final_vec = final_vec[ind_torch]
+
+        final_vec = torch.sub(final_vec, torch.squeeze(W_term/C_prime[i,i]))
+
         
-        a_sparse = a_sparse.tocoo()
         values = final_vec # final_vec[ind]
-        rows = np.argwhere(ind>0)
-        col = [i for k in range(len(values))]
-        a_sparse = a_sparse.tocoo()
+        rows = ind_torch
+        col = torch.ones_like(rows)*i
         
-        a_sparse.data = np.append(a_sparse.data, values)
-        a_sparse.row = np.append(a_sparse.row, rows)
-        a_sparse.col = np.append(a_sparse.col, col)
-        
-        a_sparse = sparse_coo_threshold(a_sparse, 0)
-        a_sparse = a_sparse.tocsr()
-        
-        ##TODO: make this faster: 
-        # a_sparse[a_sparse < 0] = 0
+        original_values = a_sparse.storage.value()
+        original_rows = a_sparse.storage.row()
+        original_cols = a_sparse.storage.col()
         
         
+        new_values = torch.cat((original_values, values))
         
-    return a_sparse
-    
+        threshold_func = torch.nn.ReLU(0)
+        new_values = threshold_func(new_values)
+        
+        new_rows = torch.cat((original_rows, rows))
+        new_cols = torch.cat((original_cols, col))
+        
+        a_sparse = torch_sparse.tensor.SparseTensor(row=new_rows, col=new_cols, value=new_values, \
+                                                    sparse_sizes = a_sparse.storage.sparse_sizes()).coalesce()
+        
+        
+        
+        
+    return a_sparse.cpu()
     
 def temporal_update_HALS(U_sparse, V, W, X, a, c, b):
     '''
