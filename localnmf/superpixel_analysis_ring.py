@@ -2098,6 +2098,15 @@ def threshold_data_inplace(Yd, th = 2, axisVal = 2):
     return Yd
 
 
+def scipy_coo_to_binary_torchsparse_coo(scipy_coo_mat):
+    values = np.ones_like(scipy_coo_mat.data)
+    row = torch.LongTensor(scipy_coo_mat.row)
+    col = torch.LongTensor(scipy_coo_mat.col)
+    value = torch.FloatTensor(scipy_coo_mat.data)
+
+    return torch_sparse.tensor.SparseTensor(row=row, col=col, value=value, sparse_sizes = scipy_coo_mat.shape)
+    # return torch.sparse.FloatTensor(i, v, torch.Size(shape))
+
 
 def scipy_coo_to_torchsparse_coo(scipy_coo_mat):
     values = scipy_coo_mat.data
@@ -2557,9 +2566,9 @@ def demix_whole_data_robust_ring_lowrank(U,V_PMD,r=10, cut_off_point=[0.95,0.9],
             print("rank 1 svd!")
             if ii == 0:
                 # print("the type of U_sparse before this step is {}".format(type(U_sparse)))
-                c_ini, a_ini = spatial_temporal_ini_UV(U_sparse.tocoo(), V_PMD, dims, th[ii], comps, idx, length_cut[ii])
+                c_ini, a_ini = spatial_temporal_ini_UV(U_sparse.tocoo(), V_PMD, dims, th[ii], comps, idx, length_cut[ii], device=device)
             else:
-                c_ini, a_ini = spatial_temporal_ini_UV(U_sparse.tocoo(), V_PMD, dims, th[ii], comps, idx, length_cut[ii], a = a, c = c)
+                c_ini, a_ini = spatial_temporal_ini_UV(U_sparse.tocoo(), V_PMD, dims, th[ii], comps, idx, length_cut[ii], a = a, c = c, device=device)
                 
             
             mask_a=None ## Disable the mask after first pass over data
