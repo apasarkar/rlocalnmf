@@ -1606,11 +1606,12 @@ def vcorrcoef_resid(U_sparse, R, V, a, c, batch_size = 10000, tol = 0.000001):
         
 
 
-def vcorrcoef_UV_noise(U_sparse, R, V, c, pseudo = 0, batch_size = 10000, tol = 0.000001):
+def vcorrcoef_UV_noise(U_sparse, R, V, c, pseudo = 0, batch_size = 1000, tol = 0.000001, device='cpu'):
     '''
     New standard correlation calculation. Finds the correlation image of each neuron in 'c' 
     with the denoised movie URV
     
+    TODO: Add robust statistic support (i.e. make pseudo do something) 
     Params:
         U_sparse: scipy.sparse.coo_matrix. dims (d x r), where the FOV has d pixels
         R: np.ndarray. dims (r x r), where r is the rank of the PMD decomposition
@@ -1622,25 +1623,25 @@ def vcorrcoef_UV_noise(U_sparse, R, V, c, pseudo = 0, batch_size = 10000, tol = 
     T = V.shape[1]
     d = U_sparse.shape[0]
     
-    U_sparse = U_sparse.tocsr()
-    U_sparse_t = U_sparse.transpose().tocsc() ##Is this needed? 
+    #Load pytorch objects
+    U_sparse = torch_sparse.tensor.from_scipy(U_sparse).to(device)
+    R = torch.from_numpy(R).to(device)
+    V = torch.from_numpy(V).to(device)
+    c = torch.from_numpy(c).to(device)
     
-    ##Step 1: Standardize c
-    c_mean = np.mean(c, axis = 0, keepdims = True)
-    c_norm = np.sqrt(np.sum((c-c_mean) * (c-c_mean), axis = 0, keepdims = True))
-    c_standard = (c - c_mean) / c_norm
+    #Step 1: Standardize c
+    c -= torch.mean(c, dim=0, keepdim=True)
+    c_norm = torch.sqrt(torch.sum(c*c, dim=0, keepdim=True))
+    c /= c_norm 
     
-    ##Step 2: Calculate the mean of Yd = URV:
-    V_mean = np.mean(V, axis = 1, keepdims = True) #V_mean has dims r x 1
-    RV_mean = R.dot(V_mean)
-    m = U_sparse.dot(RV_mean) #Dims: d x 1 
+    ##Step 2: 
+    V_mean = torch.mean(V, dim=1, keepdim=True)
+    RV_mean = torch.matmul(R, V_mean)
+    m = torch_sparse.matmul(U_sparse, RV_mean) #Dims: d x 1
     
-    ## Step 3: Express the movie mean in the V basis as: m*s*V, where s is a 1 x r vector. s*V should be a row of 1's, length T
-    ## Since V is orthogonal, can find s easily: 
-    s = np.ones((1, V.shape[1])).dot(V.T)
-    
-    ##Note: Now the mean subtracted movie is: (U*R - m*s)*V
-    
+    ##Step 3: 
+    s = torch.matmul(torch.ones([1, V.shape[1]], device=device), V.t())
+
     ##Step 4: Find the pixelwise norm: sqrt(diag((U*R - m*s)*V*V^t*(U*R - m*s)^t)) 
     ## diag((U*R - mov_mean*S)*V*V^t*(U*R - mov_mean*S)^t) = diag((U*R - m*s)*(U*R - m*s)^t) since V orthogonal
     ## diag((U*R - m*s)*(U*R - m*s)^t) = diag(U*R*R^t*U^t - U*R*s^t*m^t - m*s*R^t*U^t + m*s*s^t*m^t)
@@ -1648,51 +1649,50 @@ def vcorrcoef_UV_noise(U_sparse, R, V, c, pseudo = 0, batch_size = 10000, tol = 
     
     ##Step 4a: Get diag(U*R*s^t*m^t) and diag(m*s*R^t*U^t)
     #These are easy because U*R*s^t and s*R^t*U^t are 1-dimensional and transposes of each other: 
-    
-    Rst = R.dot(s.T)
-    URst = U_sparse.dot(Rst) #This is d x 1
+
+    Rst = torch.matmul(R, s.t())
+    URst = torch_sparse.matmul(U_sparse, Rst)
     
     #Now diag(U*R*s^t*m^t) is easy:
     diag_URstmt = URst*m #Element-wise product
-    
+
     #Now diag(m*s*R^t*U^t) is easy: 
     diag_msRtUt = m*URst
-    
+
     ##Step 4b: Get diag(m*s*s^t*m^t)
     #Note that s*s^t just a dot product
-    s_dot = s.dot(s.T)
+    s_dot = torch.matmul(s, s.t())
     diag_msstmt = s_dot * (m*m)
     
     ## Step 4c: Get diag(U*R*R^t*U^t)
-    diag_URRtUt = np.zeros((U_sparse.shape[0], 1))
-    RRt = R.dot(R.T) #r x r matrix
-    
+    diag_URRtUt = torch.zeros([U_sparse.sparse_sizes()[0], 1], device=device)
+
     batch_iters = math.ceil(d / batch_size)
     for k in range(batch_iters):
         start = batch_size * k
-        end = batch_size * (k+1)
-        U_crop = U_sparse[start:end, :]
-        UR_crop = U_sparse[start:end, :].dot(RRt)
-        UmulUR = (U_crop.multiply(UR_crop)).tocsr()
-        
-        diag_URRtUt[start:end, :] = UmulUR.sum(1)
-    
-        
+        end = min(batch_size * (k+1), U_sparse.sparse_sizes()[0])
+        ind_torch = torch.arange(start, end, step=1, device=device)
+        U_crop = torch_sparse.index_select(U_sparse, 0, ind_torch)
+        UR_crop = torch_sparse.matmul(U_crop, R)
+        UR_crop = UR_crop * UR_crop
+        UR_crop = torch.sum(UR_crop, dim=1)
+        diag_URRtUt[start:end, 0] =UR_crop   
+           
     norm_sqrd = diag_URRtUt - diag_msRtUt - diag_URstmt + diag_msstmt
-    norm = np.sqrt(norm_sqrd)
-    norm[norm < tol] = 0
-    
-    ## Step 5: Get the dot product between normalized c and each unnormalized pixel
+    norm = torch.sqrt(norm_sqrd)
+    threshold_func = torch.nn.ReLU()
+    norm = threshold_func(norm)
+
     
     #First precompute Vc: 
-    Vc = V.dot(c_standard) #r x k matrix
+    Vc = torch.matmul(V, c)
     
     #Find (UR - ms)V*c
-    RVc = R.dot(Vc)
-    URVc = U_sparse.dot(RVc)
+    RVc = torch.matmul(R, Vc)
+    URVc = torch_sparse.matmul(U_sparse, RVc)
     
-    sVc = s.dot(Vc)
-    msVc = m.dot(sVc)
+    sVc = torch.matmul(s, Vc)
+    msVc = torch.matmul(m, sVc)
     
     fin_corr = URVc - msVc
     
@@ -1700,8 +1700,8 @@ def vcorrcoef_UV_noise(U_sparse, R, V, c, pseudo = 0, batch_size = 10000, tol = 
     fin_corr /= norm
 
     
-    fin_corr = np.nan_to_num(fin_corr, nan = 0, posinf = 0, neginf = 0)
-    return fin_corr    
+    fin_corr = torch.nan_to_num(fin_corr, nan = 0, posinf = 0, neginf = 0)
+    return fin_corr.cpu().numpy()    
 
 
 def merge_components_priors(a,c,corr_img_all_r,num_list,patch_size,merge_corr_thr=0.6,merge_overlap_thr=0.6,plot_en=False, dims = (64,64,3600), \
@@ -2747,7 +2747,7 @@ def update_AC_bg_l2_Y_ring_lowrank(U_sparse, R, V, V_orig,r,dims, a, c, b, patch
     
         
     corr_time = time.time()
-    corr_img_all_reg = vcorrcoef_UV_noise(U_sparse, R, V, c, batch_size = batch_size)
+    corr_img_all_reg = vcorrcoef_UV_noise(U_sparse, R, V, c, batch_size = batch_size, device=device)
     corr_img_all_reg_r = corr_img_all_reg.reshape(patch_size[0],patch_size[1],-1,order="F");
     print("Standard Corr Image Took {}".format(time.time() - corr_time))
    
@@ -2903,7 +2903,7 @@ def update_AC_bg_l2_Y_ring_lowrank(U_sparse, R, V, V_orig,r,dims, a, c, b, patch
             print("calculating the residual correlation image")
             corr_img_all = vcorrcoef_resid(U_sparse, R, V, a, c, batch_size = batch_size)
             print("calculating the robust standard correlation image")            
-            corr_img_all_reg = vcorrcoef_UV_noise(U_sparse, R, V, c, batch_size = batch_size) 
+            corr_img_all_reg = vcorrcoef_UV_noise(U_sparse, R, V, c, batch_size = batch_size, device=device) 
             
             
             mask_ab = (a>0)*1;
