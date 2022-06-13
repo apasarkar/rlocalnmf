@@ -201,9 +201,9 @@ def spatial_update_HALS(U_sparse, V, W, X, a, c, b, device='cpu', mask_ab = None
     TODO: Make 'a' input a sparse matrix
     '''
     #Load all values onto device in torch
-    U_sparse = scipy_coo_to_torchsparse_coo(U_sparse.tocoo()).to(device)
+    U_sparse = torch_sparse.tensor.from_scipy(U_sparse).float().to(device)
     V = torch.from_numpy(V).float().to(device)
-    W = scipy_coo_to_torchsparse_coo(W.tocoo()).to(device)
+    W = torch_sparse.tensor.from_scipy(W).float().to(device)
     X = torch.from_numpy(X).float().to(device)
     c = torch.from_numpy(c).float().to(device)
     b = torch.from_numpy(b).float().to(device)
@@ -219,7 +219,7 @@ def spatial_update_HALS(U_sparse, V, W, X, a, c, b, device='cpu', mask_ab = None
         
 
     a = scipy.sparse.coo_matrix(a)
-    a_sparse = scipy_coo_to_torchsparse_coo(a).to(device)
+    a_sparse = torch_sparse.tensor.from_scipy(a).float().to(device)
     
     #Init s such that bsV = static background
     s = torch.zeros([1, V.shape[0]], device=device)
@@ -330,15 +330,15 @@ def temporal_update_HALS(U_sparse, V, W, X, a, c, b, device='cpu'):
     '''
     
     #Convert all inputs to torch and move to device
-    U_sparse = torch_sparse.tensor.from_scipy(U_sparse).to(device)
+    U_sparse = torch_sparse.tensor.from_scipy(U_sparse).float().to(device)
     V = torch.from_numpy(V).float().to(device)
-    W = torch_sparse.tensor.from_scipy(W).to(device)
+    W = torch_sparse.tensor.from_scipy(W).float().to(device)
     X = torch.from_numpy(X).float().to(device)
     c = torch.from_numpy(c).float().to(device)
     b = torch.from_numpy(b).float().to(device)
 
     a = scipy.sparse.coo_matrix(a)
-    a_sparse = torch_sparse.tensor.from_scipy(a).to(device)
+    a_sparse = torch_sparse.tensor.from_scipy(a).float().to(device)
     
     #Init s such that bsV = static background
     s = torch.zeros([1, V.shape[0]], device=device)
