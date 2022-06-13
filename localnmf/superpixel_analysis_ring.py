@@ -1414,8 +1414,7 @@ def print_signals_corrimg(ai, ci, corr_th_fix, corr_img_r, dims, figsize = (12,6
         plt.show()
 
         
- 
-def vcorrcoef_resid(U_sparse, R, V, a, c, batch_size = 10000, tol = 0.000001):
+def vcorrcoef_resid(U_sparse, R, V, a, c, batch_size = 10000, device='cpu', tol = 0.000001):
     '''
     Residual correlation image calculation 
     Params:
@@ -1428,90 +1427,95 @@ def vcorrcoef_resid(U_sparse, R, V, a, c, batch_size = 10000, tol = 0.000001):
         batch_size: number of pixels to process at once. Limits matrix sizes to O((batch_size+T)*r)
     '''
     T = V.shape[1]
-    X = (c.T).dot(V.T) 
     d = U_sparse.shape[0]
     
+    corr_img = torch.zeros((d, a.shape[1]), device=device)
     
-    corr_img = np.zeros((d, a.shape[1]))
+    #Load pytorch objects
+    U_sparse = torch_sparse.tensor.from_scipy(U_sparse).to(device)
+    R = torch.from_numpy(R).float().to(device)
+    V = torch.from_numpy(V).float().to(device)
+    c = torch.from_numpy(c).float().to(device)
+    X = torch.matmul(V, c).float().t()
+
+    a_sparse = torch_sparse.tensor.from_scipy(scipy.sparse.coo_matrix(a)).to(device)
     
-    c_mean = np.mean(c, axis = 0, keepdims = True)
-    c_norm = np.sqrt(np.sum((c-c_mean) * (c-c_mean), axis = 0, keepdims = True))
-    c_standard = (c - c_mean) / c_norm
+    #Step 1: Standardize c
+    c -= torch.mean(c, dim=0, keepdim=True)
+    c_norm = torch.sqrt(torch.sum(c*c, dim=0, keepdim=True))
+    c /= c_norm
     
-    a_sparse = scipy.sparse.coo_matrix(a).tocsr()
-    
-        
     #Define number of iterations so we only process batch_size pixels at a time
     batch_iters = math.ceil(d / batch_size)
-    
-    
-    #Precompute V_mean quantity for faster calculations
-    V_mean = np.mean(V, axis = 1, keepdims = True)
-    
 
+    V_mean = torch.mean(V, dim=1, keepdim=True)
+    
     ##Step 2: For each iteration below, we will express the 'consant'-mean movie in terms of V basis: Mean_Movie = m*s*V for some (1 x r) vector s. We know sV should be a row vector of 1's. So we solve sV = 1; since V is orthogonal:
-    s = np.ones((1, V.shape[1])).dot(V.T)
-
+    s = torch.matmul(V, torch.ones([V.shape[1], 1], device=device)).t()
     
-    #Precompute diag((UR)(UR)^t)
-    diag_URRtUt = np.zeros((d, 1))
-    RRt = R.dot(R.T)
+
+    diag_URRtUt = torch.zeros([U_sparse.sparse_sizes()[0], 1], device=device)
+
+    batch_iters = math.ceil(d / batch_size)
     for k in range(batch_iters):
         start = batch_size * k
-        end = batch_size * (k+1)
-        U_crop = U_sparse[start:end, :]
-        UR_crop = U_sparse[start:end, :].dot(RRt)
-        UmulUR = (U_crop.multiply(UR_crop)).tocsr()
+        end = min(batch_size * (k+1), U_sparse.sparse_sizes()[0])
+        ind_torch = torch.arange(start, end, step=1, device=device)
+        U_crop = torch_sparse.index_select(U_sparse, 0, ind_torch)
+        UR_crop = torch_sparse.matmul(U_crop, R)
+        UR_crop = UR_crop * UR_crop
+        UR_crop = torch.sum(UR_crop, dim=1)
+        diag_URRtUt[start:end, 0] =UR_crop  
+
         
-        diag_URRtUt[start:end, :] = UmulUR.sum(1)
 
     #Precompute diag((AX)(AX)^t)
-    diag_AXXtAt = np.zeros((d, 1))
-    XXt = X.dot(X.T)
+    diag_AXXtAt = torch.zeros((d, 1), device=device)
     for k in range(batch_iters):
         start = batch_size * k
-        end = batch_size * (k+1)
-        A_crop = a_sparse[start:end, :]
-        AX_crop = A_crop.dot(XXt)
-        AmulAXXt = (A_crop.multiply(AX_crop)).tocsr()
-        
-        diag_AXXtAt[start:end, :] = AmulAXXt.sum(1)
+        end = min(batch_size * (k+1), U_sparse.sparse_sizes()[0])
+        ind_torch = torch.arange(start, end, step=1, device=device)
+        A_crop = torch_sparse.index_select(a_sparse, 0, ind_torch)
+        AX_crop = torch_sparse.matmul(A_crop, X)
+        AX_crop = AX_crop * AX_crop
+        AX_crop = torch.sum(AX_crop, dim=1)
+        diag_AXXtAt[start:end, 0] = AX_crop
         
     #Precompute diag((AX)(UR)^t) and diag(UR(AX)^t) (they are the same thing)
-    diag_AXUR = np.zeros((d,1))
-    XRt = X.dot(R.T)
+    diag_AXUR = torch.zeros((d,1), device=device)
     for k in range(batch_iters):
         start = batch_size * k
-        end = batch_size * (k+1)
-        A_crop = a_sparse[start:end, :]
-        U_crop = U_sparse[start:end, :]
-        AXRt_crop = A_crop.dot(XRt)
-        U_mulAXRt = (U_crop.multiply(AXRt_crop)).tocsr()
+        end = min(batch_size * (k+1), U_sparse.sparse_sizes()[0])
+        ind_torch = torch.arange(start, end, step=1, device=device)
+        U_crop = torch_sparse.index_select(U_sparse, 0, ind_torch)
+        UR_crop = torch_sparse.matmul(U_crop, R)
+        A_crop = torch_sparse.index_select(a_sparse, 0, ind_torch)
+        AX_crop = torch_sparse.matmul(A_crop, X)
+        URAX_elt_prod = UR_crop * AX_crop
+        URAX_elt_prod = torch.sum(URAX_elt_prod, dim=1)
+        diag_AXUR[start:end, 0] = URAX_elt_prod
         
-        diag_AXUR[start:end, :] = U_mulAXRt.sum(1)
-    
-
+        
+    neuron_ind_torch = torch.arange(0, a.shape[1], step=1, device=device)
+    threshold_func = torch.nn.ReLU()
     for k in range(c.shape[1]):
-        c_curr = c_standard[:, [k]]
-                
-            
-        #Define X_i and A_i
-        keeps = [i for i in range(a.shape[1])]
-        del keeps[k]
-        A_k = a_sparse[:, keeps].tocsr()
+        c_curr = c[:, [k]]
+        a_curr = torch_sparse.index_select(a_sparse, 1, neuron_ind_torch[[k]])
+        
+        keeps = torch.cat([neuron_ind_torch[:k], neuron_ind_torch[k+1:]])
+        A_k = torch_sparse.index_select(a_sparse, 1, keeps)
         X_k = X[keeps, :]
-        
+
         ##Step 1: Get mean of the movie: (UR - A_k * X_k)V
-        RV_mean = R.dot(V_mean)
-        m_UR = U_sparse.dot(RV_mean) #Dims: d x 1 
+        RV_mean = torch.matmul(R, V_mean)
+        m_UR = torch_sparse.matmul(U_sparse, RV_mean)
         
-        XkV_mean = X_k.dot(V_mean) #Dims: k x 1
-        m_AX = A_k.dot(XkV_mean) #Dims: d x 1
-        m = m_UR - m_AX #Final mean
-                
-        
+        XkV_mean = torch.matmul(X_k, V_mean)
+        m_AX = torch_sparse.matmul(A_k, XkV_mean)
+        m = m_UR - m_AX
+
         ##Step 2: Get square of norm of mean-subtracted movie. Let A_k denote k-th neuron of A and X_k denote k-th row of X
-        ## We have: Y_res = (UR - AX - A_k * X_k - ms)V. 
+        ## We have: Y_res = (UR - AX + A_k * X_k - ms)V. 
         ## Square of norm is equivalent to diag(Y_res * Y_res^t). Abbreviate diag() by d()
         ## = d((UR)(UR)^t) - d((AX)(UR)^t) + d((A_k*X_k)(UR)^t) - d(ms(UR)^t)
         ##     - d(UR(AX)^t) + d(AX(AX)^t) - d((A_kX_k)(A_kX_k)^t) + d((ms)(AX)^t)
@@ -1520,7 +1524,7 @@ def vcorrcoef_resid(U_sparse, R, V, a, c, batch_size = 10000, tol = 0.000001):
         
         ##We find the diagonal of each term individually, and add the results.
         
-        final_diagonal = np.zeros((d, 1))
+        final_diagonal = torch.zeros((d, 1), device=device)
         
         ## Step 2.a Add/subtract precomputed values, d((UR)(UR)^t) and  d(AX(AX)^t) to final_diagonal
         final_diagonal += diag_URRtUt
@@ -1528,78 +1532,80 @@ def vcorrcoef_resid(U_sparse, R, V, a, c, batch_size = 10000, tol = 0.000001):
         final_diagonal -= 2*diag_AXUR
         
         ## Step 2.b. Add diag(A_k * X_k (UR)^t) + diag(UR(A_k * X_k)^t) = 2*diag(URX_k^t * A_k^t) to final_diagonal
-        RX_k = R.dot(X[[k], :].T)
-        URX_k = U_sparse.dot(RX_k) #Dims: d x 1
-        diag_URAkXk  = a[:,[k]] * URX_k
+        RX_k = torch.matmul(R, X[[k], :].t())
+        URX_k = torch_sparse.matmul(U_sparse, RX_k)
+        diag_URAkXk = a_curr.to_dense() * URX_k
         final_diagonal += 2*diag_URAkXk
+
+        
         
         ## Step 2.c. Subtract diag((AX)(A_k*X_k)^t) + diag((A_k*X_k)*(AX)^t) = 2*diag((A_k*X_k)*(AX)^t) from final diagonal
-        XX_k = X.dot(X[[k], :].T) #Dims k x 1
-        AXX_k = a_sparse.dot(XX_k) #Dims d x 1
-        diag_AXAkXk = a[:, [k]] * AXX_k
-        
+        XX_k = torch.matmul(X, X[[k], :].t())
+        AXX_k = torch_sparse.matmul(a_sparse, XX_k) 
+        diag_AXAkXk = a_curr.to_dense() * AXX_k
         final_diagonal -= 2*diag_AXAkXk
+
         
         ## 2.d. Subtract d(UR(ms)^t) + d(ms(UR)^t) = 2*d(URs^tm^t)
-        Rst = R.dot(s.T)
-        URst = U_sparse.dot(Rst)
-        diag_URstm = URst*m
         
+        Rst = torch.matmul(R, s.t())
+        URst = torch_sparse.matmul(U_sparse, Rst)
+        diag_URstm = URst*m
         final_diagonal -= 2*diag_URstm
+
         
         ## 2.e. Add d(AX(ms)^t) + d(ms(AX)^t) = 2*d(AXs^tm^t) to final_diagonal
-        Xst = X.dot(s.T)
-        AXst = a_sparse.dot(Xst) #d x 1
-        diag_AXstm = AXst*m
-        
+        Xst = torch.matmul(X, s.t())
+        AXst = torch_sparse.matmul(a_sparse, Xst)
+        diag_AXstm = AXst * m
         final_diagonal += 2*diag_AXstm
+
         
         ## 2.f. Subtract d((A_kX_k)(ms)^t) + d((ms)(A_kX_k)^t) = 2*d(A_kX_ks^tm^t)
-        Xkst = X[[k], :].dot(s.T) # 1 x 1
-        diag_AkXkms = Xkst * (a[:, [k]]*m)
-        final_diagonal -= 2* diag_AkXkms
-        
+        Xkst = torch.matmul(X[[k], :], s.t())
+        diag_akXkms = Xkst * (a_curr.to_dense() * m)
+        final_diagonal -= 2* diag_akXkms
+
         ## 2.g. Add d((ms)(ms)^2)
-        sst = s.dot(s.T)
+        sst = torch.matmul(s, s.t())
         diag_msms = m*m*sst
         final_diagonal += diag_msms
         
-        ## 2.g. Add d(((A_kX_k)(A_kX_k)^t)
-        XkXk = X[[k], :].dot(X[[k], :].T) #Single value
-        a_norm = a[:, [k]] * a[:, [k]] 
+        
+        ## 2.h. Add d(((A_kX_k)(A_kX_k)^t)
+        XkXk = torch.matmul(X[[k], :], X[[k], :].t())
+        a_norm = a_curr.to_dense() * a_curr.to_dense()
         diag_axxa = (a_norm) * XkXk
-        
         final_diagonal += diag_axxa
+
     
-        norm = np.sqrt(final_diagonal)
-        norm[norm < tol] = 0 #Set arbitrarily small values to 0 
-        
+        norm = torch.sqrt(final_diagonal)
+        norm = threshold_func(norm)
+
         #Find the unnormalized pixel-wise product, and normalize after..
-        Vc = V.dot(c_curr)
+        Vc = torch.matmul(V, c_curr)
+        corr_fin = torch.zeros((d, 1), device=device)
         
-        corr_fin = np.zeros((d,1))
-        
-        sVc = s.dot(Vc)
-        msVc = m.dot(sVc)
+        sVc = torch.matmul(s, Vc)
+        msVc = torch.matmul(m, sVc)
         corr_fin -= msVc
         
-        XVc = X_k.dot(Vc)
-        AXVc = A_k.dot(XVc)
+        XVc = torch.matmul(X_k, Vc)
+        AXVc = torch_sparse.matmul(A_k, XVc)
         corr_fin -= AXVc
         
-        RVc = R.dot(Vc)
-        URVc = U_sparse.dot(RVc)
+        RVc = torch.matmul(R, Vc)
+        URVc = torch_sparse.matmul(U_sparse, RVc)
         corr_fin += URVc
         
-        ##Finally, divide by norm of the residual movie 
         corr_fin /= norm
-        corr_fin = np.nan_to_num(corr_fin, nan = 0, posinf = 0, neginf = 0)
-        
+        corr_fin = torch.nan_to_num(corr_fin, nan = 0, posinf = 0, neginf = 0)
         
         corr_img[:, [k]] = corr_fin
         
+    return corr_img.cpu().numpy()
         
-    return corr_img
+ 
 
 
         
@@ -1624,10 +1630,10 @@ def vcorrcoef_UV_noise(U_sparse, R, V, c, pseudo = 0, batch_size = 1000, tol = 0
     d = U_sparse.shape[0]
     
     #Load pytorch objects
-    U_sparse = torch_sparse.tensor.from_scipy(U_sparse).to(device)
-    R = torch.from_numpy(R).to(device)
-    V = torch.from_numpy(V).to(device)
-    c = torch.from_numpy(c).to(device)
+    U_sparse = torch_sparse.tensor.from_scipy(U_sparse).float().to(device)
+    R = torch.from_numpy(R).float().to(device)
+    V = torch.from_numpy(V).float().to(device)
+    c = torch.from_numpy(c).float().to(device)
     
     #Step 1: Standardize c
     c -= torch.mean(c, dim=0, keepdim=True)
@@ -2498,7 +2504,6 @@ def demix_whole_data_robust_ring_lowrank(U,V_PMD,r=10, cut_off_point=[0.95,0.9],
         
     '''
     ## Define Ring Model values..
-    
     #First prune empty spatial basis vectors
     
     d1,d2 = U.shape[:2]
@@ -2865,7 +2870,7 @@ def update_AC_bg_l2_Y_ring_lowrank(U_sparse, R, V, V_orig,r,dims, a, c, b, patch
         test_time = time.time()
         c = regression_update.temporal_update_HALS(U_sparse, V_orig, W.tocsr(), X, a, c, b)
         print('the shape of c after temporal update is {}'.format(c.shape))
-        
+        print("temporal regression update took {}".format(time.time() - test_time))  
         #Denoise 'c' components if desired
         if denoise:
             c = ca_utils.denoise(c) #We now use OASIS denoising to improve improve signals
