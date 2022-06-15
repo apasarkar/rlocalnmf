@@ -2049,7 +2049,7 @@ def scipy_coo_to_torch_coo(scipy_coo_mat):
 
 def get_min_vals(U_sparse, V, batch_size = 1000, device = 'cpu'):
     
-    U_sparse_torch = scipy_coo_to_torchsparse_coo(U_sparse).to(device)
+    U_sparse_torch = torch_sparse.tensor.from_scipy(U_sparse).to(device)
     V_torch = torch.Tensor(V).to(device)
     
     iters = math.ceil(V_torch.shape[1]/batch_size)
@@ -2114,14 +2114,6 @@ def scipy_coo_to_binary_torchsparse_coo(scipy_coo_mat):
     # return torch.sparse.FloatTensor(i, v, torch.Size(shape))
 
 
-def scipy_coo_to_torchsparse_coo(scipy_coo_mat):
-    values = scipy_coo_mat.data
-    row = torch.LongTensor(scipy_coo_mat.row)
-    col = torch.LongTensor(scipy_coo_mat.col)
-    value = torch.FloatTensor(scipy_coo_mat.data)
-
-    return torch_sparse.tensor.SparseTensor(row=row, col=col, value=value, sparse_sizes = scipy_coo_mat.shape)
-    # return torch.sparse.FloatTensor(i, v, torch.Size(shape))
 
 def reshape_fortran(x, shape):
     if len(x.shape) > 0:
@@ -2160,7 +2152,7 @@ def find_superpixel_UV(U_sparse, V, dims, cut_off_point, length_cut, th, eight_n
     
     
     #First load objects..
-    U_sparse = scipy_coo_to_torchsparse_coo(U_sparse.tocoo()).to(device)
+    U_sparse = torch_sparse.tensor.from_scipy(U_sparse).to(device)
     V = torch.Tensor(V).to(device)
     
     if a is not None and c is not None: 
@@ -2171,7 +2163,7 @@ def find_superpixel_UV(U_sparse, V, dims, cut_off_point, length_cut, th, eight_n
     if resid_flag: 
         c = torch.Tensor(c).t().to(device)
         # a_sparse = scipy.sparse.coo_matrix(a)
-        a_sparse = scipy_coo_to_torchsparse_coo(scipy.sparse.coo_matrix(a)).to(device)
+        a_sparse = torch_sparse.tensor.from_scipy(scipy.sparse.coo_matrix(a)).to(device)
     
 
     dims = (dims[0], dims[1], V.shape[1])
@@ -2340,11 +2332,11 @@ def spatial_temporal_ini_UV(U,V, dims, th, comps, idx, length_cut, a = None, c =
     
     
     V_torch = torch.from_numpy(V).to(device)
-    U_sparse_torch = scipy_coo_to_torchsparse_coo(U).to(device)
+    U_sparse_torch = torch_sparse.tensor.from_scipy(U).to(device)
     
     if a is not None and c is not None: 
         c = torch.Tensor(c).t().to(device)
-        a_sparse = scipy_coo_to_torchsparse_coo(scipy.sparse.coo_matrix(a)).to(device)
+        a_sparse = torch_sparse.tensor.from_scipy(scipy.sparse.coo_matrix(a)).to(device)
     
 
     
