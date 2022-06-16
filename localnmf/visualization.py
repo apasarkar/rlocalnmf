@@ -1104,10 +1104,17 @@ def generate_movie_maxproj(a_use, c_use, dims, random_values, slice_val=2,seed=9
     return final_movie.squeeze()
 
 
+def clip_movie_by_percentile(mov, percentile): 
+    if percentile == 100:
+        return mov #Avoid unnecessary work
+    value = np.percentile(mov, percentile)
+    print("we are clipping this movie at value {}".format(value))
+    mov[mov > value] = value
+    return mov
 
 
 def write_mpl_no_compress_comparisons(mov_list, 
-              filename, img_types,
+              filename, img_types, movie_scales,
               fr=3, 
               titles=None, scale=1, titlesize=20, ticksize=14, colorticksize=12, width_const = 4, offset = 0):
     """ Functionality to create customized triptych demixing videos
@@ -1129,9 +1136,12 @@ def write_mpl_no_compress_comparisons(mov_list,
     if titles is None:
         titles = ['']*n_mov
         
-    for mdx, mov in enumerate(mov_list):
-        if img_types[mdx] == 1 and mdx < len(mov_list) - 2:
-            mov_list[mdx] -= np.amin(mov_list[mdx])
+    # for mdx, mov in enumerate(mov_list):
+    #     if img_types[mdx] == 1 and mdx < len(mov_list) - 2:
+    #         mov_list[mdx] -= np.amin(mov_list[mdx])
+    
+    for j in range(len(mov_list)):
+        mov_list[j] = clip_movie_by_percentile(mov_list[j], movie_scales[j])
     
     #Compute scales
     mins = np.empty(n_mov)
@@ -1140,7 +1150,7 @@ def write_mpl_no_compress_comparisons(mov_list,
     for mdx, mov in enumerate(mov_list):
         print(mdx)
         print(mov[mdx].shape)
-        mins[mdx] = np.min(mov) 
+        mins[mdx] = np.min(mov)
         maxs[mdx] = np.max(mov) 
     realmin = np.amin(mins)
     realmax = np.amax(maxs)
@@ -1345,7 +1355,7 @@ def generate_color_movie(a_use, c_use, dims, random_values, seed=999):
 
 
 def standard_demix_vid(a, c, b, raw_mov, denoised_mov, fluctuating_bg_terms, filename, order = "C", fr=30, \
-              titles=None, scale=1, titlesize=20, ticksize=14, colorticksize=12, a_real = None, c_real = None, \
+              titles=None, movie_scales=None, scale=1, titlesize=20, ticksize=14, colorticksize=12, a_real = None, c_real = None, \
                       rgbrange = [80, 255], channels = 3, mean_sub_res = False, min_sub_signals = True, width_const = 3.5,\
                       random_values = None, start = 0, end = 1000, dim1_range=None, dim2_range=None):
     '''
@@ -1378,6 +1388,8 @@ def standard_demix_vid(a, c, b, raw_mov, denoised_mov, fluctuating_bg_terms, fil
         end: int. Last frame to include in video
         '''
     
+    if movie_scales is None: 
+        movie_scales = [1 for i in range(len(tiles))]
     if dim1_range is None: 
         dim1_range = [0, raw_mov.shape[0]]
     if dim2_range is None: 
@@ -1393,7 +1405,7 @@ def standard_demix_vid(a, c, b, raw_mov, denoised_mov, fluctuating_bg_terms, fil
     # Add raw movie: 
     titles.append("Motion Corrected Data")
     img_types.append(1)
-    mov_list.append(clip_raw_movie(raw_mov)[dim1_range[0]:dim1_range[1], dim2_range[0]:dim2_range[1],:])
+    mov_list.append(raw_mov[dim1_range[0]:dim1_range[1], dim2_range[0]:dim2_range[1],:])
     
     #Add denoised movie:
     titles.append("Denoised Data")
@@ -1430,14 +1442,14 @@ def standard_demix_vid(a, c, b, raw_mov, denoised_mov, fluctuating_bg_terms, fil
         c_minsub = c - np.amin(c, axis = 1, keepdims = True)
         AC_minsub = np.tensordot(a, c_minsub, axes=(2,0))
         img_types.append(1)
-        mov_list.append(threshold_movie_max(AC_minsub, denoised_max)[dim1_range[0]:dim1_range[1], dim2_range[0]:dim2_range[1], :])
+        mov_list.append(AC_minsub[dim1_range[0]:dim1_range[1], dim2_range[0]:dim2_range[1], :])
 #         min_AC = np.amin(AC, axis = 2, keepdims = True)
 #         AC = AC - min_AC
         titles.append("Signal Estimates")
     else:
         titles.append("Signal Estimates")
         img_types.append(1)
-        mov_list.append(threshold_movie_max(AC, denoised_max)[dim1_range[0]:dim1_range[1], dim2_range[0]:dim2_range[1], :])
+        mov_list.append(AC[dim1_range[0]:dim1_range[1], dim2_range[0]:dim2_range[1], :])
     
     
     
@@ -1475,11 +1487,11 @@ def standard_demix_vid(a, c, b, raw_mov, denoised_mov, fluctuating_bg_terms, fil
         titles.append("Residual")
     titles.append("Residual")
     img_types.append(1)
-    mov_list.append(threshold_movie_max(res, denoised_max * 0.5)[dim1_range[0]:dim1_range[1], dim2_range[0]:dim2_range[1], :])
+    mov_list.append(res[dim1_range[0]:dim1_range[1], dim2_range[0]:dim2_range[1], :])
     
     
     #Generate Demixing Video
-    write_mpl_no_compress_comparisons(mov_list, filename, img_types, titles = titles, fr=fr, \
+    write_mpl_no_compress_comparisons(mov_list, filename, img_types,  movie_scales, titles = titles, fr=fr, \
             scale=scale, titlesize=titlesize, ticksize=ticksize, colorticksize=colorticksize, width_const = width_const, offset=start) 
        
 
