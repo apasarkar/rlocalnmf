@@ -2700,7 +2700,16 @@ def demix_whole_data_robust_ring_lowrank(U,V_PMD,r=10, cut_off_point=[0.95,0.9],
     else:
         return {'fin_rlt':fin_rlt, "superpixel_rlt":superpixel_rlt}
 
-
+def get_mean_data(U_sparse, R, V, device='cpu'):
+    V = torch.from_numpy(V).float().to(device)
+    V_mean = torch.mean(V, dim=1, keepdim=True)
+    R = torch.from_numpy(R).float().to(device)
+    RV = torch.matmul(R, V_mean)
+    U_sparse = torch_sparse.tensor.from_scipy(U_sparse).to(device)
+    mean_img = torch_sparse.matmul(U_sparse, RV)
+    return mean_img.cpu().numpy()
+    
+    
 def update_AC_bg_l2_Y_ring_lowrank(U_sparse, R, V, V_orig,r,dims, a, c, b, patch_size, corr_th_fix, corr_th_fix_sec = 0.4, corr_th_del = 0.2, switch_point = 10,
             maxiter=50, tol=1e-8, update_after=None,merge_corr_thr=0.5,
             merge_overlap_thr=0.7, num_plane=1, plot_en=False,
@@ -2715,7 +2724,8 @@ def update_AC_bg_l2_Y_ring_lowrank(U_sparse, R, V, V_orig,r,dims, a, c, b, patch
     '''
     K = c.shape[1];
     res = np.zeros(maxiter);
-    uv_mean = U_sparse.dot(R.dot(V.mean(axis = 1, keepdims = True))) #Pixel-wise mean
+    # uv_mean = U_sparse.dot(R.dot(V.mean(axis = 1, keepdims = True))) #Pixel-wise mean
+    uv_mean = get_mean_data(U_sparse, R, V, device=device)
     num_list = np.arange(K);
     d1, d2 = dims[:2]
     T = V.shape[1]
