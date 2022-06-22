@@ -2740,6 +2740,9 @@ def update_AC_bg_l2_Y_ring_lowrank(U_sparse, R, V, V_orig,r,dims, a, c, b, patch
     mask_ab = mask_a;
     
     
+    print("Initializing W matrix")
+    W_original = init_w(d1, d2, r)
+    
     #Precompute VV^t for X updates
     VVt = V.dot(V.T) #This is for the orthogonal V
     VVt_orig = V_orig.dot(V_orig.T) #This is for the original V
@@ -2757,6 +2760,8 @@ def update_AC_bg_l2_Y_ring_lowrank(U_sparse, R, V, V_orig,r,dims, a, c, b, patch
     corr_img_all_reg = vcorrcoef_UV_noise(U_sparse, R, V, c, batch_size = batch_size, device=device)
     corr_img_all_reg_r = corr_img_all_reg.reshape(patch_size[0],patch_size[1],-1,order="F");
     print("Standard Corr Image Took {}".format(time.time() - corr_time))
+    
+    
    
     print("shape of corr_img_all_r is {}".format(corr_img_all_r.shape)) 
     if plot_debug:
@@ -2821,8 +2826,6 @@ def update_AC_bg_l2_Y_ring_lowrank(U_sparse, R, V, V_orig,r,dims, a, c, b, patch
         test_time = time.time()
         
         if iters >= skips:
-            if iters == skips:
-                W=init_w(d1, d2, r)
             
             
             print("X estimate")
@@ -2835,13 +2838,14 @@ def update_AC_bg_l2_Y_ring_lowrank(U_sparse, R, V, V_orig,r,dims, a, c, b, patch
                 raise ValueError('Full Ring Model no longer supported')
             elif update_type == "Constant":
                 update_start = time.time()
-                W = update_ring_model_w_const(U_sparse, R, V, a, X, b, W, d1, d2, T, r, device=device, mask_a=None, batch_size = 10000)
+                W = update_ring_model_w_const(U_sparse, R, V, a, X, b, W_original, d1, d2, T, r, device=device, mask_a=None, batch_size = 10000)
 #                 W = csr_matrix(avg_interpolation(W.toarray(), d1, d2))
                 print("THE W UPDATE TOOK {}".format(time.time() - update_start))
             else:
                 print("ERROR: UPDATE_TYPE NOT SUPPORTED")
         else:
-            W = scipy.sparse.coo_matrix((d1*d2, d1*d2))
+            # W = scipy.sparse.coo_matrix((d1*d2, d1*d2))
+            W = W_original
 
         test_time = time.time()
         
@@ -2875,6 +2879,7 @@ def update_AC_bg_l2_Y_ring_lowrank(U_sparse, R, V, V_orig,r,dims, a, c, b, patch
         print("temporal regression update took {}".format(time.time() - test_time))  
         #Denoise 'c' components if desired
         if denoise:
+            print("denoising")
             c = ca_utils.denoise(c) #We now use OASIS denoising to improve improve signals
             c = np.nan_to_num(c, posinf = 0, neginf = 0, nan = 0) #Gracefully handle invalid values
         
@@ -2918,8 +2923,6 @@ def update_AC_bg_l2_Y_ring_lowrank(U_sparse, R, V, V_orig,r,dims, a, c, b, patch
 
             #Currently using rigid mask
             mask_a_rigid = make_mask_rigid(corr_img_all_r, corr_th_fix, mask_ab)    
-    
-            mask_ab = np.logical_or(mask_a_rigid, mask_ab)
 
             ## Now we delete components based on whether they have a 0 residual corr img with their supports or not...
             temp = (((mask_ab*corr_img_all) > corr_th_del).sum(axis=0) == 0);
