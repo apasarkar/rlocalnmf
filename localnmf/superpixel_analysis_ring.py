@@ -2874,7 +2874,7 @@ def update_AC_bg_l2_Y_ring_lowrank(U_sparse, R, V, V_orig,r,dims, a, c, b, patch
             
         ###TEMPORAL UPDATE
         test_time = time.time()
-        c = regression_update.temporal_update_HALS(U_sparse, V_orig, W.tocsr(), X, a, c, b)
+        c = regression_update.temporal_update_HALS(U_sparse, V_orig, W, X, a, c, b, device=device)
         print('the shape of c after temporal update is {}'.format(c.shape))
         print("temporal regression update took {}".format(time.time() - test_time))  
         #Denoise 'c' components if desired
