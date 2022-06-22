@@ -227,6 +227,7 @@ def spatial_update_HALS(U_sparse, V, W, X, a, c, b, device='cpu', mask_ab = None
     
     #Init s such that bsV = static background
     C_prime = torch.matmul(c.t(), c)
+    
     cV = torch.matmul(V, c).t()
     cVX = torch.matmul(cV, X.t())
     
@@ -312,6 +313,7 @@ def spatial_update_HALS(U_sparse, V, W, X, a, c, b, device='cpu', mask_ab = None
         
     return a_sparse.cpu()
     
+ 
 def temporal_update_HALS(U_sparse, V, W, X, a, c, b, device='cpu'):
     '''
     Inputs: 
@@ -328,7 +330,6 @@ def temporal_update_HALS(U_sparse, V, W, X, a, c, b, device='cpu'):
         
         KEY ASSUMPTION: V has, as its last row, a vector where each component has value -1
     '''
-    
     #Convert all inputs to torch and move to device
     U_sparse = torch_sparse.tensor.from_scipy(U_sparse).float().to(device)
     V = torch.from_numpy(V).float().to(device)
@@ -343,139 +344,46 @@ def temporal_update_HALS(U_sparse, V, W, X, a, c, b, device='cpu'):
     #Init s such that bsV = static background
     s = torch.zeros([1, V.shape[0]], device=device)
     s[:, -1] = -1
+
     
-    index_select_tensor = torch.LongTensor([0]).to(device)
+    
+    ##Precompute quantities used throughout all iterations
+    atU_PMD = torch.zeros((a.shape[1], V.shape[0]), device=device)
+    
+    #Step 1: Add atU
+    atU_PMD += torch_sparse.matmul(a_sparse.t(), U_sparse).to_dense()
+    
+    #Step 2: Subtract atWU
+    atW = torch_sparse.matmul(a_sparse.t(), W).to_dense()
+    atWU = torch_sparse.matmul(U_sparse.t(), atW.t()).t()
+    atU_PMD -= atWU
+    
+    #Step 3: Add atWaX
+    aX = torch_sparse.matmul(a_sparse, X)
+    atWaX = torch.matmul(atW, aX)
+    atU_PMD += atWaX
+    
+    #Step 4: Add atWbs
+    atWb = torch.matmul(atW, b)
+    atU_PMD += torch.matmul(atWb, s)
+    
+    #Step 5: Subtract atbs
+    atb = torch_sparse.matmul(a_sparse.t(), b)
+    atbs = torch.matmul(atb, s)
+    atU_PMD -= atbs
+    
+    atU_PMD_V = torch.matmul(atU_PMD, V)
+    
+    
+    ata = torch_sparse.matmul(a_sparse.t(), a_sparse).to_dense()
     
     threshold_function = torch.nn.ReLU()
     for i in range(c.shape[1]):
+        a_ia = ata[[i], :]
+        a_iaC = torch.matmul(a_ia, c.t())
         
-        index_select_tensor[0] = i
-        a_i = torch_sparse.index_select(a_sparse, 1, index_select_tensor)
-        a_i_t = a_i.t()
-
-        denominator = torch_sparse.matmul(a_i_t, a_i).to_dense()  
-        denominator = denominator[0, 0]
-        
-        
-        ##Step 1: Calculate a_i^t * U. NOTE: This is consistent
-        a_iU = torch_sparse.matmul(a_i_t, U_sparse).to_dense()  
-        
-        ##Step 2: Calculate a_i^t*W*U
-        
-        a_iW = torch_sparse.matmul(a_i_t, W)
-        a_iWU = torch_sparse.matmul(a_iW, U_sparse).to_dense()
-        
-        ##Step 3: Calculate a_i^tWaX
-        a_iWa = torch_sparse.matmul(a_iW,a_sparse)
-        a_iWaX = torch_sparse.matmul(a_iWa, X)
-        
-        ##Step 4: Calculate a_i^tWbs
-        a_iWb = torch_sparse.matmul(a_iW, b)
-        a_iWbs = torch.matmul(a_iWb, s)
-        
-        ##Step 5: Calculate a_i^t * b * s. NOTE: THIS WORKS
-        a_ibs = torch.matmul(torch_sparse.matmul(a_i_t, b), s)
-        
-        ##Step 6: Calculate a_i^t * (U_PMD) * V
-        a_i_t_U_V= torch.matmul(a_iU - (a_iWU - a_iWaX - a_iWbs) - a_ibs, V)
-
-        
-        ##Step 7: Calculate a_i^t * a * c^t. NOTE: THIS WORKS
-        a_ia = torch_sparse.matmul(a_i_t, a_sparse)
-        a_iaC = torch_sparse.matmul(a_ia, c.t())
-        
-        c[:, [i]] += ((a_i_t_U_V - a_iaC)/denominator).t()
+        c[:, [i]] += ((atU_PMD_V[[i], :] - a_iaC)/ata[i, i]).t()
         
         c[:, [i]] = threshold_function(c[:, [i]])
         
     return c.cpu().numpy()
-        
-        
-
-        
-    
-# def temporal_update_HALS(U_sparse, V, W, X, a, c, b):
-#     '''
-#     Computes a temporal HALS updates: 
-#     Params: 
-#         U_sparse: scipy.sparse.coo matrix. Sparse U matrix, dimensions d x R 
-#         V: PMD V matrix, dimensions R x T
-#             V has as its last row a vector of all -1's
-#         X: Approximate solution to c^t = XV. Dimensions k x R (k neurons in a/c)
-#         a_sparse: scipy.sparse.csr_matrix. dimensions d x k
-#         c: np.ndarray. dimensions T x k
-#         b: np.ndarray. dimensions d x 1. represents static background 
-#     '''
-#     #Initialize c
-#     c_new = c
-    
-#     #Initialize a_sparse
-#     a_sparse = scipy.sparse.csr_matrix(a)
-    
-#     #Precompute some transposes to avoid repeatedly taking transposes
-#     U_sparse_t = U_sparse.transpose().tocsr()
-#     W_t = W.transpose().tocsr()
-#     a_sparse_t = a_sparse.transpose().tocsr()
-    
-#     aW_prod = a_sparse_t * W_t
-#     aW_prod = aW_prod.tocsr()
-    
-#     aU_prod = a_sparse_t * U_sparse
-#     aU_prod = aU_prod.tocsr()
-#     #Precompute a^t * a
-#     A_prime = (a_sparse_t * a_sparse).toarray() 
-    
-#     #Init s such that bsV = static background
-#     s = np.zeros((1, V.shape[0]))
-#     s[:, -1] = -1 
-#     for i in range(c.shape[1]):
-        
-#         #For all this notation, * denotes matrix multiplication
-        
-        
-        
-#         #This is (a_i)^t * a  * c^t
-#         aac = A_prime[i, ].dot(c.T)
-        
-#         #Now we calculate (a_i)^t * U, where
-#         # U = U_PMD - W * (U_PMD - a * X - b * s) - b * s
-        
-#         #(1) First find (a_i)^t * U_PMD
-# #         aU = (U_sparse_t.dot(a_sparse_t[i, :].T)).T
-#         aU = aU_prod[i, :]
-        
-#         #(2) Find (a_i)^t * b * s
-#         ab = a_sparse_t[i, :].dot(b)
-#         ab_s = ab.dot(s)
-        
-#         ##Now find (a_i)^t * W(U_PMD - a * X - b * s)
-        
-#         #For each term, we always need to compute (a_i)^t * W 
-#         h_i = aW_prod[i, :]
-        
-#         #(3a) Find (a_i)^t * W * U_PMD
-#         aWU = ((U_sparse_t.dot(h_i.T)).T).toarray()
-# #         print("type of aWU is {}".format(type(aWU)))
-        
-#         #(3b) Find (a_i)^t * W * a * X
-#         #Find (a_i)^t * W
-#         aWa = (a_sparse_t.dot(h_i.T)).transpose()
-#         aWaX = aWa.dot(X) 
-        
-#         #(3c) (a_i)^t * W * b * s
-#         aWb = h_i.dot(b)
-#         aWbs = aWb.dot(s)
-        
-        
-#         final_aU = (aU - ab_s - (aWU - aWaX - aWbs))
-#         final_aUV = final_aU.dot(V)
-        
-        
-#         c_new[:, [i]] += ((final_aUV - aac)/A_prime[i,i]).T
-        
-#         out = c_new[:, [i]]
-#         out[out<0] = 0
-#         c_new[:, [i]] = out
-        
-
-#     return c_new
