@@ -2857,7 +2857,7 @@ def update_AC_bg_l2_Y_ring_lowrank(U_sparse, R, V, V_orig,r,dims, a, c, b, patch
         
         #Approximate c as XV for some X:
         X = regression_update.estimate_X(c, V_orig, VVt_orig, device=device)       
-        a = regression_update.spatial_update_HALS(U_sparse, V_orig, W.tocsr(), X, a, c, b,  device=device, mask_ab=mask_ab.T).to_dense().numpy()
+        a = regression_update.spatial_update_HALS(U_sparse, V_orig, W, X, a, c, b,  device=device, mask_ab=mask_ab.T).to_dense().numpy()
         
 
         ### Delete Bad Components
