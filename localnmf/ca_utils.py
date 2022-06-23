@@ -8,9 +8,9 @@
 
 import numpy as np
 # from caiman.source_extraction.cnmf.deconvolution import constrained_foopsi
-# from oasis.oasis_methods import oasisAR1, oasisAR2
-# from oasis.functions import gen_data, gen_sinusoidal_data, deconvolve, estimate_parameters
-# from oasis.plotting import simpleaxis
+from oasis.oasis_methods import oasisAR1, oasisAR2
+from oasis.functions import gen_data, gen_sinusoidal_data, deconvolve, estimate_parameters
+from oasis.plotting import simpleaxis
 
 import functools
 import multiprocessing
@@ -77,39 +77,40 @@ def normalize_traces(trace1, trace2):
 
 
 def get_box(img):
-        """For a given frame in the dataset, this function calculates its bounding box
-            args:
-                img: a (d1 x d2) ndarray. The image we wish to analyze
-                
-            returns:
-                [height_min, height_max, width_min, width_max]: a list of bounding coordinates which can be used to crop original image
+    """For a given frame in the dataset, this function calculates its bounding box
+        args:
+            img: a (d1 x d2) ndarray. The image we wish to analyze
+
+        returns:
+            [height_min, height_max, width_min, width_max]: a list of bounding coordinates which can be used to crop original image
+
+    """
+
+    #If all pixels are 0, there is no need to crop (the image is empty)
+    if np.count_nonzero(img) == 0:
+        return (0, img.shape[0], 0, img.shape[1])
+
+    #Calculate bounding box by finding minimal elements in the support
+    else:
+        x,y = np.nonzero(img)
+        return (int(np.amin(x)), int(np.amax(x)), int(np.amin(y)), int(np.amax(y)))
+
         
-        """
-        
-        #If all pixels are 0, there is no need to crop (the image is empty)
-        if np.count_nonzero(img) == 0:
-            return (0, img.shape[0], 0, img.shape[1])
-        
-        #Calculate bounding box by finding minimal elements in the support
-        else:
-            x,y = np.nonzero(img)
-            return (int(np.amin(x)), int(np.amax(x)), int(np.amin(y)), int(np.amax(y)))
-        
-        
-# def denoise(ci):
-#     """
-#     Denoises a set of temporal traces
-#     Params:
-#         ci: ndarray (A x B). Algorithms denoises in the second dimension (i.e. it denoises a total of 'A' temporal traces)
-#     """
-#     ci_new = np.zeros_like(ci)
-#     for k in range(ci.shape[1]):
-#         c = ci[:, k].astype("double")
-#         denoised, s, b, g, lam = deconvolve(c, penalty=1)
-#         denoised = denoised + b
-#         ci_new[:, k] = denoised.squeeze()
+                   
+def denoise(ci):
+    """
+    Denoises a set of temporal traces
+    Params:
+        ci: ndarray (A x B). Algorithms denoises in the second dimension (i.e. it denoises a total of 'A' temporal traces)
+    """
+    ci_new = np.zeros_like(ci)
+    for k in range(ci.shape[1]):
+        c = ci[:, k].astype("double")
+        denoised, s, b, g, lam = deconvolve(c, penalty=1)
+        denoised = denoised + b
+        ci_new[:, k] = denoised.squeeze()
     
-#     return ci_new 
+    return ci_new 
 
 def dim_1_matmul(A, B, device = 'cuda', batch_size = 10000):
     '''
@@ -216,7 +217,7 @@ def runpar(f, X, nprocesses=None, **kwargs):
     
     if nprocesses is None:
         nprocesses = int(multiprocessing.cpu_count()) 
-        print("the number of processes is {}".format(nprocesses))
+        # print("the number of processes is {}".format(nprocesses))
 #         val = len(os.sched_getaffinity(os.getpid()))
 #         print('the number of usable cpu cores is {}'.format(val))
     
