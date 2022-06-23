@@ -2750,7 +2750,7 @@ def update_AC_bg_l2_Y_ring_lowrank(U_sparse, R, V, V_orig,r,dims, a, c, b, patch
         
     #Get residual correlation image
     corr_time = time.time()
-    corr_img_all = vcorrcoef_resid(U_sparse, R, V, a, c, batch_size = batch_size)
+    corr_img_all = vcorrcoef_resid(U_sparse, R, V, a, c, batch_size = batch_size, device=device)
     corr_img_all_r = corr_img_all.reshape(patch_size[0],patch_size[1],-1,order="F");
     print("Resid Corr Image Took {}".format(time.time() - corr_time))
     #Get regular correlation image
@@ -2913,7 +2913,7 @@ def update_AC_bg_l2_Y_ring_lowrank(U_sparse, R, V, V_orig,r,dims, a, c, b, patch
                 
             
             print("calculating the residual correlation image")
-            corr_img_all = vcorrcoef_resid(U_sparse, R, V, a, c, batch_size = batch_size)
+            corr_img_all = vcorrcoef_resid(U_sparse, R, V, a, c, batch_size = batch_size, device=device)
             print("calculating the robust standard correlation image")            
             corr_img_all_reg = vcorrcoef_UV_noise(U_sparse, R, V, c, batch_size = batch_size, device=device) 
             
