@@ -187,7 +187,7 @@ def scipy_coo_to_torchsparse_coo(scipy_coo_mat):
     
 def spatial_update_HALS(U_sparse, V, W, X, a, c, b, device='cpu', mask_ab = None):
     '''
-    Computes a temporal HALS updates: 
+    Computes a spatial HALS updates: 
     Params: 
         U_sparse: scipy.sparse.coo matrix. Sparse U matrix, dimensions d x R 
         V: PMD V matrix, dimensions R x T
@@ -210,14 +210,12 @@ def spatial_update_HALS(U_sparse, V, W, X, a, c, b, device='cpu', mask_ab = None
     
     
     if mask_ab is None: 
-        mask_ab = (a > 0).T
-        mask_ab = scipy_coo_to_torchsparse_coo(mask_ab).to(device)
+        mask_ab = scipy.sparse.coo_matrix((a > 0).T)
+        mask_ab = torch_sparse.tensor.from_scipy(mask_ab).float().to(device)
     else: 
         mask_ab = scipy.sparse.coo_matrix(mask_ab)
-        mask_ab = scipy_coo_to_torchsparse_coo(mask_ab).to(device) 
+        mask_ab = torch_sparse.tensor.from_scipy(mask_ab).float().to(device) 
         
-        
-
     a = scipy.sparse.coo_matrix(a)
     a_sparse = torch_sparse.tensor.from_scipy(a).float().to(device)
     
@@ -228,64 +226,54 @@ def spatial_update_HALS(U_sparse, V, W, X, a, c, b, device='cpu', mask_ab = None
     #Init s such that bsV = static background
     C_prime = torch.matmul(c.t(), c)
     
-    cV = torch.matmul(V, c).t()
-    cVX = torch.matmul(cV, X.t())
+    ctVt = torch.matmul(V, c).t()
+    
+    ctVtUt_net = torch.zeros((c.shape[1], U_sparse.sparse_sizes()[0]), device=device)
+    
+    #Step 1: Compute ctVtU_PMD^t
+    ctVtU_PMDt = torch_sparse.matmul(U_sparse, ctVt.t()).t()
+    ctVtUt_net = ctVtUt_net + ctVtU_PMDt
+    
+    #Step 2: Compute ctVtU_PMD^tW^t
+    ctVtU_PMD_tWt = torch_sparse.matmul(W, ctVtU_PMDt.t()).t()
+    ctVtUt_net -= ctVtU_PMD_tWt
+    
+    #Step 3: Compute ctVtXtatWt
+    ctVtXt = torch.matmul(ctVt, X.t())
+    ctVtXtat = torch_sparse.matmul(a_sparse, ctVtXt.t()).t()
+    ctVtXtatWt = torch_sparse.matmul(W, ctVtXtat.t()).t()
+    ctVtUt_net += ctVtXtatWt
+    
+    #Step 4: ctVtstbtWt
+    btWt = torch_sparse.matmul(W, b).t()
+    ctVtst = torch.matmul(ctVt, s.t())
+    ctVtstbtWt = torch.matmul(ctVtst, btWt)
+    ctVtUt_net += ctVtstbtWt
+    
+    #Step 5: ctVtstbt
+    ctVtstbt = torch.matmul(ctVtst, b.t())
+    ctVtUt_net -= ctVtstbt
+
     
     index_select_tensor = torch.LongTensor([0]).to(device)
-    
+
+    print(mask_ab.sparse_sizes())
     for i in range(c.shape[1]):
-        
+              
+            
         index_select_tensor[0] = i
         mask_ab_torchsparse_sub = torch_sparse.index_select(mask_ab, 0,\
                                                             index_select_tensor)
         ind_torch = mask_ab_torchsparse_sub.storage.col()
 
         
-        #(1) First compute (c^t)_i * V^t * (U_PMD)^t
-        cVU = torch_sparse.matmul(U_sparse, cV[[i], ].t()).t()
-        bg = torch.matmul(cV[[i], :], s.t())
-        bg = torch.matmul(bg, b.t())
-        
-        #(2) Get static bg component: (c^t)_i * V^t * (s^t * b^t)
-        # bg = cV[[i], :].dot(s.t())
-        # bg = bg.dot(b.T)  #Output: 1 x d vector
-
-        '''
-        Step (3) Calculate (c^t)_i * V^t * (W * (U_PMD - a * X - b * s))^t
-        This is equal to (c^t)_i * V^t * (U_PMD - a * X - b * s)^t * W^t
-        we refer to (c^t)_i * V^t as h_i.
-        We need to calculate
-        (a) h_i * U_PMD^t
-        (b) h_i * X^t * a^t
-        (c) h_i * s^t * b^t
-        
-        Note that (a) has already been computed above (cVU)
-        Also note (c) has been computed above (bg)
-        
-        So all we need to compute is (b) 
-        
-        These are all 1 x d vectors, so we add them, and then multiply by W^t to get our 
-        final result
-        '''
-        
-        #Get (b)
-        cVXa = torch_sparse.matmul(a_sparse, cVX[[i], :].t()).t()
-        # cVXa = (a_sparse.dot(cVX[i, :].T)).T
-        
-        #Add (a) - (b) - (c) 
-        W_sum = cVU - cVXa - bg
-        W_temp = torch_sparse.index_select(W, 0, ind_torch) ##
-        W_term = torch_sparse.matmul(W_temp, W_sum.t()).t()
-        
         cca = torch_sparse.matmul(a_sparse, C_prime[[i], :].t()).t()
-        final_vec = (cVU - bg - cca)/C_prime[i, i]
+        final_vec = (ctVtUt_net[[i], :] - cca)/C_prime[i, i]
 
         
         #Crop final_vec
         final_vec = torch.squeeze(final_vec.t())
         final_vec = final_vec[ind_torch]
-
-        final_vec = torch.sub(final_vec, torch.squeeze(W_term/C_prime[i,i]))
 
         
         values = final_vec # final_vec[ind]
@@ -311,8 +299,7 @@ def spatial_update_HALS(U_sparse, V, W, X, a, c, b, device='cpu', mask_ab = None
         
         
         
-    return a_sparse.cpu()
-    
+    return a_sparse.cpu()    
  
 def temporal_update_HALS(U_sparse, V, W, X, a, c, b, device='cpu'):
     '''
