@@ -348,31 +348,31 @@ def temporal_update_HALS(U_sparse, V, W, X, a, c, b, device='cpu'):
     
     
     ##Precompute quantities used throughout all iterations
-    atU_PMD = torch.zeros((a.shape[1], V.shape[0]), device=device)
+    atU_net = torch.zeros((a.shape[1], V.shape[0]), device=device)
     
     #Step 1: Add atU
-    atU_PMD += torch_sparse.matmul(a_sparse.t(), U_sparse).to_dense()
+    atU_net += torch_sparse.matmul(a_sparse.t(), U_sparse).to_dense()
     
     #Step 2: Subtract atWU
     atW = torch_sparse.matmul(a_sparse.t(), W).to_dense()
     atWU = torch_sparse.matmul(U_sparse.t(), atW.t()).t()
-    atU_PMD -= atWU
+    atU_net -= atWU
     
     #Step 3: Add atWaX
     aX = torch_sparse.matmul(a_sparse, X)
     atWaX = torch.matmul(atW, aX)
-    atU_PMD += atWaX
+    atU_net += atWaX
     
     #Step 4: Add atWbs
     atWb = torch.matmul(atW, b)
-    atU_PMD += torch.matmul(atWb, s)
+    atU_net += torch.matmul(atWb, s)
     
     #Step 5: Subtract atbs
     atb = torch_sparse.matmul(a_sparse.t(), b)
     atbs = torch.matmul(atb, s)
-    atU_PMD -= atbs
+    atU_net -= atbs
     
-    atU_PMD_V = torch.matmul(atU_PMD, V)
+    atU_net_V = torch.matmul(atU_net, V)
     
     
     ata = torch_sparse.matmul(a_sparse.t(), a_sparse).to_dense()
@@ -382,7 +382,7 @@ def temporal_update_HALS(U_sparse, V, W, X, a, c, b, device='cpu'):
         a_ia = ata[[i], :]
         a_iaC = torch.matmul(a_ia, c.t())
         
-        c[:, [i]] += ((atU_PMD_V[[i], :] - a_iaC)/ata[i, i]).t()
+        c[:, [i]] += ((atU_net_V[[i], :] - a_iaC)/ata[i, i]).t()
         
         c[:, [i]] = threshold_function(c[:, [i]])
         
