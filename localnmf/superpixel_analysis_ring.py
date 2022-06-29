@@ -2203,11 +2203,11 @@ def find_superpixel_UV(U_sparse, V, dims, cut_off_point, length_cut, th, eight_n
             indices_curr_torch = torch.from_numpy(indices_curr).to(device)
             # print(" at {}".format(time.time() - start_time))
             U_sparse_crop = torch_sparse.index_select(U_sparse, 0, indices_curr_torch)
-            print(type(U_sparse_crop))
+            # print(type(U_sparse_crop))
             # print(" at {}".format(time.time() - start_time))
             Yd = reshape_fortran(torch_sparse.matmul(U_sparse_crop, V), (x_interval, y_interval, -1))
-            print("the type of Yd is {}".format(type(Yd)))
-            print("the shape of Yd is {}".format(Yd.shape))
+            # print("the type of Yd is {}".format(type(Yd)))
+            # print("the shape of Yd is {}".format(Yd.shape))
             if resid_flag:
                 a_sparse_crop = torch_sparse.index_select(a_sparse, 0, indices_curr_torch)
                 ac_mov = reshape_fortran(torch_sparse.matmul(a_sparse_crop, c), (x_interval, y_interval, -1))
@@ -2216,7 +2216,7 @@ def find_superpixel_UV(U_sparse, V, dims, cut_off_point, length_cut, th, eight_n
                 Yd = torch.sub(Yd, ac_mov)
                 # Yd -= ac_mov
             
-            print("{}{}".format(tile_x, tile_y))
+            # print("{}{}".format(tile_x, tile_y))
                 
             # Yd = torch.from_numpy(Yd).to(device)   
             
@@ -2241,7 +2241,7 @@ def find_superpixel_UV(U_sparse, V, dims, cut_off_point, length_cut, th, eight_n
            
             #Vertical pixel correlations
             rho = torch.mean(Yd[:, :-1, :] * Yd[:, 1:, :], dim = 0)
-            print("vertical. after the elt wise mult, rho shape is {}".format(rho.shape))
+            # print("vertical. after the elt wise mult, rho shape is {}".format(rho.shape))
             rho = torch.cat( (rho,torch.zeros([1, rho.shape[1]]).double().to(device)), dim = 0)
             temp_rho = rho.cpu().numpy()
             temp_indices = np.where(temp_rho > cut_off_point)
@@ -2253,10 +2253,10 @@ def find_superpixel_UV(U_sparse, V, dims, cut_off_point, length_cut, th, eight_n
             
             #Horizonal pixel correlations
             rho = torch.mean(Yd[:, :, :-1] * Yd[:, :, 1:], dim = 0)
-            print("horizontal. after the element-wise multiply, rrho shape is {}".format(rho.shape))
+            # print("horizontal. after the element-wise multiply, rrho shape is {}".format(rho.shape))
             rho = torch.cat( (rho,torch.zeros([rho.shape[0], 1]).double().to(device)), dim = 1)
             temp_rho = rho.cpu().numpy()
-            print("the shape of rho in horizonttal is {}".format(temp_rho.shape))
+            # print("the shape of rho in horizonttal is {}".format(temp_rho.shape))
             temp_indices = np.where(temp_rho > cut_off_point)
             A_curr = ref_mat[(temp_indices[0] + x_pt, temp_indices[1] + y_pt)]
             B_curr = ref_mat[(temp_indices[0] + x_pt, temp_indices[1] + y_pt + 1)]
@@ -2844,8 +2844,8 @@ def update_AC_bg_l2_Y_ring_lowrank(U_sparse, R, V, V_orig,r,dims, a, c, b, patch
             else:
                 print("ERROR: UPDATE_TYPE NOT SUPPORTED")
         else:
-            # W = scipy.sparse.coo_matrix((d1*d2, d1*d2))
-            W = W_original
+            W = scipy.sparse.coo_matrix((d1*d2, d1*d2))
+            # W = W_original
 
         test_time = time.time()
         
@@ -2922,7 +2922,8 @@ def update_AC_bg_l2_Y_ring_lowrank(U_sparse, R, V, V_orig,r,dims, a, c, b, patch
             corr_img_all_r = corr_img_all.reshape(patch_size[0],patch_size[1],-1,order="F");
 
             #Currently using rigid mask
-            mask_a_rigid = make_mask_rigid(corr_img_all_r, corr_th_fix, mask_ab)    
+            mask_a_rigid = make_mask_rigid(corr_img_all_r, corr_th_fix, mask_ab)
+            mask_ab = mask_a_rigid
 
             ## Now we delete components based on whether they have a 0 residual corr img with their supports or not...
             temp = (((mask_ab*corr_img_all) > corr_th_del).sum(axis=0) == 0);
