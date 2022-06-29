@@ -368,18 +368,9 @@ def update_ring_model_w_const(U_sparse, R, V, A, X, b, W, d1, d2, T, r, mask_a=N
     return W
  
     
-def scipy_coo_to_torchsparse_coo(scipy_coo_mat):
-    values = scipy_coo_mat.data
-    row = torch.LongTensor(scipy_coo_mat.row)
-    col = torch.LongTensor(scipy_coo_mat.col)
-    value = torch.FloatTensor(scipy_coo_mat.data)
-
-    return torch_sparse.tensor.SparseTensor(row=row, col=col, value=value, sparse_sizes = scipy_coo_mat.shape)
-    # return torch.sparse.FloatTensor(i, v, torch.Size(shape))
-
     
     
-def update_w_1p_const(U_sparse, R, V, W, X, b, A_sparse, A_sum, d1, d2, batch_size = 10000, num_samples=2000, device='cpu'):
+def update_w_1p_const(U_sparse, R, V, W, X, b, A_sparse, A_sum, d1, d2, batch_size = 10000, num_samples=1000, device='cpu'):
     """Constant Ring Model codebase 
     params:
         U_sparse: scipy.sparse.csr_matrix. Dimensions d x r
@@ -425,9 +416,8 @@ def update_w_1p_const(U_sparse, R, V, W, X, b, A_sparse, A_sum, d1, d2, batch_si
     sampled_indices = np.random.choice(V.shape[1], size=num_samples, replace=False)
     V_crop = torch.from_numpy(V[:, sampled_indices]).float().to(device)
     X_torch = torch.from_numpy(X).float().to(device)
-    W_torch = scipy_coo_to_torchsparse_coo(W).to(device)
-    U_sparse_torch = scipy_coo_to_torchsparse_coo(U_sparse).to(device)
-    A_sparse_torch = scipy_coo_to_torchsparse_coo(A_sparse).to(device)
+    U_sparse_torch = torch_sparse.tensor.from_scipy(U_sparse).float().to(device)
+    A_sparse_torch = torch_sparse.tensor.from_scipy(A_sparse).float().to(device)
     R = torch.from_numpy(R).float().to(device)
     b_torch = torch.from_numpy(b).float().to(device)
     
@@ -438,6 +428,8 @@ def update_w_1p_const(U_sparse, R, V, W, X, b, A_sparse, A_sum, d1, d2, batch_si
     AXV = torch_sparse.matmul(A_sparse_torch, XV)
     
     R_movie = URV - AXV - b_torch
+    
+    W_torch = torch_sparse.tensor.from_scipy(W).float().to(device)
     WR_movie = torch_sparse.matmul(W_torch, R_movie)
     
     denominator = torch.sum(WR_movie * WR_movie, dim=1)
