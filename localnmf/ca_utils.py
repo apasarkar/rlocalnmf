@@ -107,7 +107,7 @@ def denoise(ci):
     for k in range(ci.shape[1]):
         c = ci[:, k].astype("double")
         denoised, s, b, g, lam = deconvolve(c, penalty=1)
-        denoised = denoised + b
+        # denoised = denoised + b
         ci_new[:, k] = denoised.squeeze()
     
     return ci_new 
