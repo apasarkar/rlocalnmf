@@ -3,8 +3,6 @@ import cv2
 import time
 
 
-#Experimental import: 
-import gc
 # from memory_profiler import profile
 
 import torch
@@ -27,7 +25,6 @@ from scipy.ndimage.morphology import distance_transform_bf
 from scipy.sparse import csc_matrix
 from sklearn.decomposition import TruncatedSVD
 from matplotlib import ticker
-from scipy.sparse import lil_matrix
 from scipy import ndimage as ndimage
 import math
 
@@ -40,7 +37,7 @@ print(os.getcwd())
 
 #Repo-specific imports:
 from localnmf import ca_utils
-from localnmf.constrained_ring.cnmf_e import update_ring_model_w_full, update_ring_model_w_const, init_w
+from localnmf.constrained_ring.cnmf_e import update_ring_model_w_const, init_w
 from localnmf import regression_update
 
 
@@ -1416,7 +1413,7 @@ def print_signals_corrimg(ai, ci, corr_th_fix, corr_img_r, dims, figsize = (12,6
         
 def vcorrcoef_resid(U_sparse, R, V, a, c, batch_size = 10000, device='cpu', tol = 0.000001):
     '''
-    Residual correlation image calculation 
+    Residual correlation image calculation. Expectation is that there are at least two neurons (otherwise residual corr image is not meaningful)
     Params:
         U_sparse: scipy.sparse.coo_matrix. Dimensions (d x d)
         R: numpy.ndarray. Dimensions (r x r)
@@ -1426,6 +1423,7 @@ def vcorrcoef_resid(U_sparse, R, V, a, c, batch_size = 10000, device='cpu', tol 
         c: numpy.ndaray. Dimensions (T x k)
         batch_size: number of pixels to process at once. Limits matrix sizes to O((batch_size+T)*r)
     '''
+    assert c.shape[1] > 1, "Need at least 2 components to meaningfully calculate residual corr image"
     T = V.shape[1]
     d = U_sparse.shape[0]
     
@@ -2497,10 +2495,10 @@ def demix_whole_data_robust_ring_lowrank(U,V_PMD,r=10, cut_off_point=[0.95,0.9],
     '''
     ## Define Ring Model values..
     #First prune empty spatial basis vectors
-    
     d1,d2 = U.shape[:2]
     dims = U.shape[:2];
     T = V_PMD.shape[1];
+    
     
     U_used = U.reshape((-1, U.shape[2]), order="F")
     
@@ -2750,7 +2748,12 @@ def update_AC_bg_l2_Y_ring_lowrank(U_sparse, R, V, V_orig,r,dims, a, c, b, patch
         
     #Get residual correlation image
     corr_time = time.time()
-    corr_img_all = vcorrcoef_resid(U_sparse, R, V, a, c, batch_size = batch_size, device=device)
+    if a.shape[1] == 1:
+        #In this case, the "residual image" is not well defined
+        print("Only one component; resid corr image and standard corr image are the same")
+        corr_img_all = vcorrcoef_UV_noise(U_sparse, R, V, c, batch_size = batch_size, device=device)
+    else:
+        corr_img_all = vcorrcoef_resid(U_sparse, R, V, a, c, batch_size = batch_size, device=device)
     corr_img_all_r = corr_img_all.reshape(patch_size[0],patch_size[1],-1,order="F");
     print("Resid Corr Image Took {}".format(time.time() - corr_time))
     #Get regular correlation image
@@ -2913,7 +2916,10 @@ def update_AC_bg_l2_Y_ring_lowrank(U_sparse, R, V, V_orig,r,dims, a, c, b, patch
                 
             
             print("calculating the residual correlation image")
-            corr_img_all = vcorrcoef_resid(U_sparse, R, V, a, c, batch_size = batch_size, device=device)
+            if a.shape[1] > 1:
+                corr_img_all = vcorrcoef_resid(U_sparse, R, V, a, c, batch_size = batch_size, device=device)
+            else:
+                corr_img_all = vcorrcoef_UV_noise(U_sparse, R, V, c, batch_size = batch_size, device=device)
             print("calculating the robust standard correlation image")            
             corr_img_all_reg = vcorrcoef_UV_noise(U_sparse, R, V, c, batch_size = batch_size, device=device) 
             
