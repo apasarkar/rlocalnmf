@@ -3,11 +3,8 @@
 ## Utility Functions used in ringlocalNMF
 ##
 ######
-
-##TODO: Remove the oasis imports + the denoising imports
-
+import torch
 import numpy as np
-# from caiman.source_extraction.cnmf.deconvolution import constrained_foopsi
 from oasis.oasis_methods import oasisAR1, oasisAR2
 from oasis.functions import gen_data, gen_sinusoidal_data, deconvolve, estimate_parameters
 from oasis.plotting import simpleaxis
@@ -17,8 +14,7 @@ import multiprocessing
 import os
 import math
 
-import torch
-import scipy
+import scipy.sparse
 
 
 def cosine_similarity(img1, img2):
