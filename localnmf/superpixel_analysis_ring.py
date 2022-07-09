@@ -1944,69 +1944,6 @@ def process_custom_signals(a_init, U_sparse, V):
     return a_used, a_mask, b_used, c_used
 
     
-# def process_custom_signals(a, c, b, U, V, dims, dilation = 2,  scale_divisor = 10):
-#     """
-#     Function to initialize "a" and "c" matrices. "a" and "c" are estimated outside of the standard demixing pipeline
-#     params: 
-#         a: ndarray, d x K. K = number of neurons, d = number of pixels in spatial support
-#         c: ndarray, T x K. T = number of frames in imaging movie, K = number of neurons
-#         b: ndarray, d x 1. d = number of pixels in spatial support
-#         U: ndarray, d x r. d = number of pixels in spatial support, r = rank of compressed movie. U is a spatial representation for the movie
-#         V: ndarray, r x T. r = rank of compressed movie. T = number of frames in imaging movie. V is a temporal representation for the movie  
-#         dims: tuple (x, y). x * y = d (x and y are the dimensions of the field of view)
-#     """
-    
-#     #First scale a*c to be compatible with the U*V movie. Using a constant scale factor, this becomes a 1d regression problem
-# #     print("WE ARE NOW PRINTINIG A")
-# #     for k in range(a.shape[1]):
-# #         plt.figure()
-# #         plt.imshow(a[:, k].reshape((dims[0], dims[1]), order = 'F'))
-# #         plt.show()
-#     a_sum = np.sum(a, axis = 1) > 0
-#     U_crop = U[a_sum, :].dot(V.sum(axis = 1, keepdims = True))
-#     Yd_sum = np.sum(U_crop.flatten())
-    
-    
-#     ac_interm = a.dot(c.T.sum(axis = 1, keepdims = True))
-#     ac_sum = np.sum(ac_interm.flatten())
-    
-#     scale = Yd_sum / ac_sum
-#     scale /= scale_divisor
-    
-#     uv_mean = (U*((V.T).mean(axis=0,keepdims=True))).sum(axis=1,keepdims=True)
-    
-#     #Rescale ac based on above estimate
-#     c = c * scale
-    
-#     mask_a = (a > 0)*1
-#     b = b * scale
-# #     c = ls_solve_acc_ring(a, U - bg_basis, V.T, mask=None, beta_LS=c).T;
-    
-# #     mask_a = (a>0)*1
-# #     for k in range(0):
-# #         bg_basis = b.dot((V.T).sum(axis = 0, keepdims = True))
-# #         c = ls_solve_acc_ring(a, U - bg_basis, V.T, mask=None, beta_LS=c).T;
-        
-# #         b = np.maximum(0, uv_mean-(a*(c.mean(axis=0,keepdims=True))).sum(axis=1,keepdims=True));
-# #         bg_basis = b.dot((V.T).sum(axis = 0, keepdims = True))
-        
-# #         a = ls_solve_ac(c, V.T, U - bg_basis, mask=mask_a.T, beta_LS=a).T;
-# #         b = np.maximum(0, uv_mean-(a*(c.mean(axis=0,keepdims=True))).sum(axis=1,keepdims=True));
-        
-    
-#     #Now perform a baseline update
-# #     uv_mean = (U*((V.T).mean(axis=0,keepdims=True))).sum(axis=1,keepdims=True)
-    
-#     new_mask = dilate_mask(mask_a.reshape((dims[0], dims[1], -1), order = "F"), dilation_size = dilation)
-    
-# #     for k in range(new_mask.shape[2]):
-# #         plt.figure()
-# #         plt.imshow(new_mask[:, :, k])
-# #         plt.show()
-#     new_mask = new_mask.reshape((dims[0]*dims[1], -1), order = "F")
-    
-#     return a, b, c, new_mask
-  
 
 def orthogonalize_UV(V, device='cpu'):
     """
@@ -2598,6 +2535,8 @@ def demix_whole_data_robust_ring_lowrank(U,V_PMD,r=10, cut_off_point=[0.95,0.9],
                 uv_mean = U_sparse.dot(R.dot(V.mean(axis = 1, keepdims = True))) #Pixel-wise mean
                 b = regression_update.baseline_update(uv_mean, a, c)
             
+            assert a.shape[1] > 0, 'Superpixels did not identify any components, re-run with different parameters before proceeding'
+            
             #Plot superpixel correlation image
             if plot_en:
                 Cnt = local_correlations_fft_UV(U_used, V, dims);
@@ -2606,6 +2545,7 @@ def demix_whole_data_robust_ring_lowrank(U,V_PMD,r=10, cut_off_point=[0.95,0.9],
             print("time: " + str(time.time()-start));
 
 
+        ##TODO: Eliminate this from the source code (masknmf is becomes a 'custom' init method) 
         elif init[ii] == 'mnmf':  
             ##Here we use the bessel init:
             if ii == 0:
@@ -2615,7 +2555,9 @@ def demix_whole_data_robust_ring_lowrank(U,V_PMD,r=10, cut_off_point=[0.95,0.9],
                 a = a_ini
                 c = c_ini
             else:
-                raise ValueError('maskNMF can only be run on the first pass')            
+                raise ValueError('maskNMF can only be run on the first pass')  
+                
+            assert a.shape[1] > 0, 'The masknmf initialization did not identify any neurons, re-run with more frames'
             
             
             
@@ -2625,6 +2567,7 @@ def demix_whole_data_robust_ring_lowrank(U,V_PMD,r=10, cut_off_point=[0.95,0.9],
             print("time: " + str(time.time()-start));
                 
         elif init[ii]=='custom' and ii == 0:
+            assert custom_init['a'].shape[2] > 0, 'Must provide at least 1 spatial footprint' 
             a_ini, mask_a, b, c_ini = process_custom_signals(custom_init['a'].copy(), U_sparse, V_PMD)
             a = a_ini
             c = c_ini
@@ -2647,7 +2590,7 @@ def demix_whole_data_robust_ring_lowrank(U,V_PMD,r=10, cut_off_point=[0.95,0.9],
         #######
         print("BEFORE ENTERINIG DEMIX THE PATCH SIZE IS {}".format(patch_size))
 
-      
+
         a, c, b, X, W, res, corr_img_all_r, num_list = update_AC_bg_l2_Y_ring_lowrank(U_sparse, R, V, V_PMD, r,dims,\
                                                                                    a, c, b, dims,
                                         corr_th_fix, corr_th_fix_sec, corr_th_del, switch_point, maxiter=maxiter, tol=1e-8, update_after=update_after,
