@@ -453,9 +453,11 @@ def save_fig_generate_nearest_match_parallel(my_dict):
         labels = ['Neuron', 'Neighbor']
         fig,gs = plot_img_double(my_dict['match_ai'], my_dict['match_ci'], my_dict['orig_ai'], my_dict['orig_ci'], my_dict['dims'], my_dict['spatial_titles_match'], order=my_dict['order'], labels = labels, normalize = my_dict['normalize'], zoom = my_dict['zoom'], figsize=my_dict['figsize'])
         
-    fig.savefig("{}/Neuron{} Brightness{}".format(my_dict['folder_location'],my_dict['p'],\
-                                                  my_dict['max_brightness']))
-
+    # fig.savefig("{}/Neuron{} Brightness{}".format(my_dict['folder_location'],my_dict['p'],\
+                                                  # my_dict['max_brightness']))
+        
+    fig.savefig("{}/Brightness{:04d} Neuron{}".format(my_dict['folder_location'],my_dict['max_brightness'],\
+                                                my_dict['p']))
 
 
 def generate_match_figs(a_real, c_real, a_est, c_est, matches, dims,  folder_location,\
@@ -1135,10 +1137,6 @@ def write_mpl_no_compress_comparisons(mov_list,
     T = mov_list[0].shape[2]
     if titles is None:
         titles = ['']*n_mov
-        
-    # for mdx, mov in enumerate(mov_list):
-    #     if img_types[mdx] == 1 and mdx < len(mov_list) - 2:
-    #         mov_list[mdx] -= np.amin(mov_list[mdx])
     
     for j in range(len(mov_list)):
         mov_list[j] = clip_movie_by_percentile(mov_list[j], movie_scales[j])
@@ -1146,10 +1144,7 @@ def write_mpl_no_compress_comparisons(mov_list,
     #Compute scales
     mins = np.empty(n_mov)
     maxs = np.empty(n_mov)
-    print("GETTING MOVIE")
     for mdx, mov in enumerate(mov_list):
-        print(mdx)
-        print(mov[mdx].shape)
         mins[mdx] = np.min(mov)
         maxs[mdx] = np.max(mov) 
     realmin = np.amin(mins)
@@ -1183,7 +1178,7 @@ def write_mpl_no_compress_comparisons(mov_list,
             elif img_types[mdx] == 1:
                 temp_mov_list.append(mov_list[mdx][:, :, [t]])
             else:
-                print("INVALID IMG TYPE PROVIDED")
+                raise ValueError("INVALID IMG TYPE PROVIDED")
         curr_data = dict()
         curr_data['mov_list'] = temp_mov_list
         curr_data['titles'] = titles
@@ -1206,8 +1201,6 @@ def write_mpl_no_compress_comparisons(mov_list,
             count = 0
             runpar(make_frame_par, data_list)
             data_list = []
-       
-    print('Generating the files took this many seconds: {}'.format(time.time() - start))
     
     os.chdir(save_directory)
     
@@ -1347,14 +1340,13 @@ def generate_color_movie(a_use, c_use, dims, random_values, seed=999):
         c_color[:, i, :] = random_color_norm[:, [i]] * c_use
         
     final_movie = np.tensordot(a_use, c_color, axes = (2,0))
-    print("the shape of final movie after tensordot is {}".format(final_movie.shape))
     max_val = np.amax(final_movie)
     if max_val != 0:
         final_movie = final_movie / np.amax(final_movie) #Now it is back to 0 -- 1
     return final_movie.squeeze()
 
 
-def standard_demix_vid(a, c, b, raw_mov, denoised_mov, fluctuating_bg_terms, filename, order = "C", fr=30, \
+def standard_demix_vid(a, c, b, denoised_mov, fluctuating_bg_terms, filename, raw_mov = None, deviation_img = None, order = "C", fr=30, \
               titles=None, movie_scales=None, scale=1, titlesize=20, ticksize=14, colorticksize=12, a_real = None, c_real = None, \
                       rgbrange = [80, 255], channels = 3, mean_sub_res = False, min_sub_signals = True, width_const = 3.5,\
                       random_values = None, start = 0, end = 1000, dim1_range=None, dim2_range=None):
@@ -1391,21 +1383,33 @@ def standard_demix_vid(a, c, b, raw_mov, denoised_mov, fluctuating_bg_terms, fil
     if movie_scales is None: 
         movie_scales = [1 for i in range(len(tiles))]
     if dim1_range is None: 
-        dim1_range = [0, raw_mov.shape[0]]
+        dim1_range = [0, denoised_mov.shape[0]]
     if dim2_range is None: 
-        dim2_range = [0, raw_mov.shape[1]]
-    x, y, T = raw_mov.shape
+        dim2_range = [0, denoised_mov.shape[1]]
+    x, y = denoised_mov.shape[0], denoised_mov.shape[1], 
     titles = []
     img_types =[]
     mov_list = []
     
-    
-    #Define range of frames included in videos:
+    PMD_match = True
+            
+    if PMD_match:
+        max_val_PMD = np.amax(denoised_mov[dim1_range[0]:dim1_range[1], dim2_range[0]:dim2_range[1],:])
+        if raw_mov is not None:
+            max_raw = np.amax(raw_mov[dim1_range[0]:dim1_range[1], dim2_range[0]:dim2_range[1],:])
+            raw_mov *= max_val_PMD/max_raw
     
     # Add raw movie: 
-    titles.append("Motion Corrected Data")
-    img_types.append(1)
-    mov_list.append(raw_mov[dim1_range[0]:dim1_range[1], dim2_range[0]:dim2_range[1],:])
+    if raw_mov is not None:
+        titles.append("Motion Corrected Data")
+        img_types.append(1)
+        mov_list.append(raw_mov[dim1_range[0]:dim1_range[1], dim2_range[0]:dim2_range[1],:])
+    elif deviation_img is not None:
+        titles.append("Deviation Image of PMD Data")
+        img_types.append(1)
+        mov_list.append(deviation_img[dim1_range[0]:dim1_range[1], dim2_range[0]:dim2_range[1], :])
+    else:
+        raise ValueError("Must include either raw image or deviation image")
     
     #Add denoised movie:
     titles.append("Denoised Data")
@@ -1435,10 +1439,14 @@ def standard_demix_vid(a, c, b, raw_mov, denoised_mov, fluctuating_bg_terms, fil
     #Add grayscale A*C video:
     AC = np.tensordot(a, c, axes=(2,0))
     
-    print("done with AC calculation")
+    if PMD_match:
+        AC_displayed = AC * max_val_PMD/np.amax(AC[dim1_range[0]:dim1_range[1], dim2_range[0]:dim2_range[1],:])
+    else:
+        AC_displayed = AC
     
     #Perform min subtraction of the AC panel...
     if min_sub_signals:
+        raise ValueError("no longer supported")
         c_minsub = c - np.amin(c, axis = 1, keepdims = True)
         AC_minsub = np.tensordot(a, c_minsub, axes=(2,0))
         img_types.append(1)
@@ -1449,7 +1457,7 @@ def standard_demix_vid(a, c, b, raw_mov, denoised_mov, fluctuating_bg_terms, fil
     else:
         titles.append("Signal Estimates")
         img_types.append(1)
-        mov_list.append(AC[dim1_range[0]:dim1_range[1], dim2_range[0]:dim2_range[1], :])
+        mov_list.append(AC_displayed[dim1_range[0]:dim1_range[1], dim2_range[0]:dim2_range[1], :])
     
     
     
@@ -1463,13 +1471,10 @@ def standard_demix_vid(a, c, b, raw_mov, denoised_mov, fluctuating_bg_terms, fil
         mov_list.append(AC_real_color_image[dim1_range[0]:dim1_range[1], dim2_range[0]:dim2_range[1], :, :])
         
        
-    #Add net background background: 
+    #Add net background: 
     
-    print('started fbg')
     #Load relevant ringlocalNMF outputs
     fluctuating_bg = fluctuating_bg_terms[0].dot(fluctuating_bg_terms[1]).reshape((x, y, -1), order="F")
-    print("done with fluctuating calculation")
-    print("included b now")
     net_bg = fluctuating_bg + b
     titles.append("Centered Net Background")
     img_types.append(1)
@@ -1482,7 +1487,6 @@ def standard_demix_vid(a, c, b, raw_mov, denoised_mov, fluctuating_bg_terms, fil
     if mean_sub_res == False:
         titles.append("Residual")
     else:
-        print("the shape of res is {}".format(res.shape))
         res = res - np.mean(res, axis = 2, keepdims = True)
         titles.append("Residual")
     titles.append("Residual")
@@ -1545,6 +1549,7 @@ def standard_demix_vid_old(rlt, mov_raw, mov_denoised, filename, fr=30, \
     W = rlt['W']
     W = W.astype("float")
     b = rlt['b']
+    
     
     #Define range of frames included in videos:
     start = 0
