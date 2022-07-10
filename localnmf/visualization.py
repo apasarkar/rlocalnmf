@@ -89,8 +89,12 @@ def parinit():
     num_cpu = multiprocessing.cpu_count()
     os.system('taskset -cp 0-%d %s' % (num_cpu, os.getpid()))
 
-
-
+def normalize(mat, axis, tol = 0.000000001):
+    mat_norms = np.linalg.norm(mat, axis=axis, keepdims = True)
+    mat_norms[mat_norms<tol] = 1
+    normalized = mat / mat_norms
+    
+    return normalized
 
 def brightness_order(ai, ci):
     '''
@@ -104,19 +108,17 @@ def brightness_order(ai, ci):
         c_ordered: ndarray, dimensions (T x K1). Columns of ci reordered.
     '''
 
-    brightnesses = []
-    for k in range(ai.shape[1]):
-        curr_ai = ai[:, [k]]
-        curr_ci = ci[:, [k]]
-        max_val = np.amax((curr_ai.dot(curr_ci.T)).flatten())
-        brightnesses.append(max_val)
-        
-
+    max_spatial_comps = np.amax(ai, axis=0)
+    max_temporal_comps = np.amax(ci, axis=0)
+    brightnesses = max_spatial_comps * max_temporal_comps
+    
     reorder = np.argsort(brightnesses)[::-1]
+    
     a_ordered = ai[:, reorder]
     c_ordered = ci[:, reorder]
     
     return a_ordered, c_ordered
+    
 
 
 def match(a_real, c_real, a_est, c_est, temporal_threshold=0.85, spatial_threshold=0.85, x=64, y=64, plot = True):
@@ -286,7 +288,7 @@ def match_and_score_spatial(a_real, c_real, a_est, c_est, match_indices):
     return average
 
 
-def match_nearest_neighbors(a_est, c_est, temporal_threshold=0.85, spatial_threshold=0.85, x=64, y=64, plot = False):
+def match_nearest_neighbors(a_est, c_est, temporal_threshold=0.85, spatial_threshold=0.85, x=64, y=64):
     '''
     Function to match each neuron in a source extraction with its nearest neighbor. Used to detect oversplitting in NMF pipelines.
     For each neuron estimate, function matches at most one estimated neuron that is sufficiently similar (both spatially and temporally)
@@ -307,57 +309,86 @@ def match_nearest_neighbors(a_est, c_est, temporal_threshold=0.85, spatial_thres
             
     Note: This matching preserves the order of a_est. So match_indices[0] gives the match for neuron corresponding to a_est[0]
     '''
+    match_indices = np.zeros((a_est.shape[1],)) - 1
+    a_norm = normalize(a_est, axis = 0)
+    spatial_similarity_mat = a_norm.T.dot(a_norm) #result is K1 x K1 matrix
     
+    c_norm = normalize(c_est, axis = 0)
+    temporal_similarity_mat = c_norm.T.dot(c_norm) #result is K1 x K1 matrix
     
-    match_counter = 0
-    match_indices = np.zeros((a_est.shape[1], 1))
-    match_indices -= 1 #All values start out negative and are updated if a suitable match is found
-    count = 0
+    #We will ultimately match based on temporal similarity, so we filter that matrix
+    # so that the only nonzero elements of temporal_similarity are pairs of neurons which are both temporally and spatially similar
+    temporal_similarity_mat[temporal_similarity_mat < temporal_threshold] = 0
+    temporal_similarity_mat[spatial_similarity_mat < spatial_threshold] = 0 
+    
+    #Set diagonal elements to 0 (we want to do matching, so diagonal elements are not needed)
+    np.fill_diagonal(temporal_similarity_mat, 0)
+
     
     #For each neuron in ground truth, identify match
+    max_similarity_values = np.amax(temporal_similarity_mat, 1)
+    max_similarity_indices = np.argmax(temporal_similarity_mat, 1)
     for k in range(a_est.shape[1]):
-        print("we are tring to match k = {}".format(k))
-        curr_ai = a_est[:, [k]]
-        curr_ci = c_est[:, [k]]
-        
-        
-        best_sim = 0
-        best_ind = -1
-        for j in range(a_est.shape[1]):
-            if j == k:
-                #Never match a neuron to itself
-                continue
-            ai = a_est[:, [j]]
-            ci = c_est[:, [j]]
-            
-            spatial_sim = ca_utils.cosine_similarity(curr_ai, ai)
-            temporal_sim = ca_utils.cosine_similarity(curr_ci, ci)
-            if spatial_sim > spatial_threshold and temporal_sim > temporal_threshold:
-                if best_sim < temporal_sim:
-                    best_sim = temporal_sim
-                    best_ind = j
-                    match_indices[k] = j
-                    
-                    if plot:
-                        fig, ax = plt.subplots(1, 2)
-                        ax[0].imshow(curr_ai.reshape((x,y)))
-                        ax[1].plot(curr_ci)
-                        ax[0].set_title("Original Ai")
-                        ax[1].set_title("Original Ci")
-                        plt.show()
-
-                        fig, ax = plt.subplots(1, 2)
-                        ax[0].imshow(ai.reshape((x,y)))
-                        ax[1].plot(ci)
-                        ax[0].set_title("Neighbor Ai")
-                        ax[1].set_title("Neighbor Ci")
-                        plt.show()
-                        
+        if max_similarity_values[k] == 0:
+            continue
+        else:
+            match_indices[k] = max_similarity_indices[k]
+            print("neuron k was matched to neuron {}".format(max_similarity_indices[k]))
+                
     return match_indices
 
 
-def generate_match_figs_neighbors(a_est, c_est, matches, dims,  folder_location,\
-                        spatial_titles_match = ["Spatial footprint", "Nearest Neighbor"], show = False, normalize = True, zoom = False):
+def normalize_traces(trace1, trace2):
+    '''
+    Normalizes trace
+    Args:
+        trace1: First trace (provided as an ndarray)
+        trace2: Second trace (provided as ndarray) 
+        
+    Returns:
+        trace1_norm: Normalized trace1
+        trace2_norm: Normalized trace2
+    '''
+    
+    
+    
+    if np.count_nonzero(trace1 != 0) == 0:
+        trace1_norm = np.zeros_like(trace_1)
+    else:
+        trace1_norm = trace1/np.linalg.norm(trace1)
+        
+    if np.count_nonzero(trace2 != 0) == 0:
+        trace2_norm = np.zeros_like(trace_2)
+    else:
+        trace2_norm = trace2/np.linalg.norm(trace2)
+        
+    return trace1_norm, trace2_norm
+
+
+def get_box(img):
+        """For a given frame in the dataset, this function calculates its bounding box
+            args:
+                img: a (d1 x d2) ndarray. The image we wish to analyze
+                
+            returns:
+                [height_min, height_max, width_min, width_max]: a list of bounding coordinates which can be used to crop original image
+        
+        """
+        
+        #If all pixels are 0, there is no need to crop (the image is empty)
+        if np.count_nonzero(img) == 0:
+            return (0, img.shape[0], 0, img.shape[1])
+        
+        #Calculate bounding box by finding minimal elements in the support
+        else:
+            x,y = np.nonzero(img)
+            return (int(np.amin(x)), int(np.amax(x)), int(np.amin(y)), int(np.amax(y)))
+    
+
+
+
+def generate_match_figs_neighbors(a_est, c_est, matches, dims,  folder_location, order="C",\
+                        spatial_titles_match = ["Spatial footprint", "Nearest Neighbor"], show = False, normalize = True, zoom = False, figsize = (60, 30)):
     '''
     Generates figures plotting nearest neighbors of neurons. Figures are saved as .png files
     Matched neurons are generated togehter in the same figure. 
@@ -372,7 +403,8 @@ def generate_match_figs_neighbors(a_est, c_est, matches, dims,  folder_location,
         matches: array of matches between ground truth (a_real, c_real) and estimates (a_est, c_est)
             matches[i] indicates which neuron of a_est and c_est has been matched to neuron 'i' from the ground truth. see 'match' above.
         dims: tuple, length 2. Indicates dimensions of field of view. dims = (40, 50) means the image is a 40 x 50 pixel image. 
-        folder_location: string. relative filepath for storing results. 
+        folder_location: string. relative filepath for storing results.
+        order: int. Order which we use to reshape 2D spatiotemporal matrices into 3D matrices
         spatial_titles_match: tuple of strings, length 2. Titles for matched spatial footprints
         show: boolean. Flag indicating whether results should be displayed or simply saved
         normalize: boolean. Flag indicates whether temporal traces should be normalized or not
@@ -381,28 +413,51 @@ def generate_match_figs_neighbors(a_est, c_est, matches, dims,  folder_location,
         (No return values)
     '''
     
-    
+    my_list = []
     for p in range(matches.size):
+        my_dict = dict()
         file_path = os.path.join(folder_location, "neuron {}".format(p))
         match_ai = a_est[:, int(matches[p])]
         match_ci = c_est[:, int(matches[p])]
         orig_ai  = a_est[:, [p]]
         orig_ci = c_est[:, [p]]
+        max_brightness = round(np.amax(orig_ai) * np.amax(orig_ci))
         
+        my_dict['match_value'] = matches[p]
+        my_dict['order'] = order
+        my_dict['file_path'] = file_path
+        my_dict['match_ai'] = match_ai
+        my_dict['match_ci'] = match_ci
+        my_dict['orig_ai'] = orig_ai
+        my_dict['orig_ci'] = orig_ci
+        my_dict['max_brightness'] = max_brightness
+        my_dict['folder_location'] = folder_location
+        my_dict['normalize'] = normalize
+        my_dict['zoom'] = zoom
+        my_dict['figsize'] = figsize
+        my_dict['dims'] = dims
+        my_dict['spatial_titles_match'] = spatial_titles_match
+        my_dict['p'] = p
         
-        max_brightness = int(np.amax((orig_ai.dot(orig_ci.T)).flatten()))
-
-
-        if int(matches[p]) < 0:
-            fig,gs = plot_img_single(orig_ai, orig_ci, dims, zoom = zoom)
-        else: 
-            labels = ['Neuron', 'Neighbor']
-            fig,gs = plot_img_double(match_ai, match_ci, orig_ai, orig_ci, dims, spatial_titles_match, labels = labels, normalize = normalize, zoom = zoom)
-            print(ca_utils.cosine_similarity(match_ci, orig_ci))
+        my_list.append(my_dict)
+     
+    runpar(save_fig_generate_nearest_match_parallel, my_list)
         
-        fig.savefig("{}/Neuron{} Brightness{}".format(folder_location,p,max_brightness))
 
-
+def save_fig_generate_nearest_match_parallel(my_dict):
+    
+    if int(my_dict['match_value']) < 0:
+        fig, gs = plot_img_single(my_dict['orig_ai'], my_dict['orig_ci'], \
+                                 my_dict['dims'], zoom=my_dict['zoom'], order=my_dict['order'])
+    else:
+        labels = ['Neuron', 'Neighbor']
+        fig,gs = plot_img_double(my_dict['match_ai'], my_dict['match_ci'], my_dict['orig_ai'], my_dict['orig_ci'], my_dict['dims'], my_dict['spatial_titles_match'], order=my_dict['order'], labels = labels, normalize = my_dict['normalize'], zoom = my_dict['zoom'], figsize=my_dict['figsize'])
+        
+    # fig.savefig("{}/Neuron{} Brightness{}".format(my_dict['folder_location'],my_dict['p'],\
+                                                  # my_dict['max_brightness']))
+        
+    fig.savefig("{}/Brightness{:04d} Neuron{}".format(my_dict['folder_location'],my_dict['max_brightness'],\
+                                                my_dict['p']))
 
 
 def generate_match_figs(a_real, c_real, a_est, c_est, matches, dims,  folder_location,\
@@ -732,11 +787,9 @@ def plot_updated_axis_X(fig, axis, tick_range, fontsize, skip = 2):
     
                 
 
-
-
 def plot_img_double(a_first, c_first, a_second, c_second, dims, spatial_titles, normalize = True,\
                        figsize=(60,30), fig_props_h=(1,1), fig_props_w=(1,3), \
-                       font_val=60, tick_val=45, legendsize = '60', labels=['estimate', 'real'], order=1, zoom = False):
+                       font_val=60, tick_val=45, legendsize = '60', labels=['estimate', 'real'], order="C", zoom = False):
     """
     Plot two different spatio-temporal signals (belonging to the same FOV) on top of each other
     The temporal traces are normalized and then overlayed for easy visual comparison
@@ -752,7 +805,7 @@ def plot_img_double(a_first, c_first, a_second, c_second, dims, spatial_titles, 
         real_titles: list of 2 titles. first title is for real_spatial, second for real_temp
         font_val: font size of titles
         tick_val: font size of ticks
-        order: order of reshaping operations: 0 (default) for "C", 1 for "F"
+        order: order of reshaping operations: 0 for "C", 1 for "F"
         zoom: boolean. Indicates whether spatial elements should be cropped as much as possible to "zoom" in on regions of interest
     Returns: 
         fig: figure object
@@ -764,18 +817,14 @@ def plot_img_double(a_first, c_first, a_second, c_second, dims, spatial_titles, 
     
 
     
-    assert order in [0,1], "invalid order provided"
-    if order == 0:
-        r_order="C"
-    elif order == 1:
-        r_order = "F"
+
     
-    first_norm_spatial = (a_first/np.linalg.norm(a_first)).reshape(dims, order=r_order)
-    second_norm_spatial = (a_second/np.linalg.norm(a_second)).reshape(dims, order=r_order)
+    first_norm_spatial = (a_first/np.linalg.norm(a_first)).reshape(dims, order=order)
+    second_norm_spatial = (a_second/np.linalg.norm(a_second)).reshape(dims, order=order)
     
     if zoom:
-        (x1, x2, x3, x4) = ca_utils.get_box(first_norm_spatial)
-        (y1, y2, y3, y4) = ca_utils.get_box(second_norm_spatial)
+        (x1, x2, x3, x4) = get_box(first_norm_spatial)
+        (y1, y2, y3, y4) = get_box(second_norm_spatial)
         
         x_low = np.amin([x1, y1])
         x_high = np.amax([x2, y2])
@@ -816,7 +865,7 @@ def plot_img_double(a_first, c_first, a_second, c_second, dims, spatial_titles, 
     
     ##Plot the traces
     if normalize:
-        first_temp_norm, second_temp_norm = ca_utils.normalize_traces(c_first, c_second)
+        first_temp_norm, second_temp_norm = normalize_traces(c_first, c_second)
     else:
         first_temp_norm, second_temp_norm = (c_first, c_second)
     
@@ -830,16 +879,11 @@ def plot_img_double(a_first, c_first, a_second, c_second, dims, spatial_titles, 
     for tick in axis_temporal.xaxis.get_major_ticks():
                 tick.label.set_fontsize(tick_val) 
     
-    
-    
-    print("we are about to return fig")
     return fig, gs
-
-
 
 def plot_img_single(ai, ci, dims, spatial_title="", temp_title="",\
                     figsize=(60,15), fig_props_w=(1,3), \
-                    font_val=60, tick_val=45, order=1, zoom = False):
+                    font_val=60, tick_val=45, order="C", zoom = False):
     """
     Plots a single spatiotemporal signal
     Args: 
@@ -863,18 +907,10 @@ def plot_img_single(ai, ci, dims, spatial_title="", temp_title="",\
     gs = gridspec.GridSpec(1, 2, height_ratios=(1,), width_ratios=fig_props_w)
     fig = plt.figure(figsize=figsize)
     
-
-    
-    if order == 0:
-        r_order="C"
-    elif order == 1:
-        r_order = "F"
-    
-    
     #Normalize spatial footprint
-    norm_spatial = (ai/np.linalg.norm(ai)).reshape((dims[0],dims[1]), order=r_order)
+    norm_spatial = (ai/np.linalg.norm(ai)).reshape((dims[0],dims[1]), order=order)
     if zoom:
-        (x1, x2, y1, y2) = ca_utils.get_box(norm_spatial)
+        (x1, x2, y1, y2) = get_box(norm_spatial)
         norm_spatial = norm_spatial[x1:x2, y1:y2]
         
     ####    
@@ -892,9 +928,6 @@ def plot_img_single(ai, ci, dims, spatial_title="", temp_title="",\
             
     if zoom: 
         plot_updated_axis_X(fig, axis_spatial, (y1, y2), fontsize = tick_val, skip = 2)
-        
-   
-
               
     #Plot Temporal Footprint
     axis_temporal = fig.add_subplot(gs[0,1])
@@ -1073,10 +1106,17 @@ def generate_movie_maxproj(a_use, c_use, dims, random_values, slice_val=2,seed=9
     return final_movie.squeeze()
 
 
+def clip_movie_by_percentile(mov, percentile): 
+    if percentile == 100:
+        return mov #Avoid unnecessary work
+    value = np.percentile(mov, percentile)
+    print("we are clipping this movie at value {}".format(value))
+    mov[mov > value] = value
+    return mov
 
 
 def write_mpl_no_compress_comparisons(mov_list, 
-              filename, img_types,
+              filename, img_types, movie_scales,
               fr=3, 
               titles=None, scale=1, titlesize=20, ticksize=14, colorticksize=12, width_const = 4, offset = 0):
     """ Functionality to create customized triptych demixing videos
@@ -1097,19 +1137,15 @@ def write_mpl_no_compress_comparisons(mov_list,
     T = mov_list[0].shape[2]
     if titles is None:
         titles = ['']*n_mov
-        
-    for mdx, mov in enumerate(mov_list):
-        if img_types[mdx] == 1 and mdx < len(mov_list) - 2:
-            mov_list[mdx] -= np.amin(mov_list[mdx])
+    
+    for j in range(len(mov_list)):
+        mov_list[j] = clip_movie_by_percentile(mov_list[j], movie_scales[j])
     
     #Compute scales
     mins = np.empty(n_mov)
     maxs = np.empty(n_mov)
-    print("GETTING MOVIE")
     for mdx, mov in enumerate(mov_list):
-        print(mdx)
-        print(mov[mdx].shape)
-        mins[mdx] = np.min(mov) 
+        mins[mdx] = np.min(mov)
         maxs[mdx] = np.max(mov) 
     realmin = np.amin(mins)
     realmax = np.amax(maxs)
@@ -1142,7 +1178,7 @@ def write_mpl_no_compress_comparisons(mov_list,
             elif img_types[mdx] == 1:
                 temp_mov_list.append(mov_list[mdx][:, :, [t]])
             else:
-                print("INVALID IMG TYPE PROVIDED")
+                raise ValueError("INVALID IMG TYPE PROVIDED")
         curr_data = dict()
         curr_data['mov_list'] = temp_mov_list
         curr_data['titles'] = titles
@@ -1165,8 +1201,6 @@ def write_mpl_no_compress_comparisons(mov_list,
             count = 0
             runpar(make_frame_par, data_list)
             data_list = []
-       
-    print('Generating the files took this many seconds: {}'.format(time.time() - start))
     
     os.chdir(save_directory)
     
@@ -1306,15 +1340,14 @@ def generate_color_movie(a_use, c_use, dims, random_values, seed=999):
         c_color[:, i, :] = random_color_norm[:, [i]] * c_use
         
     final_movie = np.tensordot(a_use, c_color, axes = (2,0))
-    print("the shape of final movie after tensordot is {}".format(final_movie.shape))
     max_val = np.amax(final_movie)
     if max_val != 0:
         final_movie = final_movie / np.amax(final_movie) #Now it is back to 0 -- 1
     return final_movie.squeeze()
 
 
-def standard_demix_vid(a, c, b, raw_mov, denoised_mov, fluctuating_bg_terms, filename, order = "C", fr=30, \
-              titles=None, scale=1, titlesize=20, ticksize=14, colorticksize=12, a_real = None, c_real = None, \
+def standard_demix_vid(a, c, b, denoised_mov, fluctuating_bg_terms, filename, raw_mov = None, deviation_img = None, order = "C", fr=30, \
+              titles=None, movie_scales=None, scale=1, titlesize=20, ticksize=14, colorticksize=12, a_real = None, c_real = None, \
                       rgbrange = [80, 255], channels = 3, mean_sub_res = False, min_sub_signals = True, width_const = 3.5,\
                       random_values = None, start = 0, end = 1000, dim1_range=None, dim2_range=None):
     '''
@@ -1347,22 +1380,36 @@ def standard_demix_vid(a, c, b, raw_mov, denoised_mov, fluctuating_bg_terms, fil
         end: int. Last frame to include in video
         '''
     
+    if movie_scales is None: 
+        movie_scales = [1 for i in range(len(tiles))]
     if dim1_range is None: 
-        dim1_range = [0, raw_mov.shape[0]]
+        dim1_range = [0, denoised_mov.shape[0]]
     if dim2_range is None: 
-        dim2_range = [0, raw_mov.shape[1]]
-    x, y, T = raw_mov.shape
+        dim2_range = [0, denoised_mov.shape[1]]
+    x, y = denoised_mov.shape[0], denoised_mov.shape[1], 
     titles = []
     img_types =[]
     mov_list = []
     
-    
-    #Define range of frames included in videos:
+    PMD_match = True
+            
+    if PMD_match:
+        max_val_PMD = np.amax(denoised_mov[dim1_range[0]:dim1_range[1], dim2_range[0]:dim2_range[1],:])
+        if raw_mov is not None:
+            max_raw = np.amax(raw_mov[dim1_range[0]:dim1_range[1], dim2_range[0]:dim2_range[1],:])
+            raw_mov *= max_val_PMD/max_raw
     
     # Add raw movie: 
-    titles.append("Motion Corrected Data")
-    img_types.append(1)
-    mov_list.append(clip_raw_movie(raw_mov)[dim1_range[0]:dim1_range[1], dim2_range[0]:dim2_range[1],:])
+    if raw_mov is not None:
+        titles.append("Motion Corrected Data")
+        img_types.append(1)
+        mov_list.append(raw_mov[dim1_range[0]:dim1_range[1], dim2_range[0]:dim2_range[1],:])
+    elif deviation_img is not None:
+        titles.append("Deviation Image of PMD Data")
+        img_types.append(1)
+        mov_list.append(deviation_img[dim1_range[0]:dim1_range[1], dim2_range[0]:dim2_range[1], :])
+    else:
+        raise ValueError("Must include either raw image or deviation image")
     
     #Add denoised movie:
     titles.append("Denoised Data")
@@ -1392,21 +1439,25 @@ def standard_demix_vid(a, c, b, raw_mov, denoised_mov, fluctuating_bg_terms, fil
     #Add grayscale A*C video:
     AC = np.tensordot(a, c, axes=(2,0))
     
-    print("done with AC calculation")
+    if PMD_match:
+        AC_displayed = AC * max_val_PMD/np.amax(AC[dim1_range[0]:dim1_range[1], dim2_range[0]:dim2_range[1],:])
+    else:
+        AC_displayed = AC
     
     #Perform min subtraction of the AC panel...
     if min_sub_signals:
+        raise ValueError("no longer supported")
         c_minsub = c - np.amin(c, axis = 1, keepdims = True)
         AC_minsub = np.tensordot(a, c_minsub, axes=(2,0))
         img_types.append(1)
-        mov_list.append(threshold_movie_max(AC_minsub, denoised_max)[dim1_range[0]:dim1_range[1], dim2_range[0]:dim2_range[1], :])
+        mov_list.append(AC_minsub[dim1_range[0]:dim1_range[1], dim2_range[0]:dim2_range[1], :])
 #         min_AC = np.amin(AC, axis = 2, keepdims = True)
 #         AC = AC - min_AC
         titles.append("Signal Estimates")
     else:
         titles.append("Signal Estimates")
         img_types.append(1)
-        mov_list.append(threshold_movie_max(AC, denoised_max)[dim1_range[0]:dim1_range[1], dim2_range[0]:dim2_range[1], :])
+        mov_list.append(AC_displayed[dim1_range[0]:dim1_range[1], dim2_range[0]:dim2_range[1], :])
     
     
     
@@ -1420,33 +1471,31 @@ def standard_demix_vid(a, c, b, raw_mov, denoised_mov, fluctuating_bg_terms, fil
         mov_list.append(AC_real_color_image[dim1_range[0]:dim1_range[1], dim2_range[0]:dim2_range[1], :, :])
         
        
-    #Add net background background: 
+    #Add net background: 
     
-    print('started fbg')
     #Load relevant ringlocalNMF outputs
     fluctuating_bg = fluctuating_bg_terms[0].dot(fluctuating_bg_terms[1]).reshape((x, y, -1), order="F")
-    print("done with fluctuating calculation")
-    print("included b now")
     net_bg = fluctuating_bg + b
-    titles.append("Net Background")
+    titles.append("Centered Net Background")
     img_types.append(1)
-    mov_list.append(net_bg[dim1_range[0]:dim1_range[1], dim2_range[0]:dim2_range[1], :])
+    mov_to_show_bg = net_bg[dim1_range[0]:dim1_range[1], dim2_range[0]:dim2_range[1], :]
+    mov_to_show_bg = mov_to_show_bg - np.mean(mov_to_show_bg, axis = 2, keepdims=True)
+    mov_list.append(mov_to_show_bg)
     
     #Add residual:
     res = denoised_mov - AC - net_bg
     if mean_sub_res == False:
         titles.append("Residual")
     else:
-        print("the shape of res is {}".format(res.shape))
         res = res - np.mean(res, axis = 2, keepdims = True)
         titles.append("Residual")
     titles.append("Residual")
     img_types.append(1)
-    mov_list.append(threshold_movie_max(res, denoised_max * 0.5)[dim1_range[0]:dim1_range[1], dim2_range[0]:dim2_range[1], :])
+    mov_list.append(res[dim1_range[0]:dim1_range[1], dim2_range[0]:dim2_range[1], :])
     
     
     #Generate Demixing Video
-    write_mpl_no_compress_comparisons(mov_list, filename, img_types, titles = titles, fr=fr, \
+    write_mpl_no_compress_comparisons(mov_list, filename, img_types,  movie_scales, titles = titles, fr=fr, \
             scale=scale, titlesize=titlesize, ticksize=ticksize, colorticksize=colorticksize, width_const = width_const, offset=start) 
        
 
@@ -1500,6 +1549,7 @@ def standard_demix_vid_old(rlt, mov_raw, mov_denoised, filename, fr=30, \
     W = rlt['W']
     W = W.astype("float")
     b = rlt['b']
+    
     
     #Define range of frames included in videos:
     start = 0
