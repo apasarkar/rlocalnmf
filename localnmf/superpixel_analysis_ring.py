@@ -629,6 +629,31 @@ def make_mask(corr_img_all_r, corr, mask_a, num_plane=1,times=10,max_allow_neuro
     return mask_a
 
 
+def make_mask_dynamic(corr_img_all_r, corr_percent, mask_a):
+    """
+    update the spatial support: connected region in corr_img(corr(Y,c)) which is connected with previous spatial support
+    """
+    s = np.ones([3,3]);
+    mask_a = (mask_a.reshape(corr_img_all_r.shape,order="F")).copy()
+    for ii in range(mask_a.shape[2]):
+        max_corr_val = np.amax(corr_img_all_r[:, :, ii])
+        corr_thres = corr_percent * max_corr_val
+        labeled_array, num_features = scipy.ndimage.measurements.label(corr_img_all_r[:,:,ii] > corr_thres,structure=s);
+        u, indices, counts = np.unique(labeled_array*mask_a[:,:,ii], return_inverse=True, return_counts=True);
+        
+        if len(u)==1:
+            mask_a[:, :, ii] *= 0
+        else:
+            c = u[1:][np.argmax(counts[1:])];
+            #print(c);
+            labeled_array = (labeled_array==c);
+            mask_a[:,:,ii] = labeled_array;
+
+    return mask_a.reshape((-1, mask_a.shape[2]), order = "F")
+    
+
+    
+
 def make_mask_rigid(corr_img_all_r, corr, mask_a):
     """
     update the spatial support: connected region in corr_img(corr(Y,c)) which is connected with previous spatial support
@@ -2655,7 +2680,7 @@ def update_AC_bg_l2_Y_ring_lowrank(U_sparse, R, V, V_orig,r,dims, a, c, b, patch
             maxiter=50, tol=1e-8, update_after=None,merge_corr_thr=0.5,
             merge_overlap_thr=0.7, num_plane=1, plot_en=False,
             max_allow_neuron_size=0.2, skips=2, update_type="Constant",\
-                                mask_a=None, sb=True, pseudo_corr = 0, model = None, plot_mnmf = False, device = 'cpu', batch_size = 10000, plot_debug = False, denoise = False):
+                                mask_a=None, sb=True, pseudo_corr = 0, model = None, plot_mnmf = False, device = 'cpu', batch_size = 10000, plot_debug = False, denoise = None):
     
     '''
     Function for computing background, spatial and temporal components of neurons. Uses HALS updates to iteratively
@@ -2682,7 +2707,12 @@ def update_AC_bg_l2_Y_ring_lowrank(U_sparse, R, V, V_orig,r,dims, a, c, b, patch
     
     
     print("Initializing W matrix")
-    W_original = init_w(d1, d2, r)
+    if skips > maxiter:
+        print("no background model here")
+        W_original = scipy.sparse.coo_matrix((d1*d2, d1*d2))
+    else:
+        print("background model will be used after {} iterations".format(skips))
+        W_original = init_w(d1, d2, r)
     
     #Precompute VV^t for X updates
     VVt = V.dot(V.T) #This is for the orthogonal V
@@ -2742,7 +2772,12 @@ def update_AC_bg_l2_Y_ring_lowrank(U_sparse, R, V, V_orig,r,dims, a, c, b, patch
             plt.show()
 
      
-    
+    #Set denoiser: 
+    if denoise is None: 
+        denoise = [False for i in range(maxiter)]
+    elif len(denoise) != maxiter:
+        print("Length of denoise list is not consistent, setting all denoise values to false for this pass of NMF")
+        denoise = [False for i in range(maxiter)]
    
            
     for iters in range(maxiter):
@@ -2824,7 +2859,7 @@ def update_AC_bg_l2_Y_ring_lowrank(U_sparse, R, V, V_orig,r,dims, a, c, b, patch
         print('the shape of c after temporal update is {}'.format(c.shape))
         print("temporal regression update took {}".format(time.time() - test_time))  
         #Denoise 'c' components if desired
-        if denoise:
+        if denoise[iters]:
             print("denoising")
             c = ca_utils.denoise(c) #We now use OASIS denoising to improve improve signals
             c = np.nan_to_num(c, posinf = 0, neginf = 0, nan = 0) #Gracefully handle invalid values
@@ -2871,7 +2906,8 @@ def update_AC_bg_l2_Y_ring_lowrank(U_sparse, R, V, V_orig,r,dims, a, c, b, patch
             corr_img_all_r = corr_img_all.reshape(patch_size[0],patch_size[1],-1,order="F");
 
             #Currently using rigid mask
-            mask_a_rigid = make_mask_rigid(corr_img_all_r, corr_th_fix, mask_ab)
+            print("making dynamic support updates")
+            mask_a_rigid = make_mask_dynamic(corr_img_all_r, corr_th_fix, mask_ab)
             mask_ab = mask_a_rigid
 
             ## Now we delete components based on whether they have a 0 residual corr img with their supports or not...
