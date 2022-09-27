@@ -2621,7 +2621,7 @@ def demix_whole_data_robust_ring_lowrank(U,V_PMD,r=10, cut_off_point=[0.95,0.9],
                                         corr_th_fix, corr_th_fix_sec, corr_th_del, switch_point, maxiter=maxiter, tol=1e-8, update_after=update_after,
                                         merge_corr_thr=merge_corr_thr,merge_overlap_thr=merge_overlap_thr, num_plane=num_plane, plot_en=plot_en, max_allow_neuron_size=max_allow_neuron_size, skips=skips, update_type=update_type, mask_a=mask_a,sb=sb, pseudo_corr = pseudo_corr[ii], model = model, plot_mnmf = plot_mnmf, device = device, batch_size = batch_size, plot_debug = plot_debug, denoise = denoise);
         print("time: " + str(time.time()-start));
-        
+        torch.cuda.empty_cache() #Test this as placeholder for now to avoid GPU memory getting clogged
         
         
         print("POST update AC")
