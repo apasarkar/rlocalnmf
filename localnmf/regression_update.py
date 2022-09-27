@@ -185,6 +185,24 @@ def scipy_coo_to_torchsparse_coo(scipy_coo_mat):
     # return torch.sparse.FloatTensor(i, v, torch.Size(shape))
 
     
+def project_U_HALS(U_sparse, U_sparse_inverse, W, vector):
+    '''
+    Commonly used routine to project background term (W) onto W basis in HALS calculations
+    Note that we multiple W by v first (before doing any other matmul) because that collapses to a single vector. Then 
+    all subsequent matmuls are very fast
+    Inputs: 
+        U_sparse: torch_sparse.SparseTensor object. Dimensions d x r where d is number of pixels, r is rank
+        U_sparse_inverse: torch.Tensor object. Equal to finding the inverse of U_sparse^t times U_sparse (precomputed)
+        W: torch_sparse.SparseTensor object. Dimensions (d^2 * d^2)
+        vector: torch.Tensor. Dimensions (d, k) for some value k.
+    '''
+    Wv = torch_sparse.matmul(W, vector)
+    UtWv = torch_sparse.matmul(U_sparse.t(), Wv)
+    U_invUtWv = torch.matmul(U_sparse_inverse, UtWv)
+    UU_invUtWv = torch_sparse.matmul(U_sparse, U_invUtWv)
+    
+    return UU_invUtWv
+    
 def spatial_update_HALS(U_sparse, V, W, X, a, c, b, device='cpu', mask_ab = None):
     '''
     Computes a spatial HALS updates: 
@@ -207,6 +225,9 @@ def spatial_update_HALS(U_sparse, V, W, X, a, c, b, device='cpu', mask_ab = None
     X = torch.from_numpy(X).float().to(device)
     c = torch.from_numpy(c).float().to(device)
     b = torch.from_numpy(b).float().to(device)
+    
+    U_sparse_inner = torch.inverse(torch_sparse.matmul(U_sparse.t(), U_sparse).to_dense())
+    
     
     
     if mask_ab is None: 
@@ -234,20 +255,24 @@ def spatial_update_HALS(U_sparse, V, W, X, a, c, b, device='cpu', mask_ab = None
     ctVtU_PMDt = torch_sparse.matmul(U_sparse, ctVt.t()).t()
     ctVtUt_net = ctVtUt_net + ctVtU_PMDt
     
-    #Step 2: Compute ctVtU_PMD^tW^t
-    ctVtU_PMD_tWt = torch_sparse.matmul(W, ctVtU_PMDt.t()).t()
+    #Step 2: Compute ctVtU_PMD^t(Proj)^t
+    # where Proj = U(U^tU)^-1U^tW, the linear projection of W onto U
+    ctVtU_PMD_tWt = project_U_HALS(U_sparse, U_sparse_inner, W, ctVtU_PMDt.t()).t()
     ctVtUt_net -= ctVtU_PMD_tWt
     
-    #Step 3: Compute ctVtXtatWt
+    #Step 3: Compute ctVtXtat(Proj)^t
+    # where Proj = U(U^tU)^-1U^tW, the linear projection of W onto U
     ctVtXt = torch.matmul(ctVt, X.t())
     ctVtXtat = torch_sparse.matmul(a_sparse, ctVtXt.t()).t()
-    ctVtXtatWt = torch_sparse.matmul(W, ctVtXtat.t()).t()
+    ctVtXtatWt = project_U_HALS(U_sparse, U_sparse_inner, W, ctVtXtat.t()).t()
     ctVtUt_net += ctVtXtatWt
     
-    #Step 4: ctVtstbtWt
-    btWt = torch_sparse.matmul(W, b).t()
+    #Step 4: ctVtstbt(Proj)^t
+    # where Proj = U(U^tU)^-1U^tW, the linear projection of W onto U
+    Proj_Wb = project_U_HALS(U_sparse, U_sparse_inner, W, b).t()
+    # btWt = torch_sparse.matmul(W, b).t()
     ctVtst = torch.matmul(ctVt, s.t())
-    ctVtstbtWt = torch.matmul(ctVtst, btWt)
+    ctVtstbtWt = torch.matmul(ctVtst, Proj_Wb)
     ctVtUt_net += ctVtstbtWt
     
     #Step 5: ctVtstbt
@@ -301,6 +326,15 @@ def spatial_update_HALS(U_sparse, V, W, X, a, c, b, device='cpu', mask_ab = None
         
     return a_sparse.cpu()    
  
+    
+def left_project_U_HALS(a_sparse, U_sparse, U_sparse_inverse, W):
+    atU = torch_sparse.matmul(a_sparse.t(), U_sparse)
+    atU_Uinv = torch_sparse.matmul(atU, U_sparse_inverse)
+    atU_UinvUt = torch_sparse.matmul(U_sparse, atU_Uinv.t()).t()
+    final = torch_sparse.matmul(W.t(), atU_UinvUt.t()).t()
+    return final
+    
+    
 def temporal_update_HALS(U_sparse, V, W, X, a, c, b, device='cpu'):
     '''
     Inputs: 
@@ -332,6 +366,7 @@ def temporal_update_HALS(U_sparse, V, W, X, a, c, b, device='cpu'):
     s = torch.zeros([1, V.shape[0]], device=device)
     s[:, -1] = -1
 
+    U_sparse_inner = torch.inverse(torch_sparse.matmul(U_sparse.t(), U_sparse).to_dense())
     
     
     ##Precompute quantities used throughout all iterations
@@ -341,7 +376,8 @@ def temporal_update_HALS(U_sparse, V, W, X, a, c, b, device='cpu'):
     atU_net += torch_sparse.matmul(a_sparse.t(), U_sparse).to_dense()
     
     #Step 2: Subtract atWU
-    atW = torch_sparse.matmul(a_sparse.t(), W).to_dense()
+    # atW = torch_sparse.matmul(a_sparse.t(), W).to_dense()
+    atW = left_project_U_HALS(a_sparse, U_sparse, U_sparse_inner, W) 
     atWU = torch_sparse.matmul(U_sparse.t(), atW.t()).t()
     atU_net -= atWU
     

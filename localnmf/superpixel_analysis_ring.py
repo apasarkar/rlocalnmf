@@ -2570,7 +2570,7 @@ def demix_whole_data_robust_ring_lowrank(U,V_PMD,r=10, cut_off_point=[0.95,0.9],
             print("time: " + str(time.time()-start));
 
 
-        ##TODO: Eliminate this from the source code (masknmf is becomes a 'custom' init method) 
+        ##TODO: Eliminate this from the source code (masknmf becomes a 'custom' init method) 
         elif init[ii] == 'mnmf':  
             ##Here we use the bessel init:
             if ii == 0:
