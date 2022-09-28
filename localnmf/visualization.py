@@ -1349,7 +1349,7 @@ def generate_color_movie(a_use, c_use, dims, random_values, seed=999):
 def standard_demix_vid(a, c, b, denoised_mov, fluctuating_bg_terms, filename, raw_mov = None, deviation_img = None, order = "C", fr=30, \
               titles=None, movie_scales=None, scale=1, titlesize=20, ticksize=14, colorticksize=12, a_real = None, c_real = None, \
                       rgbrange = [80, 255], channels = 3, mean_sub_res = False, min_sub_signals = True, width_const = 3.5,\
-                      random_values = None, start = 0, end = 1000, dim1_range=None, dim2_range=None):
+                      random_values = None, start = 0, end = 1000, dim1_range=None, dim2_range=None, PMD_match=True):
     '''
     Generates a 'standard' triptych demixing video based on ring localNMF. Provided for quick visualization of ring localNMF results
     args:
@@ -1390,8 +1390,6 @@ def standard_demix_vid(a, c, b, denoised_mov, fluctuating_bg_terms, filename, ra
     titles = []
     img_types =[]
     mov_list = []
-    
-    PMD_match = True
             
     if PMD_match:
         max_val_PMD = np.amax(denoised_mov[dim1_range[0]:dim1_range[1], dim2_range[0]:dim2_range[1],:])

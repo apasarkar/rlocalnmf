@@ -629,6 +629,31 @@ def make_mask(corr_img_all_r, corr, mask_a, num_plane=1,times=10,max_allow_neuro
     return mask_a
 
 
+def make_mask_dynamic(corr_img_all_r, corr_percent, mask_a):
+    """
+    update the spatial support: connected region in corr_img(corr(Y,c)) which is connected with previous spatial support
+    """
+    s = np.ones([3,3]);
+    mask_a = (mask_a.reshape(corr_img_all_r.shape,order="F")).copy()
+    for ii in range(mask_a.shape[2]):
+        max_corr_val = np.amax(corr_img_all_r[:, :, ii])
+        corr_thres = corr_percent * max_corr_val
+        labeled_array, num_features = scipy.ndimage.measurements.label(corr_img_all_r[:,:,ii] > corr_thres,structure=s);
+        u, indices, counts = np.unique(labeled_array*mask_a[:,:,ii], return_inverse=True, return_counts=True);
+        
+        if len(u)==1:
+            mask_a[:, :, ii] *= 0
+        else:
+            c = u[1:][np.argmax(counts[1:])];
+            #print(c);
+            labeled_array = (labeled_array==c);
+            mask_a[:,:,ii] = labeled_array;
+
+    return mask_a.reshape((-1, mask_a.shape[2]), order = "F")
+    
+
+    
+
 def make_mask_rigid(corr_img_all_r, corr, mask_a):
     """
     update the spatial support: connected region in corr_img(corr(Y,c)) which is connected with previous spatial support
@@ -2253,10 +2278,74 @@ def find_superpixel_UV(U_sparse, V, dims, cut_off_point, length_cut, th, eight_n
     return connect_mat_1, idx, comps, permute_col
 
 
-def spatial_temporal_ini_UV(U,V, dims, th, comps, idx, length_cut, a = None, c = None, device = 'cpu'):
+def fit_pixel_region(comp, c_init, U_subset, V_torch, comp_tensor, a_sparse = None, c = None):
+    U_subset = torch_sparse.index_select(U_sparse_torch, 0, comp_tensor)
+    y_temp = torch_sparse.matmul(U_subset, V_torch)
+    print("shape of y_temp is {}".format(y_temp.shape))
+
+
+    if a_sparse is not None and c is not None:
+        a_subset = torch_sparse.index_select(a_sparse, 0, comp_tensor)
+        ac_prod = torch_sparse.matmul(a_subset, c)
+        y_temp = torch.sub(y_temp, ac_prod)
+
+    y_temp = threshold_data_inplace(y_temp, th, axisVal=1)
+
+    normalizer = torch.sum(c_init * c_init)
+    elt_product = torch.sum(c_init[None, :] * y_temp, axis = 1)
+
+    curr_values = elt_product / normalizer
+    threshold_function = torch.nn.ReLU()
+    curr_values_thr = threshold_function(curr_values)
+    return curr_values_thr
+
+    
+    
+def fit_large_spatial_support(comp, c_init, U_sparse_torch, V_torch, th, a_sparse=None, c=None, batch_size = 500):
+    '''
+    Routine for estimating 
+    '''
+    print("Fitting larger spatial support")
+    comp = list(comp)
+    num_iters = math.ceil(len(comp)/batch_size)
+    final_values = torch.zeros(0, device=V_torch.device)
+    
+    for k in range(num_iters):
+        start_pt = batch_size * k
+        end_pt = min(len(comp), batch_size*(k+1))
+        components = comp[start_pt:end_pt]
+        comp_tensor = torch.LongTensor(components).to(V_torch.device)
+        U_subset = torch_sparse.index_select(U_sparse_torch, 0, comp_tensor)
+        y_temp = torch_sparse.matmul(U_subset, V_torch)
+        
+
+        if a_sparse is not None and c is not None:
+            a_subset = torch_sparse.index_select(a_sparse, 0, comp_tensor)
+            ac_prod = torch_sparse.matmul(a_subset, c)
+            y_temp = torch.sub(y_temp, ac_prod)
+            
+        y_temp = threshold_data_inplace(y_temp, th, axisVal=1)
+        
+        normalizer = torch.sum(c_init * c_init)
+        elt_product = torch.sum(c_init[None, :] * y_temp, axis = 1)
+        
+        curr_values = elt_product / normalizer
+        threshold_function = torch.nn.ReLU()
+        curr_values_thr = threshold_function(curr_values)
+    
+        final_values = torch.cat((final_values, curr_values_thr.type(final_values.dtype)), dim=0)
+        
+    return final_values
+
+
+    
+
+def spatial_temporal_ini_UV(U,V, dims, th, comps, idx, length_cut, a = None, c = None, device = 'cpu', pixel_limit=2000):
     """
     Apply rank 1 NMF to find spatial and temporal initialization for each superpixel in Yt.
     """
+    if device == 'cuda':
+        torch.cuda.empty_cache()
     dims = (dims[0], dims[1], V.shape[1])
     T = V.shape[1]
     ii = 0;
@@ -2283,10 +2372,18 @@ def spatial_temporal_ini_UV(U,V, dims, th, comps, idx, length_cut, a = None, c =
     final_shape = [np.prod(dims[:2]), idx]
 
     for comp in comps:
+        oversized=False
         if(len(comp) > length_cut):
             if ii % 100 == 0:
                 print("we are initializing component {} out of {}".format(ii, idx))
-            comp_tensor = torch.LongTensor(list(comp)).to(device)
+            if len(comp) > pixel_limit:
+                oversized=True
+                print("Found large component with support of {} pixels. Might be worth raising correlation thresholds in superpixel step".format(len(comp)))
+                selections = np.random.choice(list(comp), size=pixel_limit, replace=False)
+                comp_tensor = torch.LongTensor(selections).to(device)
+            else:
+                oversized=False
+                comp_tensor = torch.LongTensor(list(comp)).to(device)
             U_subset = torch_sparse.index_select(U_sparse_torch, 0, comp_tensor)
             y_temp = torch_sparse.matmul(U_subset, V_torch)
             
@@ -2301,13 +2398,30 @@ def spatial_temporal_ini_UV(U,V, dims, th, comps, idx, length_cut, a = None, c =
                                      W = y_temp.mean(axis=0, keepdim=True).t()).to(device)
             outputs = model.fit(y_temp)
             
+            
+       
             ##Keep constructing H
-            final_rows = torch.cat((final_rows, comp_tensor), dim=0)
-            curr_rows = torch.zeros_like(comp_tensor, device=device) 
-            curr_cols = torch.add(curr_rows, ii)
-            final_columns = torch.cat((final_columns, curr_cols), dim=0)
-            curr_values = model.H[:, 0]
+            
+            
+            
+            if not oversized:
+                curr_rows = torch.zeros_like(comp_tensor, device=device) 
+                curr_cols = torch.add(curr_rows, ii)
+                curr_values = model.H[:, 0]
+            elif oversized:
+                c_init = model.W
+                c_init = torch.squeeze(c_init).t()
+                with torch.no_grad():
+                    if a is not None and c is not None:
+                        curr_values = fit_large_spatial_support(comp, c_init, U_sparse_torch, V_torch, th, a_sparse=a_sparse, c=c,batch_size = pixel_limit)
+                    else:
+                        curr_values = fit_large_spatial_support(comp, c_init, U_sparse_torch, V_torch, th, a_sparse=None, c=None,batch_size = pixel_limit)
+                comp_tensor = torch.LongTensor(list(comp)).to(device)
+                curr_rows = torch.zeros_like(comp_tensor, device=device) 
+                curr_cols = torch.add(curr_rows, ii)
             final_values = torch.cat((final_values, curr_values), dim=0)
+            final_columns = torch.cat((final_columns, curr_cols), dim=0)
+            final_rows = torch.cat((final_rows, comp_tensor), dim=0)
             
             
             V_mat[:,[ii]] = model.W
@@ -2545,7 +2659,7 @@ def demix_whole_data_robust_ring_lowrank(U,V_PMD,r=10, cut_off_point=[0.95,0.9],
             print("time: " + str(time.time()-start));
 
 
-        ##TODO: Eliminate this from the source code (masknmf is becomes a 'custom' init method) 
+        ##TODO: Eliminate this from the source code (masknmf becomes a 'custom' init method) 
         elif init[ii] == 'mnmf':  
             ##Here we use the bessel init:
             if ii == 0:
@@ -2590,14 +2704,15 @@ def demix_whole_data_robust_ring_lowrank(U,V_PMD,r=10, cut_off_point=[0.95,0.9],
         #######
         print("BEFORE ENTERINIG DEMIX THE PATCH SIZE IS {}".format(patch_size))
 
+        with torch.no_grad():
 
-        a, c, b, X, W, res, corr_img_all_r, num_list = update_AC_bg_l2_Y_ring_lowrank(U_sparse, R, V, V_PMD, r,dims,\
-                                                                                   a, c, b, dims,
-                                        corr_th_fix, corr_th_fix_sec, corr_th_del, switch_point, maxiter=maxiter, tol=1e-8, update_after=update_after,
-                                        merge_corr_thr=merge_corr_thr,merge_overlap_thr=merge_overlap_thr, num_plane=num_plane, plot_en=plot_en, max_allow_neuron_size=max_allow_neuron_size, skips=skips, update_type=update_type, mask_a=mask_a,sb=sb, pseudo_corr = pseudo_corr[ii], model = model, plot_mnmf = plot_mnmf, device = device, batch_size = batch_size, plot_debug = plot_debug, denoise = denoise);
-        print("time: " + str(time.time()-start));
-        
-        
+            a, c, b, X, W, res, corr_img_all_r, num_list = update_AC_bg_l2_Y_ring_lowrank(U_sparse, R, V, V_PMD, r,dims,\
+                                                                                       a, c, b, dims,
+                                            corr_th_fix, corr_th_fix_sec, corr_th_del, switch_point, maxiter=maxiter, tol=1e-8, update_after=update_after,
+                                            merge_corr_thr=merge_corr_thr,merge_overlap_thr=merge_overlap_thr, num_plane=num_plane, plot_en=plot_en, max_allow_neuron_size=max_allow_neuron_size, skips=skips, update_type=update_type, mask_a=mask_a,sb=sb, pseudo_corr = pseudo_corr[ii], model = model, plot_mnmf = plot_mnmf, device = device, batch_size = batch_size, plot_debug = plot_debug, denoise = denoise);
+            print("time: " + str(time.time()-start));
+            torch.cuda.empty_cache() #Test this as placeholder for now to avoid GPU memory getting clogged
+
         
         print("POST update AC")
         
@@ -2655,7 +2770,7 @@ def update_AC_bg_l2_Y_ring_lowrank(U_sparse, R, V, V_orig,r,dims, a, c, b, patch
             maxiter=50, tol=1e-8, update_after=None,merge_corr_thr=0.5,
             merge_overlap_thr=0.7, num_plane=1, plot_en=False,
             max_allow_neuron_size=0.2, skips=2, update_type="Constant",\
-                                mask_a=None, sb=True, pseudo_corr = 0, model = None, plot_mnmf = False, device = 'cpu', batch_size = 10000, plot_debug = False, denoise = False):
+                                mask_a=None, sb=True, pseudo_corr = 0, model = None, plot_mnmf = False, device = 'cpu', batch_size = 10000, plot_debug = False, denoise = None):
     
     '''
     Function for computing background, spatial and temporal components of neurons. Uses HALS updates to iteratively
@@ -2682,7 +2797,12 @@ def update_AC_bg_l2_Y_ring_lowrank(U_sparse, R, V, V_orig,r,dims, a, c, b, patch
     
     
     print("Initializing W matrix")
-    W_original = init_w(d1, d2, r)
+    if skips > maxiter:
+        print("no background model here")
+        W_original = scipy.sparse.coo_matrix((d1*d2, d1*d2))
+    else:
+        print("background model will be used after {} iterations".format(skips))
+        W_original = init_w(d1, d2, r)
     
     #Precompute VV^t for X updates
     VVt = V.dot(V.T) #This is for the orthogonal V
@@ -2742,7 +2862,12 @@ def update_AC_bg_l2_Y_ring_lowrank(U_sparse, R, V, V_orig,r,dims, a, c, b, patch
             plt.show()
 
      
-    
+    #Set denoiser: 
+    if denoise is None: 
+        denoise = [False for i in range(maxiter)]
+    elif len(denoise) != maxiter:
+        print("Length of denoise list is not consistent, setting all denoise values to false for this pass of NMF")
+        denoise = [False for i in range(maxiter)]
    
            
     for iters in range(maxiter):
@@ -2824,7 +2949,7 @@ def update_AC_bg_l2_Y_ring_lowrank(U_sparse, R, V, V_orig,r,dims, a, c, b, patch
         print('the shape of c after temporal update is {}'.format(c.shape))
         print("temporal regression update took {}".format(time.time() - test_time))  
         #Denoise 'c' components if desired
-        if denoise:
+        if denoise[iters]:
             print("denoising")
             c = ca_utils.denoise(c) #We now use OASIS denoising to improve improve signals
             c = np.nan_to_num(c, posinf = 0, neginf = 0, nan = 0) #Gracefully handle invalid values
@@ -2871,7 +2996,8 @@ def update_AC_bg_l2_Y_ring_lowrank(U_sparse, R, V, V_orig,r,dims, a, c, b, patch
             corr_img_all_r = corr_img_all.reshape(patch_size[0],patch_size[1],-1,order="F");
 
             #Currently using rigid mask
-            mask_a_rigid = make_mask_rigid(corr_img_all_r, corr_th_fix, mask_ab)
+            print("making dynamic support updates")
+            mask_a_rigid = make_mask_dynamic(corr_img_all_r, corr_th_fix, mask_ab)
             mask_ab = mask_a_rigid
 
             ## Now we delete components based on whether they have a 0 residual corr img with their supports or not...
