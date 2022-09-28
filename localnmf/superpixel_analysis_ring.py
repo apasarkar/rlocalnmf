@@ -2278,10 +2278,74 @@ def find_superpixel_UV(U_sparse, V, dims, cut_off_point, length_cut, th, eight_n
     return connect_mat_1, idx, comps, permute_col
 
 
-def spatial_temporal_ini_UV(U,V, dims, th, comps, idx, length_cut, a = None, c = None, device = 'cpu'):
+def fit_pixel_region(comp, c_init, U_subset, V_torch, comp_tensor, a_sparse = None, c = None):
+    U_subset = torch_sparse.index_select(U_sparse_torch, 0, comp_tensor)
+    y_temp = torch_sparse.matmul(U_subset, V_torch)
+    print("shape of y_temp is {}".format(y_temp.shape))
+
+
+    if a_sparse is not None and c is not None:
+        a_subset = torch_sparse.index_select(a_sparse, 0, comp_tensor)
+        ac_prod = torch_sparse.matmul(a_subset, c)
+        y_temp = torch.sub(y_temp, ac_prod)
+
+    y_temp = threshold_data_inplace(y_temp, th, axisVal=1)
+
+    normalizer = torch.sum(c_init * c_init)
+    elt_product = torch.sum(c_init[None, :] * y_temp, axis = 1)
+
+    curr_values = elt_product / normalizer
+    threshold_function = torch.nn.ReLU()
+    curr_values_thr = threshold_function(curr_values)
+    return curr_values_thr
+
+    
+    
+def fit_large_spatial_support(comp, c_init, U_sparse_torch, V_torch, th, a_sparse=None, c=None, batch_size = 500):
+    '''
+    Routine for estimating 
+    '''
+    print("Fitting larger spatial support")
+    comp = list(comp)
+    num_iters = math.ceil(len(comp)/batch_size)
+    final_values = torch.zeros(0, device=V_torch.device)
+    
+    for k in range(num_iters):
+        start_pt = batch_size * k
+        end_pt = min(len(comp), batch_size*(k+1))
+        components = comp[start_pt:end_pt]
+        comp_tensor = torch.LongTensor(components).to(V_torch.device)
+        U_subset = torch_sparse.index_select(U_sparse_torch, 0, comp_tensor)
+        y_temp = torch_sparse.matmul(U_subset, V_torch)
+        
+
+        if a_sparse is not None and c is not None:
+            a_subset = torch_sparse.index_select(a_sparse, 0, comp_tensor)
+            ac_prod = torch_sparse.matmul(a_subset, c)
+            y_temp = torch.sub(y_temp, ac_prod)
+            
+        y_temp = threshold_data_inplace(y_temp, th, axisVal=1)
+        
+        normalizer = torch.sum(c_init * c_init)
+        elt_product = torch.sum(c_init[None, :] * y_temp, axis = 1)
+        
+        curr_values = elt_product / normalizer
+        threshold_function = torch.nn.ReLU()
+        curr_values_thr = threshold_function(curr_values)
+    
+        final_values = torch.cat((final_values, curr_values_thr.type(final_values.dtype)), dim=0)
+        
+    return final_values
+
+
+    
+
+def spatial_temporal_ini_UV(U,V, dims, th, comps, idx, length_cut, a = None, c = None, device = 'cpu', pixel_limit=2000):
     """
     Apply rank 1 NMF to find spatial and temporal initialization for each superpixel in Yt.
     """
+    if device == 'cuda':
+        torch.cuda.empty_cache()
     dims = (dims[0], dims[1], V.shape[1])
     T = V.shape[1]
     ii = 0;
@@ -2308,10 +2372,18 @@ def spatial_temporal_ini_UV(U,V, dims, th, comps, idx, length_cut, a = None, c =
     final_shape = [np.prod(dims[:2]), idx]
 
     for comp in comps:
+        oversized=False
         if(len(comp) > length_cut):
             if ii % 100 == 0:
                 print("we are initializing component {} out of {}".format(ii, idx))
-            comp_tensor = torch.LongTensor(list(comp)).to(device)
+            if len(comp) > pixel_limit:
+                oversized=True
+                print("Found large component with support of {} pixels. Might be worth raising correlation thresholds in superpixel step".format(len(comp)))
+                selections = np.random.choice(list(comp), size=pixel_limit, replace=False)
+                comp_tensor = torch.LongTensor(selections).to(device)
+            else:
+                oversized=False
+                comp_tensor = torch.LongTensor(list(comp)).to(device)
             U_subset = torch_sparse.index_select(U_sparse_torch, 0, comp_tensor)
             y_temp = torch_sparse.matmul(U_subset, V_torch)
             
@@ -2326,13 +2398,30 @@ def spatial_temporal_ini_UV(U,V, dims, th, comps, idx, length_cut, a = None, c =
                                      W = y_temp.mean(axis=0, keepdim=True).t()).to(device)
             outputs = model.fit(y_temp)
             
+            
+       
             ##Keep constructing H
-            final_rows = torch.cat((final_rows, comp_tensor), dim=0)
-            curr_rows = torch.zeros_like(comp_tensor, device=device) 
-            curr_cols = torch.add(curr_rows, ii)
-            final_columns = torch.cat((final_columns, curr_cols), dim=0)
-            curr_values = model.H[:, 0]
+            
+            
+            
+            if not oversized:
+                curr_rows = torch.zeros_like(comp_tensor, device=device) 
+                curr_cols = torch.add(curr_rows, ii)
+                curr_values = model.H[:, 0]
+            elif oversized:
+                c_init = model.W
+                c_init = torch.squeeze(c_init).t()
+                with torch.no_grad():
+                    if a is not None and c is not None:
+                        curr_values = fit_large_spatial_support(comp, c_init, U_sparse_torch, V_torch, th, a_sparse=a_sparse, c=c,batch_size = pixel_limit)
+                    else:
+                        curr_values = fit_large_spatial_support(comp, c_init, U_sparse_torch, V_torch, th, a_sparse=None, c=None,batch_size = pixel_limit)
+                comp_tensor = torch.LongTensor(list(comp)).to(device)
+                curr_rows = torch.zeros_like(comp_tensor, device=device) 
+                curr_cols = torch.add(curr_rows, ii)
             final_values = torch.cat((final_values, curr_values), dim=0)
+            final_columns = torch.cat((final_columns, curr_cols), dim=0)
+            final_rows = torch.cat((final_rows, comp_tensor), dim=0)
             
             
             V_mat[:,[ii]] = model.W
@@ -2615,14 +2704,15 @@ def demix_whole_data_robust_ring_lowrank(U,V_PMD,r=10, cut_off_point=[0.95,0.9],
         #######
         print("BEFORE ENTERINIG DEMIX THE PATCH SIZE IS {}".format(patch_size))
 
+        with torch.no_grad():
 
-        a, c, b, X, W, res, corr_img_all_r, num_list = update_AC_bg_l2_Y_ring_lowrank(U_sparse, R, V, V_PMD, r,dims,\
-                                                                                   a, c, b, dims,
-                                        corr_th_fix, corr_th_fix_sec, corr_th_del, switch_point, maxiter=maxiter, tol=1e-8, update_after=update_after,
-                                        merge_corr_thr=merge_corr_thr,merge_overlap_thr=merge_overlap_thr, num_plane=num_plane, plot_en=plot_en, max_allow_neuron_size=max_allow_neuron_size, skips=skips, update_type=update_type, mask_a=mask_a,sb=sb, pseudo_corr = pseudo_corr[ii], model = model, plot_mnmf = plot_mnmf, device = device, batch_size = batch_size, plot_debug = plot_debug, denoise = denoise);
-        print("time: " + str(time.time()-start));
-        torch.cuda.empty_cache() #Test this as placeholder for now to avoid GPU memory getting clogged
-        
+            a, c, b, X, W, res, corr_img_all_r, num_list = update_AC_bg_l2_Y_ring_lowrank(U_sparse, R, V, V_PMD, r,dims,\
+                                                                                       a, c, b, dims,
+                                            corr_th_fix, corr_th_fix_sec, corr_th_del, switch_point, maxiter=maxiter, tol=1e-8, update_after=update_after,
+                                            merge_corr_thr=merge_corr_thr,merge_overlap_thr=merge_overlap_thr, num_plane=num_plane, plot_en=plot_en, max_allow_neuron_size=max_allow_neuron_size, skips=skips, update_type=update_type, mask_a=mask_a,sb=sb, pseudo_corr = pseudo_corr[ii], model = model, plot_mnmf = plot_mnmf, device = device, batch_size = batch_size, plot_debug = plot_debug, denoise = denoise);
+            print("time: " + str(time.time()-start));
+            torch.cuda.empty_cache() #Test this as placeholder for now to avoid GPU memory getting clogged
+
         
         print("POST update AC")
         
