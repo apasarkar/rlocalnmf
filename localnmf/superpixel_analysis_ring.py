@@ -1994,7 +1994,7 @@ def process_custom_signals(a_init, U_sparse, V, device='cpu', order="F"):
     V_torch = torch.from_numpy(V).float().to(device)
     c_torch = torch.from_numpy(c).float().to(device)
     b_torch = torch.from_numpy(b).float().to(device)
-    W_torch = ring_model(d1, d2, r, device=device, order=order, empty=True)
+    W_torch = ring_model(dims[0], dims[1], r, device=device, order=order, empty=True)
     X_torch = torch.from_numpy(X).float().to(device)
     ##TODO: A
     
