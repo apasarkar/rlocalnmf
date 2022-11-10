@@ -1949,7 +1949,7 @@ def dilate_mask(mask_a, dilation_size):
     return new_mask
         
 
-def process_custom_signals(a_init, U_sparse, V):
+def process_custom_signals(a_init, U_sparse, V, device='cpu', order="F"):
     '''
     Custom initialization: Given a set of neuron spatial footprints ('a'), this provides initial estimates to the other component (temporal traces, baseline, fluctuating background)
     Terms:
@@ -1963,13 +1963,14 @@ def process_custom_signals(a_init, U_sparse, V):
     
     TODO: Eliminate awkward naming issues in 'process custom signals'
     '''
+    
     dims = (a_init.shape[0], a_init.shape[1], V.shape[1])
     
     A = a_init
     A_mask = (a_init>0)
     
-    A_re = A.reshape(dims[0]*dims[1],-1, order="F")
-    A_mask_re = A_mask.reshape(dims[0]*dims[1],-1,order="F")
+    A_re = A.reshape(dims[0]*dims[1],-1, order=order)
+    A_mask_re = A_mask.reshape(dims[0]*dims[1],-1,order=order)
 
     c = np.zeros((dims[2], A_re.shape[1]))
     
@@ -1981,8 +1982,23 @@ def process_custom_signals(a_init, U_sparse, V):
     X = np.zeros((A_re.shape[1], V.shape[0]))
     b = np.zeros((U_sparse.shape[0], 1))
     
-    C_new = regression_update.temporal_update_HALS(U_sparse, V, W, X, A_re, c, b)
-    c = C_new
+    
+    
+    a_scipy = scipy.sparse.coo_matrix(a)
+    a = torch_sparse.tensor.from_scipy(a_scipy).float().to(device)
+    
+    
+    #Cast the data to torch tensors 
+    A_re_torch = torch_sparse.tensor.from_scipy(scipy.sparse.coo_matrix(A_re)).float().to(device)
+    U_sparse_torch = torch_sparse.tensor.from_scipy(U_sparse).float().to(device)
+    V_torch = torch.from_numpy(V).float().to(device)
+    c_torch = torch.from_numpy(c).float().to(device)
+    b_torch = torch.from_numpy(b).float().to(device)
+    W_torch = ring_model(d1, d2, r, device=device, order=order, empty=True)
+    X_torch = torch.from_numpy(X).float().to(device)
+    ##TODO: A
+    
+    c = regression_update.temporal_update_HALS(U_sparse_torch, V_torch, W_torch, X_torch, A_re_torch, c_torch, b_torch).cpu().detach().numpy()
     
       
     ####Delete any zero components
@@ -2002,16 +2018,17 @@ def process_custom_signals(a_init, U_sparse, V):
     a = a[:, keeps]
     a_mask=a_mask[:,keeps]
     c = c[:, keeps]
-    print("THIS IS THE SHAPE AFTER DELETIONS")
-    print(a.shape)
-    print(c.shape)
+    # print("THIS IS THE SHAPE AFTER DELETIONS")
+    # print(a.shape)
+    # print(c.shape)
  
     ###
     # Estimate background (stationary and fluctuating) for localNMF 
     ###
     ##We estimate stationary background
     uv_mean = U_sparse.dot((V.mean(axis = 1, keepdims = True))) #Pixel-wise mean
-    b = regression_update.baseline_update(uv_mean, a, c)
+    
+    b = regression_update.baseline_update(uv_mean, a, c, to_torch=True)
     
     
     a_used = a.astype("double")
@@ -2734,7 +2751,7 @@ def demix_whole_data_robust_ring_lowrank(U,V_PMD,r=10, cut_off_point=[0.95,0.9],
                 
         elif init[ii]=='custom' and ii == 0:
             assert custom_init['a'].shape[2] > 0, 'Must provide at least 1 spatial footprint' 
-            a_ini, mask_a, b, c_ini = process_custom_signals(custom_init['a'].copy(), U_sparse, V_PMD)
+            a_ini, mask_a, b, c_ini = process_custom_signals(custom_init['a'].copy(), U_sparse, V_PMD, device=device, order="F")
             a = a_ini
             c = c_ini
        
