@@ -1984,8 +1984,6 @@ def process_custom_signals(a_init, U_sparse, V, device='cpu', order="F"):
     
     
     
-    a_scipy = scipy.sparse.coo_matrix(a)
-    a = torch_sparse.tensor.from_scipy(a_scipy).float().to(device)
     
     
     #Cast the data to torch tensors 
