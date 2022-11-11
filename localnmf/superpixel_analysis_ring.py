@@ -2877,7 +2877,7 @@ def update_AC_bg_l2_Y_ring_lowrank(U_sparse, R, V, V_orig,r,dims, a, c, b, patch
         mask_a = a.bool();
     else:
         print("MASK IS NOT NONE")
-        mask_a_scipy = scipy.sparse_coo_matrix(mask_a);
+        mask_a_scipy = scipy.sparse.coo_matrix(mask_a);
         mask_a = torch_sparse.tensor.from_scipy(mask_a_scipy).to(device)
     mask_ab = mask_a;
     
