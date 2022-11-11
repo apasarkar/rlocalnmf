@@ -179,7 +179,7 @@ def get_sampled_indices(num_frames, num_samples, device='cuda'):
     num_samples = min(num_samples, num_frames)
     tensor_to_sample = torch.arange(num_frames, device=device)
     weights = torch.ones_like(tensor_to_sample, device=device) * (1/num_frames)
-    new_values = tensor_to_sample[torch.multinomial(weights, num_samples=n, replacement=replace)]
+    new_values = tensor_to_sample[torch.multinomial(weights, num_samples=num_samples, replacement=False)]
     
     return new_values
 
