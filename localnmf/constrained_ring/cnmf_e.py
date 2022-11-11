@@ -56,25 +56,26 @@ class ring_model:
         good_components = torch.logical_and(dim1_full >= 0, dim1_full < d1)
         good_components = torch.logical_and(good_components, dim2_full >= 0)
         good_components = torch.logical_and(good_components, dim2_full < d2)
+        print("the max of good components is {}".format(good_components.max()))
 
         dim1_full *= good_components
         dim2_full *= good_components
         values *= good_components
 
         if order == "C":
-            column_coordinates = d1*dim1_full + dim2_full
+            column_coordinates = d2*dim1_full + dim2_full
             del dim1_full
             del dim2_full
-            row_coordinates = torch.flatten((d1*a+b)[:, :, None] + torch.zeros([1, 1, column_coordinates.shape[2]], device=device)).long()
+            row_coordinates = torch.flatten((d2*a+b)[:, :, None] + torch.zeros([1, 1, column_coordinates.shape[2]], device=device)).long()
 
             column_coordinates = torch.flatten(column_coordinates).long()
             values = torch.flatten(values).bool()
 
         elif order == "F":
-            column_coordinates = dim1_full + d2*dim2_full
+            column_coordinates = dim1_full + d1*dim2_full
             del dim1_full
             del dim2_full
-            row_coordinates = torch.flatten((a + d2*b)[:, :, None]+ torch.zeros([1, 1, column_coordinates.shape[2]], device=device)).long()
+            row_coordinates = torch.flatten((a + d1*b)[:, :, None]+ torch.zeros([1, 1, column_coordinates.shape[2]], device=device)).long()
 
             column_coordinates = torch.flatten(column_coordinates).long()
             values = torch.flatten(values).bool()
@@ -88,6 +89,7 @@ class ring_model:
         values = values[good_entries]
 
         return row_coordinates, column_coordinates, values
+    
     
     def set_weights(self, tensor):
         '''
