@@ -189,7 +189,7 @@ def ring_model_update(U_sparse, V, W, c, b, a, d1, d2, num_samples=1000, device=
     
     sampled_indices = get_sampled_indices(V.shape[1], num_samples, device=device)
     V_crop = torch.index_select(V, 1, sampled_indices)
-    c_crop = torch.index_select(c, 1, sampled_indices)
+    c_crop = torch.index_select(c, 0, sampled_indices).t()
     
     
     residual = torch_sparse.matmul(U_sparse, V_crop) - torch_sparse.matmul(a, c_crop) - b
