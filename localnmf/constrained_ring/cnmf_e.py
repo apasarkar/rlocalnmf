@@ -204,7 +204,7 @@ def ring_model_update(U_sparse, V, W, c, b, a, d1, d2, num_samples=1000, device=
     threshold_function = torch.nn.ReLU()
     values = threshold_function(values)
     
-    W.set_weights(values)
+    W.set_weights(values[:, None])
     
     
 
