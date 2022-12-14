@@ -37,7 +37,7 @@ print(os.getcwd())
 
 #Repo-specific imports:
 from localnmf import ca_utils
-from localnmf.constrained_ring.cnmf_e import ring_model, ring_model_update
+from localnmf.constrained_ring.cnmf_e import ring_model, ring_model_update, ring_model_update_sampling
 from localnmf import regression_update
 
 
@@ -970,6 +970,7 @@ def temporal_comp_plot(c, num_list=None, ini = False):
 
 
 def spatial_comp_plot(a, corr_img_all_r, num_list=None, ini=False):
+    a = np.array(a.cpu().to_scipy().todense())
     num = a.shape[1];
     patch_size = corr_img_all_r.shape[:2];
     scale = np.maximum(1, (corr_img_all_r.shape[1]/corr_img_all_r.shape[0]));
@@ -2995,8 +2996,11 @@ def update_AC_bg_l2_Y_ring_lowrank(U_sparse, R, V, V_orig,r,dims, a, c, b, patch
                 raise ValueError('Full Ring Model no longer supported')
             elif update_type == "Constant":
                 update_start = time.time()
-                ring_model_update(U_sparse, V_orig, W, c, b, a, d1, d2, device=device)
+                # ring_model_update_sampling(U_sparse, V_orig, W, c, b, a, d1, d2, device=device)
+                ring_model_update(U_sparse, R, V, W, X, b, a, d1, d2, device='cuda')
                 # print("THE W UPDATE TOOK {}".format(time.time() - update_start))
+            elif update_type == "Sampling":
+                ring_model_update_sampling(U_sparse, V_orig, W, c, b, a, d1, d2, device=device)
             else:
                 raise ValueError("Not supported model. Try either Full or Constant")
         else:

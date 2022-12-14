@@ -15,7 +15,7 @@ import torch_sparse
 ######
 
 
-
+ 
 class ring_model:
     
     def __init__(self, d1, d2, r, empty=False, device='cpu', order="F"):
@@ -185,7 +185,7 @@ def get_sampled_indices(num_frames, num_samples, device='cuda'):
 
     
     
-def ring_model_update(U_sparse, V, W, c, b, a, d1, d2, num_samples=1000, device='cuda'):
+def ring_model_update_sampling(U_sparse, V, W, c, b, a, d1, d2, num_samples=1000, device='cuda'):
     
     sampled_indices = get_sampled_indices(V.shape[1], num_samples, device=device)
     V_crop = torch.index_select(V, 1, sampled_indices)
@@ -205,7 +205,41 @@ def ring_model_update(U_sparse, V, W, c, b, a, d1, d2, num_samples=1000, device=
     values = threshold_function(values)
     
     W.set_weights(values[:, None])
+   
+
+def ring_model_update(U_sparse, R, V, W, X, b, a, d1, d2, num_samples=1000, device='cuda'):
     
+    batches = math.ceil(R.shape[1] / num_samples)
+    denominator = 0
+    numerator = 0
+    W.reset_weights()
+    
+    sV = torch.ones([1, V.shape[1]], device=device)
+    s = torch.matmul(sV, V.t())
+    
+    for k in range(batches):
+
+        start = num_samples * k
+        end = min(R.shape[1], start + num_samples)
+        R_crop = R[:, start:end]
+        X_crop = X[:, start:end]
+        s_crop = s[:, start:end]
+
+
+        resid_V_basis = torch_sparse.matmul(U_sparse, R_crop) - torch_sparse.matmul(a, X_crop) - torch.matmul(b, s_crop)
+
+        
+        W_residual = W.apply_model_right(resid_V_basis, a)
+
+        denominator += torch.sum(W_residual * W_residual, dim=1)
+        numerator += torch.sum(W_residual * resid_V_basis, dim=1)
+
+    values = torch.nan_to_num(numerator/denominator, nan=0.0, posinf=0.0, neginf=0.0)
+    threshold_function = torch.nn.ReLU()
+    values = threshold_function(values)
+    
+    W.set_weights(values[:, None])
+   
     
 
     
