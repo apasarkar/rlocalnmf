@@ -3053,45 +3053,14 @@ def update_AC_bg_l2_Y_ring_lowrank(U_sparse, R, V, V_orig,r,dims, a, c, b, patch
             
             
 
-        if update_after and ((iters+1) % update_after == 0):                   
-            print("merging components")
-            if model is None:
-                #TODO: Eliminate the need for moving a and c off GPU
-                a = a.cpu().to_dense().numpy()
-                c = c.cpu().numpy()
-                rlt = merge_components(a,c,corr_img_all_reg,num_list,\
-                                       patch_size,merge_corr_thr=merge_corr_thr,merge_overlap_thr=merge_overlap_thr,plot_en=plot_en);
-            else:
-                raise ValueError("Model based merge selection not currently supported") 
-#                 print("STARTING TO LOAD THE NN")
-#                 rlt = merge_components_priors(a,c,corr_img_all_reg,num_list,patch_size, dims = (d1, d2, T), merge_corr_thr=merge_corr_thr,merge_overlap_thr=merge_overlap_thr,plot_en=plot_en, model = model, plot_mnmf = plot_mnmf);
-                
-            flag = isinstance(rlt, int);
-            
-            
-            if ~np.array(flag):
-                a_scipy = scipy.sparse.csr_matrix(rlt[1]);
-                a = torch_sparse.tensor.from_scipy(a_scipy).float().to(device)
-                c = rlt[2];
-                c = torch.from_numpy(c).float().to(device)
-                num_list = rlt[3];
-            else:
-                a_scipy = scipy.sparse.csr_matrix(a);
-                a = torch_sparse.tensor.from_scipy(a_scipy).float().to(device)
-                c = torch.from_numpy(c).float().to(device)
-                print("no merge!");
-                
-            
-            # print("calculating the residual correlation image")
+        if update_after and ((iters+1) % update_after == 0):                                   
+            # print("calculating the residual correlation image(s)")
             if a.sparse_sizes()[1] > 1:
                 corr_img_all = vcorrcoef_resid(U_sparse, R, V, a, c, batch_size = batch_size, device=device)
             else:
-                corr_img_all = vcorrcoef_UV_noise(U_sparse, R, V, c, batch_size = batch_size, device=device)
-            # print("calculating the robust standard correlation image")            
+                corr_img_all = vcorrcoef_UV_noise(U_sparse, R, V, c, batch_size = batch_size, device=device)         
             corr_img_all_reg = vcorrcoef_UV_noise(U_sparse, R, V, c, batch_size = batch_size, device=device) 
             
-            
-            # mask_ab = (a>0)*1;
             mask_ab = a.bool()
             corr_img_all_r = corr_img_all.reshape(patch_size[0],patch_size[1],-1,order="F");
 
@@ -3115,6 +3084,31 @@ def update_AC_bg_l2_Y_ring_lowrank(U_sparse, R, V, V_orig,r,dims, a, c, b, patch
             mask_ab_scipy = mask_ab.to_scipy().tocsr()
             a_scipy = a_scipy.multiply(mask_ab_scipy)
             a = torch_sparse.tensor.from_scipy(a_scipy).float().to(device)
+            
+            print("merging components")
+            if model is None:
+                #TODO: Eliminate the need for moving a and c off GPU
+                a = a.cpu().to_dense().numpy()
+                c = c.cpu().numpy()
+                rlt = merge_components(a,c,corr_img_all_reg,num_list,\
+                                       patch_size,merge_corr_thr=merge_corr_thr,merge_overlap_thr=merge_overlap_thr,plot_en=plot_en);
+            else:
+                raise ValueError("Model based merge selection not currently supported") 
+            flag = isinstance(rlt, int);
+            
+            
+            if ~np.array(flag):
+                a_scipy = scipy.sparse.csr_matrix(rlt[1]);
+                a = torch_sparse.tensor.from_scipy(a_scipy).float().to(device)
+                c = rlt[2];
+                c = torch.from_numpy(c).float().to(device)
+                num_list = rlt[3];
+            else:
+                a_scipy = scipy.sparse.csr_matrix(a);
+                a = torch_sparse.tensor.from_scipy(a_scipy).float().to(device)
+                c = torch.from_numpy(c).float().to(device)
+                print("no merge!");
+
 
             
         print("time: " + str(time.time()-start));
