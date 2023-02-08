@@ -11,181 +11,46 @@ def fast_matmul(a, b, device='cuda'):
     return torch.mm(a_torch, b_torch).cpu().numpy()
 
 
-def baseline_update(uv_mean, a, c):
+def baseline_update(uv_mean, a, c, to_torch=False):
     '''
-    Function for performing baseline updates
-    
+    Calculates baseline. Inputs: 
+        uv_mean. torch.Tensor of shape (d, 1), where d is the number of pixels in the FOV
+        a: torch_sparse tensor of shape (d, k) where k is the number of neurons in the FOV
+        c: torch.Tensor of shape (T, k) where T is number of frames in video
+        to_torch: indicates whether the inputs are np.ndarrays that need to be converted to torch objects. Also implies that the result will be returned as a np.ndarray (the same format as the inputs)
+    Output: 
+        b. torch.Tensor of shape (d, 1). Describes new static baseline
     '''
+    if to_torch:
+        a = torch_sparse.tensor.from_scipy(scipy.sparse.csr_matrix(a)).float()
+        c = torch.from_numpy(c).float()
+        uv_mean = torch.from_numpy(uv_mean).float()
+    mean_c = torch.mean(c, dim=0, keepdim=True).t()
+    b = uv_mean - torch_sparse.matmul(a, mean_c)
     
-    b = uv_mean-(a*(c.mean(axis=0,keepdims=True))).sum(axis=1,keepdims=True)
-    return b
-          
+    if to_torch:
+        return b.numpy()
+    else:
+        return b         
 
-
-
-def estimate_X(c, V, VVt, device='cpu'):
+def estimate_X(c, V, VVt):
     '''
     Function for finding an approximate solution to c^t = XV
     Params:
-        c: np.ndarray, dimensions (T, k)
-        V: np.ndarray, dimensions (R, T)
-        VVt: np.ndarrray, dimensions (R, R)
-        device: device on which computations occur ('cuda', 'cpu', etc.) 
+        c: torch.Tensor, dimensions (T, k)
+        V: torch.Tensor, dimensions (R, T)
+        VVt: torch.Tensor, dimensions (R, R)
     Returns:
-        X: np.ndarray, dimensionis (k x R)
+        X: torch.Tensor, dimensions (k x R)
     '''
+    cV_T = torch.matmul(V, c)
+    output = torch.linalg.lstsq(VVt, cV_T).solution
+    
+    return output.t()
 
-    c_torch = torch.from_numpy(c).float().to(device)
-    V_torch = torch.from_numpy(V).float().to(device)
-    cV_T = torch.matmul(V_torch, c_torch)
-    
-    VVt_torch = torch.from_numpy(VVt).float().to(device)
-    output = torch.linalg.lstsq(VVt_torch, cV_T).solution
-    
-    return output.cpu().numpy().T
-
-def sparse_coo_threshold(a, threshold=0):
-    data = a.data
-    rows = a.row
-    cols = a.col
-    good_indices = data >= threshold
-    
-    data_new = data[good_indices]
-    rows_new = a.row[good_indices]
-    cols_new = a.col[good_indices]
-    
-    a.data = data_new
-    a.row = rows_new
-    a.col = cols_new
-    return a
-
-# def spatial_update_HALS(U_sparse, V, W, X, a, c, b, device='cpu', mask_ab = None):
-#     '''
-#     Computes a temporal HALS updates: 
-#     Params: 
-#         U_sparse: scipy.sparse.coo matrix. Sparse U matrix, dimensions d x R 
-#         V: PMD V matrix, dimensions R x T
-#             V has as its last row a vector of all -1's
-#         X: Approximate solution to c^t = XV. Dimensions k x R (k neurons in a/c)
-#         a_sparse: scipy.sparse.csr_matrix. dimensions d x k
-#         c: np.ndarray. dimensions T x k
-#         b: np.ndarray. dimensions d x 1. represents static background
-#         mask_a: np.ndarray. dimensions (k x d). For each neuron, indicates the allowed support of neuron
-        
-#     TODO: Make 'a' input a sparse matrix
-#     '''
-#     ##TODO for further speedup: do not repeatedly construct a sparse array
-    
-#     #Precompute relevant quantities
-#     start_time = time.time()
-#     # C_prime = c.T.dot(c) #Ouput: k x k matrix (low-rank)
-#     C_prime = fast_matmul(c.T, c, device=device) #Output: k x k matrix (low-rank)
-#     cV = fast_matmul(c.T, V.T, device=device)
-#     # cV = c.T.dot(V.T) #Output: k x R matrix (low-rank)
-#     cVX = fast_matmul(cV, X.T, device=device)
-#     # cVX = cV.dot(X.T)
-    
-#     a_sparse = scipy.sparse.csr_matrix(a)
-    
-#     if mask_ab is None:
-#         mask_ab = (a > 0).T
-#     print("mask_ab done at {}".format(time.time() - start_time))
-#     #Init s such that bsV = static background
-#     s = np.zeros((1, V.shape[0]))
-#     s[:, -1] = -1 
 
     
-#     for i in range(c.shape[1]):
-        
-#         #Identify positive support of a_i
-#         ind = (mask_ab[i, :] > 0)
-#         in_time = time.time()
-#         #In this notation, * refers to matrix multiplication
-        
-#         '''
-#         Step 1: Find (c^t)_i * V^t * U^t, where
-#         U = U_PMD - W*(U_PMD - a*X - b*s) - b*s
-#         '''
-#         #(1) First compute (c^t)_i * V^t * (U_PMD)^t
-#         cVU = U_sparse.dot(cV[i, ].T).T #1 x d vector
-# #         if print_text:
-# #             print("1 done at {}".format(time.time() - in_time))
-        
-#         #(2) Get static bg component: (c^t)_i * V^t * (s^t * b^t)
-#         bg = cV[i, :].dot(s.T)
-#         bg = bg.dot(b.T)  #Output: 1 x d vector
-        
-        
-#         '''
-#         Step (3) Calculate (c^t)_i * V^t * (W * (U_PMD - a * X - b * s))^t
-#         This is equal to (c^t)_i * V^t * (U_PMD - a * X - b * s)^t * W^t
-#         we refer to (c^t)_i * V^t as h_i.
-#         We need to calculate
-#         (a) h_i * U_PMD^t
-#         (b) h_i * X^t * a^t
-#         (c) h_i * s^t * b^t
-        
-#         Note that (a) has already been computed above (cVU)
-#         Also note (c) has been computed above (bg)
-        
-#         So all we need to compute is (b) 
-        
-#         These are all 1 x d vectors, so we add them, and then multiply by W^t to get our 
-#         final result
-#         '''
-        
-#         #Get (b)
-# #         cVX = cV[i, :].dot(X.T)
-#         cVXa = (a_sparse.dot(cVX[i, :].T)).T
-        
-#         #Add (a) - (b) - (c) 
-#         W_sum = cVU - cVXa - bg
-#         W_temp = W[ind, :]
-#         W_term = (W_temp.dot(W_sum.T)).T
-        
-#         #Final step: get (c^t)_i * c * a^t
-#         cca = (a_sparse.dot(C_prime[i, :].T)).T        
-#         final_vec = (cVU - bg - cca)/C_prime[i, i]
-                
-#         #Crop final_vec
-#         final_vec = final_vec.T
-#         final_vec = final_vec[ind]
-#         final_vec -= W_term/C_prime[i,i]
-       
-       
-        
-#         a_sparse = a_sparse.tocoo()
-#         values = final_vec # final_vec[ind]
-#         rows = np.argwhere(ind>0)
-#         col = [i for k in range(len(values))]
-#         a_sparse = a_sparse.tocoo()
-        
-#         a_sparse.data = np.append(a_sparse.data, values)
-#         a_sparse.row = np.append(a_sparse.row, rows)
-#         a_sparse.col = np.append(a_sparse.col, col)
-        
-#         a_sparse = sparse_coo_threshold(a_sparse, 0)
-#         a_sparse = a_sparse.tocsr()
-        
-#         ##TODO: make this faster: 
-#         # a_sparse[a_sparse < 0] = 0
-        
-        
-        
-#     return a_sparse
-    
-    
-def scipy_coo_to_torchsparse_coo(scipy_coo_mat):
-    values = scipy_coo_mat.data
-    row = torch.LongTensor(scipy_coo_mat.row)
-    col = torch.LongTensor(scipy_coo_mat.col)
-    value = torch.FloatTensor(scipy_coo_mat.data)
-
-    return torch_sparse.tensor.SparseTensor(row=row, col=col, value=value, sparse_sizes = scipy_coo_mat.shape)
-    # return torch.sparse.FloatTensor(i, v, torch.Size(shape))
-
-    
-def project_U_HALS(U_sparse, U_sparse_inverse, W, vector):
+def project_U_HALS(U_sparse, U_sparse_inverse, W, vector, a_sparse):
     '''
     Commonly used routine to project background term (W) onto W basis in HALS calculations
     Note that we multiple W by v first (before doing any other matmul) because that collapses to a single vector. Then 
@@ -193,52 +58,44 @@ def project_U_HALS(U_sparse, U_sparse_inverse, W, vector):
     Inputs: 
         U_sparse: torch_sparse.SparseTensor object. Dimensions d x r where d is number of pixels, r is rank
         U_sparse_inverse: torch.Tensor object. Equal to finding the inverse of U_sparse^t times U_sparse (precomputed)
-        W: torch_sparse.SparseTensor object. Dimensions (d^2 * d^2)
+        W: ring model object. Represents a (d, d)-shaped sparse tensor
         vector: torch.Tensor. Dimensions (d, k) for some value k.
     '''
-    Wv = torch_sparse.matmul(W, vector)
+    Wv = W.apply_model_right(vector, a_sparse)
     UtWv = torch_sparse.matmul(U_sparse.t(), Wv)
     U_invUtWv = torch.matmul(U_sparse_inverse, UtWv)
     UU_invUtWv = torch_sparse.matmul(U_sparse, U_invUtWv)
     
     return UU_invUtWv
     
-def spatial_update_HALS(U_sparse, V, W, X, a, c, b, device='cpu', mask_ab = None):
+def spatial_update_HALS(U_sparse, V, W, X, a_sparse, c, b, U_sparse_inner=None, mask_ab = None):
     '''
     Computes a spatial HALS updates: 
     Params: 
-        U_sparse: scipy.sparse.coo matrix. Sparse U matrix, dimensions d x R 
-        V: PMD V matrix, dimensions R x T
+        U_sparse: torch_sparse.tensor. Sparse matrix, with dimensions (d x R)
+        V: torch.Tensor. Dimensions R x T. Dimensions R x T
             V has as its last row a vector of all -1's
-        X: Approximate solution to c^t = XV. Dimensions k x R (k neurons in a/c)
-        a_sparse: scipy.sparse.csr_matrix. dimensions d x k
-        c: np.ndarray. dimensions T x k
-        b: np.ndarray. dimensions d x 1. represents static background
-        mask_a: np.ndarray. dimensions (k x d). For each neuron, indicates the allowed support of neuron
+        W: ring_model object. Describes a sparse matrix with dimensions (d x d)
+        X: torch.Tensor. Dimensions (k x R), with k neurons in a and c. Approximate solution to c^t = XV
+        a_sparse: torch_sparse.tensor. dimensions d x k
+        c: torch.Tensor. Dimensions T x k
+        b: torch.Tensor. Dimensions d x 1. Represents static background
+        U_sparse_inner: A pre-computed R x R matrix. It is the inverse of U_sparse^T times U_sparse. Used for linear subspace projection
+        mask_ab: torch_sparse.tensor. Dimensions (k x d). For each neuron, indicates the allowed support of neuron
+        
+    Returns: 
+        a_sparse: torch_sparse.tensor. Dimensions d x k, containing updated a_i elements
         
     TODO: Make 'a' input a sparse matrix
     '''
     #Load all values onto device in torch
-    U_sparse = torch_sparse.tensor.from_scipy(U_sparse).float().to(device)
-    V = torch.from_numpy(V).float().to(device)
-    W = torch_sparse.tensor.from_scipy(W).float().to(device)
-    X = torch.from_numpy(X).float().to(device)
-    c = torch.from_numpy(c).float().to(device)
-    b = torch.from_numpy(b).float().to(device)
-    
-    U_sparse_inner = torch.inverse(torch_sparse.matmul(U_sparse.t(), U_sparse).to_dense())
-    
-    
+    device = V.device
     
     if mask_ab is None: 
-        mask_ab = scipy.sparse.coo_matrix((a > 0).T)
-        mask_ab = torch_sparse.tensor.from_scipy(mask_ab).float().to(device)
-    else: 
-        mask_ab = scipy.sparse.coo_matrix(mask_ab)
-        mask_ab = torch_sparse.tensor.from_scipy(mask_ab).float().to(device) 
+        mask_ab = a_sparse.bool().t()
         
-    a = scipy.sparse.coo_matrix(a)
-    a_sparse = torch_sparse.tensor.from_scipy(a).float().to(device)
+    if U_sparse_inner is None:
+        U_sparse_inner = torch.inverse(torch_sparse.matmul(U_sparse.t(), U_sparse).to_dense())
     
     #Init s such that bsV = static background
     s = torch.zeros([1, V.shape[0]], device=device)
@@ -257,19 +114,19 @@ def spatial_update_HALS(U_sparse, V, W, X, a, c, b, device='cpu', mask_ab = None
     
     #Step 2: Compute ctVtU_PMD^t(Proj)^t
     # where Proj = U(U^tU)^-1U^tW, the linear projection of W onto U
-    ctVtU_PMD_tWt = project_U_HALS(U_sparse, U_sparse_inner, W, ctVtU_PMDt.t()).t()
+    ctVtU_PMD_tWt = project_U_HALS(U_sparse, U_sparse_inner, W, ctVtU_PMDt.t(), a_sparse).t()
     ctVtUt_net -= ctVtU_PMD_tWt
     
     #Step 3: Compute ctVtXtat(Proj)^t
     # where Proj = U(U^tU)^-1U^tW, the linear projection of W onto U
     ctVtXt = torch.matmul(ctVt, X.t())
     ctVtXtat = torch_sparse.matmul(a_sparse, ctVtXt.t()).t()
-    ctVtXtatWt = project_U_HALS(U_sparse, U_sparse_inner, W, ctVtXtat.t()).t()
+    ctVtXtatWt = project_U_HALS(U_sparse, U_sparse_inner, W, ctVtXtat.t(), a_sparse).t()
     ctVtUt_net += ctVtXtatWt
     
     #Step 4: ctVtstbt(Proj)^t
     # where Proj = U(U^tU)^-1U^tW, the linear projection of W onto U
-    Proj_Wb = project_U_HALS(U_sparse, U_sparse_inner, W, b).t()
+    Proj_Wb = project_U_HALS(U_sparse, U_sparse_inner, W, b, a_sparse).t()
     # btWt = torch_sparse.matmul(W, b).t()
     ctVtst = torch.matmul(ctVt, s.t())
     ctVtstbtWt = torch.matmul(ctVtst, Proj_Wb)
@@ -281,8 +138,6 @@ def spatial_update_HALS(U_sparse, V, W, X, a, c, b, device='cpu', mask_ab = None
 
     
     index_select_tensor = torch.LongTensor([0]).to(device)
-
-    print(mask_ab.sparse_sizes())
     for i in range(c.shape[1]):
               
             
@@ -324,53 +179,47 @@ def spatial_update_HALS(U_sparse, V, W, X, a, c, b, device='cpu', mask_ab = None
         
         
         
-    return a_sparse.cpu()    
+    return a_sparse   
  
     
 def left_project_U_HALS(a_sparse, U_sparse, U_sparse_inverse, W):
     atU = torch_sparse.matmul(a_sparse.t(), U_sparse)
     atU_Uinv = torch_sparse.matmul(atU, U_sparse_inverse)
     atU_UinvUt = torch_sparse.matmul(U_sparse, atU_Uinv.t()).t()
-    final = torch_sparse.matmul(W.t(), atU_UinvUt.t()).t()
+    final = W.apply_model_left(atU_UinvUt, a_sparse)
     return final
     
     
-def temporal_update_HALS(U_sparse, V, W, X, a, c, b, device='cpu'):
+def temporal_update_HALS(U_sparse, V, W, X, a_sparse, c, b, U_sparse_inner=None):
     '''
     Inputs: 
-        U_sparse: (d1*d2, R)-shaped scipy.sparse.csr.csr_matrix.
-        V: (R, T)-shaped np.ndarray
-        W: (d1*d2, d1*d2)-shaped scipy.sparse.csr.csr_matrix.
-        X: (k, R)-shaped np.ndarray.
-        a: (d1*d2, k)-shaped np.ndarray
-        c: (T, k)-shaped np.ndarray
-        b: (d1*d2, 1)-shaped np.ndarray
+        U_sparse: (d1*d2, R)-shaped torch_sparse.tensor
+        V: (R, T)-shaped torch.Tensor
+        W: (d1*d2, d1*d2)-shaped ring model object
+        X: (k, R)-shaped torch.Tensor
+        a: (d1*d2, k)-shaped torch_sparse.tensor
+        c: (T, k)-shaped torch.Tensor
+        b: (d1*d2, 1)-shaped torch.Tensor
+        U_sparse_inner: (R, R)-shaped torch.Tensor
         
     Returns: 
         c: (T, k)-shaped np.ndarray. Updated temporal components
         
         KEY ASSUMPTION: V has, as its last row, a vector where each component has value -1
     '''
-    #Convert all inputs to torch and move to device
-    U_sparse = torch_sparse.tensor.from_scipy(U_sparse).float().to(device)
-    V = torch.from_numpy(V).float().to(device)
-    W = torch_sparse.tensor.from_scipy(W).float().to(device)
-    X = torch.from_numpy(X).float().to(device)
-    c = torch.from_numpy(c).float().to(device)
-    b = torch.from_numpy(b).float().to(device)
+    device = V.device
+    
+    if U_sparse_inner is None:
+        U_sparse_inner = torch.inverse(torch_sparse.matmul(U_sparse.t(), U_sparse).to_dense())
 
-    a = scipy.sparse.coo_matrix(a)
-    a_sparse = torch_sparse.tensor.from_scipy(a).float().to(device)
     
     #Init s such that bsV = static background
     s = torch.zeros([1, V.shape[0]], device=device)
     s[:, -1] = -1
-
-    U_sparse_inner = torch.inverse(torch_sparse.matmul(U_sparse.t(), U_sparse).to_dense())
     
     
     ##Precompute quantities used throughout all iterations
-    atU_net = torch.zeros((a.shape[1], V.shape[0]), device=device)
+    atU_net = torch.zeros((a_sparse.sparse_sizes()[1], V.shape[0]), device=device)
     
     #Step 1: Add atU
     atU_net += torch_sparse.matmul(a_sparse.t(), U_sparse).to_dense()
@@ -409,4 +258,4 @@ def temporal_update_HALS(U_sparse, V, W, X, a, c, b, device='cpu'):
         
         c[:, [i]] = threshold_function(c[:, [i]])
         
-    return c.cpu().numpy()
+    return c
