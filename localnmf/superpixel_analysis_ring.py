@@ -2627,28 +2627,6 @@ def demix_whole_data_robust_ring_lowrank(U,V_PMD,r=10, cut_off_point=[0.95,0.9],
                 pure_superpixel_corr_compare_plot(connect_mat_1, unique_pix, pure_pix, brightness_rank_sup, brightness_rank, Cnt, text);
             
             print("time: " + str(time.time()-start));
-
-
-        ##TODO: Eliminate this from the source code (masknmf becomes a 'custom' init method) 
-        elif init[ii] == 'mnmf':  
-            ##Here we use the bessel init:
-            if ii == 0:
-                a_ini, mask_a, b, c_ini = mnmf.bessel_init_local_UV(U_sparse, V_PMD, (d1,d2,T), block_dims, frame_len[ii], confidence, spatial_thres, model, \
-                        plot_mnmf = plot_mnmf, allowed_overlap = allowed_overlap, device = device, \
-                                                                   batch_size = batch_size)
-                a = a_ini
-                c = c_ini
-            else:
-                raise ValueError('maskNMF can only be run on the first pass')  
-                
-            assert a.shape[1] > 0, 'The masknmf initialization did not identify any neurons, re-run with more frames'
-            
-            
-            
-            start = time.time()
-            print("prepare iteration!")
-            
-            print("time: " + str(time.time()-start));
                 
         elif init[ii]=='custom' and ii == 0:
             assert custom_init['a'].shape[2] > 0, 'Must provide at least 1 spatial footprint' 
@@ -2656,6 +2634,8 @@ def demix_whole_data_robust_ring_lowrank(U,V_PMD,r=10, cut_off_point=[0.95,0.9],
             a = a_ini
             c = c_ini
        
+        else:
+            raise ValueError("Invalid initialization scheme provided")
         
 
         
