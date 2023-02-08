@@ -2767,7 +2767,6 @@ def update_AC_bg_l2_Y_ring_lowrank(U_sparse, R, V, V_orig,r,dims, a, c, b, patch
 
     ## initialize spatial support ##
     if mask_a is None: 
-        # mask_a = (a>0)*1;
         mask_a = a.bool();
     else:
         print("MASK IS NOT NONE")
@@ -2848,9 +2847,6 @@ def update_AC_bg_l2_Y_ring_lowrank(U_sparse, R, V, V_orig,r,dims, a, c, b, patch
    
            
     for iters in range(maxiter):
-        # print(iters)
-        
-                
         #Change correlation for last few iterations to pick dendrites
         if iters >= maxiter - switch_point:
             corr_th_fix = corr_th_fix_sec 
@@ -2876,26 +2872,22 @@ def update_AC_bg_l2_Y_ring_lowrank(U_sparse, R, V, V_orig,r,dims, a, c, b, patch
         if iters >= skips:
             
             if iters == skips:
-                # print("Constructing full ring model for first time this iter")
                 W = ring_model(d1, d2, r, empty=False, device=device, order="F")
             
             # print("X estimate")
             Xtime = time.time()
             X = regression_update.estimate_X(c, V, VVt) #Estimate using orthogonal V, not regular V
-            # print("X estimate {}".format(time.time() - Xtime))
 
             #Specify which ring model update we want
             if update_type == "Full":
                 raise ValueError('Full Ring Model no longer supported')
             elif update_type == "Constant":
                 update_start = time.time()
-                # ring_model_update_sampling(U_sparse, V_orig, W, c, b, a, d1, d2, device=device)
                 ring_model_update(U_sparse, R, V, W, X, b, a, d1, d2, device='cuda')
-                # print("THE W UPDATE TOOK {}".format(time.time() - update_start))
             elif update_type == "Sampling":
                 ring_model_update_sampling(U_sparse, V_orig, W, c, b, a, d1, d2, device=device)
             else:
-                raise ValueError("Not supported model. Try either Full or Constant")
+                raise ValueError("Not supported model. Try either Full, Constant, or Sampling")
         else:
             pass
 
@@ -2917,7 +2909,6 @@ def update_AC_bg_l2_Y_ring_lowrank(U_sparse, R, V, V_orig,r,dims, a, c, b, patch
         if torch.sum(temp):
             a, c, corr_img_all_reg, corr_img_all, mask_ab, num_list = delete_comp(a, c, corr_img_all_reg, corr_img_all, mask_ab, num_list, temp, "zero a!", plot_en, (d1, d2), order="F");
             X = regression_update.estimate_X(c, V_orig, VVt_orig)
-        # print("spatial update took {}".format(time.time() - test_time))
         
         
         ### BASELINE UPDATE
@@ -2927,27 +2918,21 @@ def update_AC_bg_l2_Y_ring_lowrank(U_sparse, R, V, V_orig,r,dims, a, c, b, patch
         ###TEMPORAL UPDATE
         test_time = time.time()
         c = regression_update.temporal_update_HALS(U_sparse, V_orig, W, X, a, c, b, U_sparse_inner=U_sparse_inner)
-        # print('the shape of c after temporal update is {}'.format(c.shape))
-        # print("temporal regression update took {}".format(time.time() - test_time))  
         #Denoise 'c' components if desired
         if denoise[iters]:
-            # print("denoising")
             c = c.cpu().numpy()
             c = ca_utils.denoise(c) #We now use OASIS denoising to improve improve signals
             c = np.nan_to_num(c, posinf = 0, neginf = 0, nan = 0) #Gracefully handle invalid values
             c = torch.from_numpy(c).float().to(device)
         
         #Delete bad components
-        # temp = (c.sum(axis=0) == 0);
         temp = (torch.sum(c, dim=0) == 0);
         if torch.sum(temp):
             a, c, corr_img_all_reg, corr_img_all, mask_ab, num_list = delete_comp(a, c, corr_img_all_reg, corr_img_all, mask_ab, num_list, temp, "zero c!", plot_en, (d1, d2), order="F");
-        # print("temporal update took {}".format(time.time() - test_time))     
             
             
 
-        if update_after and ((iters+1) % update_after == 0):                                   
-            # print("calculating the residual correlation image(s)")
+        if update_after and ((iters+1) % update_after == 0):
             if a.sparse_sizes()[1] > 1:
                 corr_img_all = vcorrcoef_resid(U_sparse, R, V, a, c, batch_size = batch_size, device=device)
             else:
