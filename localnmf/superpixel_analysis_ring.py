@@ -2,9 +2,6 @@
 import cv2
 import time
 
-
-# from memory_profiler import profile
-
 import torch
 import torch_sparse
 import matplotlib.pyplot as plt
@@ -29,10 +26,8 @@ from scipy import ndimage as ndimage
 import math
 
 import torchnmf
-
 import os
 import sys
-print(os.getcwd())
 
 
 #Repo-specific imports:
@@ -40,20 +35,6 @@ from localnmf import ca_utils
 from localnmf.constrained_ring.cnmf_e import ring_model, ring_model_update, ring_model_update_sampling
 from localnmf import regression_update
 
-
-# import constrained_ring
-# from constrained_ring.cnmf_e import update_ring_model_w_full, update_ring_model_w_const, init_w
-# import ca_utils
-# import regression_update
-
-
-import multiprocessing
-
-#Change the CPU affinity to allow multiprocessing
-
-
-# To do
-# split and merge functions
 
 # ----- utility functions (to decimate data and estimate noise level) -----
 #########################################################################################################
@@ -251,7 +232,6 @@ def noise_estimator(Y, noise_range=[0.25, 0.5], noise_method='logmexp', max_num_
         Noise level for each pixel
     """
     T = Y.shape[-1]
-    # Y=np.array(Y,dtype=np.float64)
 
     if T > max_num_samples_fft:
         Y = np.concatenate((Y[..., 1:max_num_samples_fft // 3 + 1],
@@ -461,7 +441,6 @@ def search_superpixel_in_range(connect_mat, permute_col, V_mat):
 
     unique_pix = np.asarray(np.sort(np.unique(connect_mat)),dtype="int");
     unique_pix = unique_pix[np.nonzero(unique_pix)];
-    #unique_pix = list(unique_pix);
 
     M = np.zeros([V_mat.shape[0], len(unique_pix)]);
     for ii in range(len(unique_pix)):
@@ -518,11 +497,7 @@ def fast_sep_nmf(M, r, th, normalize=1):
         normM = np.maximum(0, normM - np.matmul(U[:,[ii]].T, M)**2);
         normM_sqrt = np.sqrt(normM);
         ii = ii+1;
-    #coef = np.matmul(np.matmul(np.linalg.inv(np.matmul(M[:,pure_pixels].T, M[:,pure_pixels])), M[:,pure_pixels].T), M);
     pure_pixels = np.array(pure_pixels);
-    #coef_rank = coef.copy(); ##### from large to small
-    #for ii in range(len(pure_pixels)):
-    #	coef_rank[:,ii] = [x for _,x in sorted(zip(len(pure_pixels) - ss.rankdata(coef[:,ii]), pure_pixels))];
     return pure_pixels #, coef, coef_rank
 
 
@@ -560,7 +535,6 @@ def prepare_iteration_UV(dims, connect_mat_1, permute_col, pure_pix, U_mat, V_ma
 
     
     T = dims[2];
-#     Yd = Yd.reshape(np.prod(dims[:-1]),-1, order="F");
 
     ####################### pull out all the pure superpixels ################################
     permute_col = list(permute_col);
@@ -602,7 +576,6 @@ def make_mask(corr_img_all_r, corr, mask_a, num_plane=1,times=10,max_allow_neuro
                 while jj<=times:
                     labeled_array, num_features = scipy.ndimage.measurements.label(corr_img_all_r[:,:,kk,ii] > corr,structure=s);
                     u, indices, counts = np.unique(labeled_array*mask_a[:,:,kk,ii], return_inverse=True, return_counts=True);
-                    #print(u);
                     if len(u)==1:
                         labeled_array = np.zeros(labeled_array.shape);
                         if corr == 0 or corr == 1:
@@ -645,7 +618,6 @@ def make_mask_dynamic(corr_img_all_r, corr_percent, mask_a):
             mask_a[:, :, ii] *= 0
         else:
             c = u[1:][np.argmax(counts[1:])];
-            #print(c);
             labeled_array = (labeled_array==c);
             mask_a[:,:,ii] = labeled_array;
 
@@ -727,7 +699,6 @@ def merge_components(a,c,corr_img_all_r,num_list,patch_size,merge_corr_thr=0.6,m
         merge_idx = np.unique(np.concatenate([connect_comps[0], connect_comps[1]],axis=0));
         a_pri = np.delete(a_pri, merge_idx, axis=1);
         c_pri = np.delete(c_pri, merge_idx, axis=1);
-#         corr_pri = np.delete(corr_img_all_r, merge_idx, axis=1);
         num_pri = np.delete(num_list,merge_idx);
         for comp in comps:
             comp=list(comp);
@@ -755,33 +726,6 @@ def merge_components(a,c,corr_img_all_r,num_list,patch_size,merge_corr_thr=0.6,m
         flag = 0;
         return flag
 
-
- 
-# def delete_comp(a, c, corr_img_all_reg, corr_img_all, mask_a, num_list, temp, word, plot_en, fov_dims, order="F"):
-#     """
-#     Delete zero components, specified by "temp". 
-#     Inputs: 
-#         a: torch_sparse.tensor. Dimensions (d, K), d = number of pixels in movie, K = number of neurons
-#         c: torch.Tensor. Dimensions (T, K), K = number of neurons in movie
-#         corr_img_all_reg. Dimensions (d, K). d = number of pixels in movie, K = number of neurons
-#         corr_img_all. Dimensions (d, K). d = number of pixels in movie, K = number of neurons
-#         mask_a. torch_sparse.tensor. Dimensions (d, K). Dtype bool. d = number of pixels in movie, K = number of neurons
-#         num_list. np.ndarray. TODO: Remove if unneeded now
-#         temp: np.ndarray. 
-#     """
-#     print(word);
-#     pos = np.where(temp)[0];
-#     print("delete components" + str(num_list[pos]+1));
-#     corr_img_all_reg_r = corr_img_all_reg.reshape((fov_dims[0], fov_dims[1], -1), order = order)
-#     if plot_en:
-#         spatial_comp_plot(a[:,pos], corr_img_all_reg_r[:,:,pos], num_list=num_list[pos], ini=False);
-#     corr_img_all_reg = np.delete(corr_img_all_reg, pos, axis=1);
-#     corr_img_all = np.delete(corr_img_all, pos, axis = 1);
-#     mask_a = np.delete(mask_a, pos, axis=1);
-#     a = np.delete(a, pos, axis=1);
-#     c = np.delete(c, pos, axis=1);
-#     num_list = np.delete(num_list, pos);
-#     return a, c, corr_img_all_reg, corr_img_all, mask_a, num_list
 
 def delete_comp(a, c, corr_img_all_reg, corr_img_all, mask_a, num_list, temp, word, plot_en, fov_dims, order="F"):
     """
@@ -867,7 +811,7 @@ def l1_tf(y, sigma):
     if np.abs(sigma/y.max())<=1e-3:
         print('Do not denoise (high SNR: noise_level=%.3e)'%sigma);
         return y
-#
+
     n = y.size
     # Form second difference matrix.
     D = (np.diag(2*np.ones(n),0)+np.diag(-1*np.ones(n-1),1)+np.diag(-1*np.ones(n-1),-1))[1:n-1];
@@ -875,7 +819,6 @@ def l1_tf(y, sigma):
     obj = cvx.Minimize(cvx.norm(D*x, 1));
     constraints = [cvx.norm(y-x,2)<=sigma*np.sqrt(n)]
     prob = cvx.Problem(obj, constraints)
-#
     prob.solve(solver=cvx.ECOS,verbose=False)
 
     # Check for error.
@@ -1444,8 +1387,6 @@ def avg_interpolation(W, d1, d2, order = "F"):
                 curr_x = maxIndicesX[index]
                 curr_y = maxIndicesY[index]
                 
-#                 print(" {} {}".format(curr_x, curr_y))
-                
                 #For each coordinate, we find how many components in its neighborhood are nonneg. We average their 
                 #ring values...
                 count = 0
@@ -1930,22 +1871,9 @@ def dilate_mask(mask_a, dilation_size):
     for k in range(mask_a.shape[2]):
         curr_frame = mask_a[:, :, k]
         support = (curr_frame == 0)
-        distances = distance_transform_bf(support, metric = 'chessboard')
-#         print("SHOWINIG THE DISTANCES AND SUPPORT")
-#         fig, ax = plt.subplots(1,2)
-#         ax[0].imshow(support)
-#         ax[1].imshow(distances)
-#         plt.show()
-        
+        distances = distance_transform_bf(support, metric = 'chessboard')        
         values = (distances < dilation_size + 1)
         new_mask[:, :, k] = values
-    
-#     print("NOW SHOWING THE FINAL UPDATES")
-#     for k in range(mask_a.shape[2]):
-#         fig, ax = plt.subplots(1,2)
-#         ax[0].imshow(mask_a[:, :, k])
-#         ax[1].imshow(new_mask[:, :, k])
-#         plt.show()
     
     return new_mask
         
@@ -2017,9 +1945,6 @@ def process_custom_signals(a_init, U_sparse, V, device='cpu', order="F"):
     a = a[:, keeps]
     a_mask=a_mask[:,keeps]
     c = c[:, keeps]
-    # print("THIS IS THE SHAPE AFTER DELETIONS")
-    # print(a.shape)
-    # print(c.shape)
  
     ###
     # Estimate background (stationary and fluctuating) for localNMF 
@@ -2061,18 +1986,6 @@ def orthogonalize_UV(V, device='cpu'):
     print("Orthogonalization took {}".format(time.time() - start_time))
     
     return Qt, Rt
-
-
-
-def scipy_coo_to_torch_coo(scipy_coo_mat):
-    values = scipy_coo_mat.data
-    indices = np.vstack((scipy_coo_mat.row, scipy_coo_mat.col))
-    i = torch.LongTensor(indices)
-    v = torch.FloatTensor(values)
-    shape = scipy_coo_mat.shape
-
-    return torch.sparse.FloatTensor(i, v, torch.Size(shape))
-
 
 
 def get_min_vals(U_sparse, V, batch_size = 1000, device = 'cpu'):
@@ -2130,17 +2043,6 @@ def threshold_data_inplace(Yd, th = 2, axisVal = 2):
     torch.sub(Yd,th_val, out = Yd)
     torch.clamp(Yd, min = 0, out = Yd)
     return Yd
-
-
-def scipy_coo_to_binary_torchsparse_coo(scipy_coo_mat):
-    values = np.ones_like(scipy_coo_mat.data)
-    row = torch.LongTensor(scipy_coo_mat.row)
-    col = torch.LongTensor(scipy_coo_mat.col)
-    value = torch.FloatTensor(scipy_coo_mat.data)
-
-    return torch_sparse.tensor.SparseTensor(row=row, col=col, value=value, sparse_sizes = scipy_coo_mat.shape)
-    # return torch.sparse.FloatTensor(i, v, torch.Size(shape))
-
 
 
 def reshape_fortran(x, shape):
@@ -2825,15 +2727,6 @@ def demix_whole_data_robust_ring_lowrank(U,V_PMD,r=10, cut_off_point=[0.95,0.9],
         return {'rlt':rlt, 'fin_rlt':fin_rlt, "superpixel_rlt":superpixel_rlt}
     else:
         return {'fin_rlt':fin_rlt, "superpixel_rlt":superpixel_rlt}
-
-# def get_mean_data(U_sparse, R, V, device='cpu'):
-#     V = torch.from_numpy(V).float().to(device)
-#     V_mean = torch.mean(V, dim=1, keepdim=True)
-#     R = torch.from_numpy(R).float().to(device)
-#     RV = torch.matmul(R, V_mean)
-#     U_sparse = torch_sparse.tensor.from_scipy(U_sparse).to(device)
-#     mean_img = torch_sparse.matmul(U_sparse, RV)
-#     return mean_img.cpu().numpy()
     
 def get_mean_data(U_sparse, V):
     V_mean = torch.mean(V, dim=1, keepdim=True)
