@@ -32,6 +32,7 @@ import sys
 
 #Repo-specific imports:
 from localnmf import ca_utils
+from localnmf.ca_utils import add_1s_to_rowspan
 from localnmf.constrained_ring.cnmf_e import ring_model, ring_model_update, ring_model_update_sampling
 from localnmf import regression_update
 
@@ -125,7 +126,7 @@ def local_correlations_fft(Y, eight_neighbours=True, swap_dim=True, opencv=True)
     return Cn
 
 
-def local_correlations_fft_UV(U, V, dims, eight_neighbours=True, a = None, c = None):
+def local_correlations_fft_UV(U, V, dims, eight_neighbours=True, a = None, c = None, order="C"):
     """
     Computes the correlation image for the input dataset Y using a faster FFT based method, adapt from caiman
     Parameters:
@@ -161,7 +162,7 @@ def local_correlations_fft_UV(U, V, dims, eight_neighbours=True, a = None, c = N
     
     U_norm = np.nan_to_num(U_norm, nan = 0, posinf = 0)
     
-    U_norm = U_norm.reshape((dims[0], dims[1], U_norm.shape[1]), order = "F")
+    U_norm = U_norm.reshape((dims[0], dims[1], U_norm.shape[1]), order = order)
     
     
     if eight_neighbours:
@@ -602,12 +603,12 @@ def make_mask(corr_img_all_r, corr, mask_a, num_plane=1,times=10,max_allow_neuro
     return mask_a
 
 
-def make_mask_dynamic(corr_img_all_r, corr_percent, mask_a):
+def make_mask_dynamic(corr_img_all_r, corr_percent, mask_a, data_order = "C"):
     """
     update the spatial support: connected region in corr_img(corr(Y,c)) which is connected with previous spatial support
     """
     s = np.ones([3,3]);
-    mask_a = (mask_a.reshape(corr_img_all_r.shape,order="F")).copy()
+    mask_a = (mask_a.reshape(corr_img_all_r.shape,order=data_order)).copy()
     for ii in range(mask_a.shape[2]):
         max_corr_val = np.amax(corr_img_all_r[:, :, ii])
         corr_thres = corr_percent * max_corr_val
@@ -621,34 +622,34 @@ def make_mask_dynamic(corr_img_all_r, corr_percent, mask_a):
             labeled_array = (labeled_array==c);
             mask_a[:,:,ii] = labeled_array;
 
-    return mask_a.reshape((-1, mask_a.shape[2]), order = "F")
+    return mask_a.reshape((-1, mask_a.shape[2]), order = data_order)
     
 
     
 
-def make_mask_rigid(corr_img_all_r, corr, mask_a):
-    """
-    update the spatial support: connected region in corr_img(corr(Y,c)) which is connected with previous spatial support
-    """
-    s = np.ones([3,3]);
-    mask_a = (mask_a.reshape(corr_img_all_r.shape,order="F")).copy()
-    for ii in range(mask_a.shape[2]):
-        labeled_array, num_features = scipy.ndimage.measurements.label(corr_img_all_r[:,:,ii] > corr,structure=s);
-        u, indices, counts = np.unique(labeled_array*mask_a[:,:,ii], return_inverse=True, return_counts=True);
+# def make_mask_rigid(corr_img_all_r, corr, mask_a):
+#     """
+#     update the spatial support: connected region in corr_img(corr(Y,c)) which is connected with previous spatial support
+#     """
+#     s = np.ones([3,3]);
+#     mask_a = (mask_a.reshape(corr_img_all_r.shape,order="F")).copy()
+#     for ii in range(mask_a.shape[2]):
+#         labeled_array, num_features = scipy.ndimage.measurements.label(corr_img_all_r[:,:,ii] > corr,structure=s);
+#         u, indices, counts = np.unique(labeled_array*mask_a[:,:,ii], return_inverse=True, return_counts=True);
         
-        if len(u)==1:
-            mask_a[:, :, ii] *= 0
-        else:
-            c = u[1:][np.argmax(counts[1:])];
-            #print(c);
-            labeled_array = (labeled_array==c);
-            mask_a[:,:,ii] = labeled_array;
+#         if len(u)==1:
+#             mask_a[:, :, ii] *= 0
+#         else:
+#             c = u[1:][np.argmax(counts[1:])];
+#             #print(c);
+#             labeled_array = (labeled_array==c);
+#             mask_a[:,:,ii] = labeled_array;
 
-    return mask_a.reshape((-1, mask_a.shape[2]), order = "F")
+#     return mask_a.reshape((-1, mask_a.shape[2]), order = "F")
     
     
 
-def merge_components(a,c,corr_img_all_r,num_list,patch_size,merge_corr_thr=0.6,merge_overlap_thr=0.6,plot_en=False):
+def merge_components(a,c,corr_img_all_r,num_list,patch_size,merge_corr_thr=0.6,merge_overlap_thr=0.6,plot_en=False, data_order="C"):
     """ want to merge components whose correlation images are highly overlapped,
     and update a and c after merge with region constrain
     Parameters:
@@ -706,7 +707,7 @@ def merge_components(a,c,corr_img_all_r,num_list,patch_size,merge_corr_thr=0.6,m
             a_zero = np.zeros([a.shape[0],1]);
             a_temp = a[:,comp];
             if plot_en:
-                spatial_comp_plot(a_temp, corr_img_all_r[:,comp].reshape(patch_size[0],patch_size[1],-1,order="F"),num_list[comp],ini=False);
+                spatial_comp_plot(a_temp, corr_img_all_r[:,comp].reshape(patch_size[0],patch_size[1],-1,order=data_order),num_list[comp],ini=False);
             mask_temp = np.where(a_temp.sum(axis=1,keepdims=True) > 0)[0];
             
             a_temp = a_temp[mask_temp,:];
@@ -727,7 +728,7 @@ def merge_components(a,c,corr_img_all_r,num_list,patch_size,merge_corr_thr=0.6,m
         return flag
 
 
-def delete_comp(a, c, corr_img_all_reg, corr_img_all, mask_a, num_list, temp, word, plot_en, fov_dims, order="F"):
+def delete_comp(a, c, corr_img_all_reg, corr_img_all, mask_a, num_list, temp, word, plot_en, fov_dims, order="C"):
     """
     Delete zero components, specified by "temp". 
     Inputs: 
@@ -761,27 +762,6 @@ def delete_comp(a, c, corr_img_all_reg, corr_img_all, mask_a, num_list, temp, wo
     c = torch.index_select(c, 1, neg)
     num_list = np.delete(num_list, pos_for_cpu);
     return a, c, corr_img_all_reg, corr_img_all, mask_a, num_list
-
-    
-    
-def delete_comp_old(a, c, corr_img_all_reg, corr_img_all, mask_a, num_list, temp, word, plot_en, fov_dims):
-    """
-    delete those zero components
-    """
-    print(word);
-    pos = np.where(temp)[0];
-    print("delete components" + str(num_list[pos]+1));
-    corr_img_all_reg_r = corr_img_all_reg.reshape((fov_dims[0], fov_dims[1], -1), order = "F")
-    if plot_en:
-        spatial_comp_plot(a[:,pos], corr_img_all_reg_r[:,:,pos], num_list=num_list[pos], ini=False);
-    corr_img_all_reg = np.delete(corr_img_all_reg, pos, axis=1);
-    corr_img_all = np.delete(corr_img_all, pos, axis = 1);
-    mask_a = np.delete(mask_a, pos, axis=1);
-    a = np.delete(a, pos, axis=1);
-    c = np.delete(c, pos, axis=1);
-    num_list = np.delete(num_list, pos);
-    return a, c, corr_img_all_reg, corr_img_all, mask_a, num_list
-
 
 
 def order_superpixels(permute_col, unique_pix, U_mat, V_mat):
@@ -830,7 +810,7 @@ def l1_tf(y, sigma):
 ##################################################### plot functions ############################################################################
 #################################################################################################################################################
 
-def pure_superpixel_corr_compare_plot(connect_mat_1, unique_pix, pure_pix, brightness_rank_sup, brightness_rank, Cnt, text=False):
+def pure_superpixel_corr_compare_plot(connect_mat_1, unique_pix, pure_pix, brightness_rank_sup, brightness_rank, Cnt, text=False, order="C"):
     scale = np.maximum(1, (connect_mat_1.shape[1]/connect_mat_1.shape[0]));
     fig = plt.figure(figsize=(4*scale,12));
     ax = plt.subplot(3,1,1);
@@ -850,9 +830,9 @@ def pure_superpixel_corr_compare_plot(connect_mat_1, unique_pix, pure_pix, brigh
     ax1 = plt.subplot(3,1,2);
     dims = connect_mat_1.shape;
     connect_mat_1_pure = connect_mat_1.copy();
-    connect_mat_1_pure = connect_mat_1_pure.reshape(np.prod(dims),order="F");
+    connect_mat_1_pure = connect_mat_1_pure.reshape(np.prod(dims),order=order);
     connect_mat_1_pure[~np.in1d(connect_mat_1_pure,pure_pix)]=0;
-    connect_mat_1_pure = connect_mat_1_pure.reshape(dims,order="F");
+    connect_mat_1_pure = connect_mat_1_pure.reshape(dims,order=order);
 
     ax1.imshow(connect_mat_1_pure,cmap="nipy_spectral_r");
 
@@ -940,17 +920,17 @@ def spatial_comp_plot(a, corr_img_all_r, num_list=None, ini=False):
     return fig
 
 
-def spatial_sum_plot(a, a_fin, patch_size, num_list_fin=None, text=False):
+def spatial_sum_plot(a, a_fin, patch_size, order="C", num_list_fin=None, text=False):
     scale = np.maximum(1, (patch_size[1]/patch_size[0]));
     fig = plt.figure(figsize=(16*scale,8));
     ax = plt.subplot(1,2,1);
-    ax.imshow(a_fin.sum(axis=1).reshape(patch_size,order="F"),cmap="jet");
+    ax.imshow(a_fin.sum(axis=1).reshape(patch_size,order=order),cmap="jet");
 
     if num_list_fin is None:
         num_list_fin = np.arange(a_fin.shape[1]);
     if text:
         for ii in range(a_fin.shape[1]):
-            temp = a_fin[:,ii].reshape(patch_size,order="F");
+            temp = a_fin[:,ii].reshape(patch_size,order=order);
             pos0 = np.where(temp == temp.max())[0][0];
             pos1 = np.where(temp == temp.max())[1][0];
             ax.text(pos1, pos0, f"{num_list_fin[ii]+1}", verticalalignment='bottom', horizontalalignment='right',color='white', fontsize=15, fontweight="bold")
@@ -960,11 +940,11 @@ def spatial_sum_plot(a, a_fin, patch_size, num_list_fin=None, text=False):
     ax.title.set_fontweight("bold")
 
     ax1 = plt.subplot(1,2,2);
-    ax1.imshow(a.sum(axis=1).reshape(patch_size,order="F"),cmap="jet");
+    ax1.imshow(a.sum(axis=1).reshape(patch_size,order=order),cmap="jet");
 
     if text:
         for ii in range(a.shape[1]):
-            temp = a[:,ii].reshape(patch_size,order="F");
+            temp = a[:,ii].reshape(patch_size,order=order);
             pos0 = np.where(temp == temp.max())[0][0];
             pos1 = np.where(temp == temp.max())[1][0];
             ax1.text(pos1, pos0, f"{ii+1}", verticalalignment='bottom', horizontalalignment='right',color='white', fontsize=15, fontweight="bold")
@@ -1878,7 +1858,7 @@ def dilate_mask(mask_a, dilation_size):
     return new_mask
         
 
-def process_custom_signals(a_init, U_sparse, V, device='cpu', order="F"):
+def process_custom_signals(a_init, U_sparse_torch, V_torch, device='cpu', order="C"):
     '''
     Custom initialization: Given a set of neuron spatial footprints ('a'), this provides initial estimates to the other component (temporal traces, baseline, fluctuating background)
     Terms:
@@ -1887,79 +1867,51 @@ def process_custom_signals(a_init, U_sparse, V, device='cpu', order="F"):
         R: rank of the PMD decomposition
     
     Params:
-        a: np.ndarray, dimensions (d1, d2, K) where K is the number of neurons, 
+        a_init: np.ndarray, dimensions (d1, d2, K)
+        U_sparse_torch: torch_sparse.Tensor, shape (d1*d2, R)
+        V_torch: torch.Tensor, shape (R, T)
+        device: string; either 'cpu' or 'cuda'
+        order: order in which 3d data is reshaped to 2d
     
     
     TODO: Eliminate awkward naming issues in 'process custom signals'
     '''
+    dims = (a_init.shape[0], a_init.shape[1], V_torch.shape[1])
     
-    dims = (a_init.shape[0], a_init.shape[1], V.shape[1])
-    
-    A = a_init
-    A_mask = (a_init>0)
-    
-    A_re = A.reshape(dims[0]*dims[1],-1, order=order)
-    A_mask_re = A_mask.reshape(dims[0]*dims[1],-1,order=order)
+    a = a_init.reshape(dims[0]*dims[1],-1, order=order)
+    a_mask = (a_init>0).reshape(dims[0]*dims[1],-1,order=order)
 
-    c = np.zeros((dims[2], A_re.shape[1]))
-    
-    a = A_re
-    a_mask=A_mask_re
-    
-    
-    W = scipy.sparse.csr_matrix((U_sparse.shape[0],U_sparse.shape[0]))
-    X = np.zeros((A_re.shape[1], V.shape[0]))
-    b = np.zeros((U_sparse.shape[0], 1))
-    
-    
-    
-    
+    c = np.zeros((dims[2], a_init.shape[2]))
+
+    X = np.zeros((a_init.shape[2], V_torch.shape[0]))
+    b = np.zeros((d1*d2, 1))
     
     #Cast the data to torch tensors 
-    A_re_torch = torch_sparse.tensor.from_scipy(scipy.sparse.coo_matrix(A_re)).float().to(device)
-    U_sparse_torch = torch_sparse.tensor.from_scipy(U_sparse).float().to(device)
-    V_torch = torch.from_numpy(V).float().to(device)
+    a_torch = torch_sparse.tensor.from_scipy(scipy.sparse.coo_matrix(a)).float().to(device)
+    if not U_sparse_torch.device == device:
+        U_sparse_torch = U_sparse_torch.to(device)
+    if not V_torch.device == device:
+        V_torch = V_torch.to(device)
     c_torch = torch.from_numpy(c).float().to(device)
     b_torch = torch.from_numpy(b).float().to(device)
     W_torch = ring_model(dims[0], dims[1], 1, device=device, order=order, empty=True)
     X_torch = torch.from_numpy(X).float().to(device)
-    ##TODO: A
     
-    c = regression_update.temporal_update_HALS(U_sparse_torch, V_torch, W_torch, X_torch, A_re_torch, c_torch, b_torch).cpu().detach().numpy()
+    uv_mean = get_mean_data(U_sparse_torch, V_torch)
+
+    #Baseline update followed by 'c' update:
+    b_torch = regression_update.baseline_update(uv_mean, a_torch, c_torch)
+    c_torch = regression_update.temporal_update_HALS(U_sparse_torch, V_torch, W_torch, X_torch, a_torch, c_torch, b_torch).cpu().detach().numpy()
     
-      
-    ####Delete any zero components
-    ####TODO: completely eliminate 
-    deletions = []
-    for k in range(a.shape[1]):
-        curr_trace = c[:, k]
-        if np.count_nonzero(curr_trace) == 0:
-            deletions.append(k)
-            print("delete {}".format(k))
-    keeps = []
-    for m in range(a.shape[1]):
-        if m in deletions:
-            continue
-        else:
-            keeps.append(m)
-    a = a[:, keeps]
-    a_mask=a_mask[:,keeps]
-    c = c[:, keeps]
- 
-    ###
-    # Estimate background (stationary and fluctuating) for localNMF 
-    ###
-    ##We estimate stationary background
-    uv_mean = U_sparse.dot((V.mean(axis = 1, keepdims = True))) #Pixel-wise mean
+    c_norm = torch.linalg.norm(c_torch, dim = 0)
+    nonzero_dim1 = torch.nonzero(c_norm).squeeze()
     
-    b = regression_update.baseline_update(uv_mean, a, c, to_torch=True)
+    #Only keep the good indices, based on nonzero_dim1
+    c_torch = torch.index_select(c_torch, 1, nonzero_dim1)
+    a_torch = torch_sparse.index_select(a_torch, 0, nonzero_dim1)
+    a_mask= a_torch.bool()
     
-    
-    a_used = a.astype("double")
-    b_used = b.astype("double")
-    c_used = c.astype("double")
-    
-    return a_used, a_mask, b_used, c_used
+    return a_torch, a_mask, b_torch, c_torch
 
     
 
@@ -1988,25 +1940,25 @@ def orthogonalize_UV(V, device='cpu'):
     return Qt, Rt
 
 
-def get_min_vals(U_sparse, V, batch_size = 1000, device = 'cpu'):
+# def get_min_vals(U_sparse, V, batch_size = 1000, device = 'cpu'):
     
-    U_sparse_torch = torch_sparse.tensor.from_scipy(U_sparse).to(device)
-    V_torch = torch.Tensor(V).to(device)
+#     U_sparse_torch = torch_sparse.tensor.from_scipy(U_sparse).to(device)
+#     V_torch = torch.Tensor(V).to(device)
     
-    iters = math.ceil(V_torch.shape[1]/batch_size)
-    final_tensor = torch.zeros(U_sparse.shape[0],0, device=device)
+#     iters = math.ceil(V_torch.shape[1]/batch_size)
+#     final_tensor = torch.zeros(U_sparse.shape[0],0, device=device)
     
-    for k in range(iters):
-        start = batch_size*k
-        end = start + batch_size
-        data = V_torch[:, start:end]
-        prod = torch_sparse.matmul(U_sparse_torch, data)
-        min_prod = torch.min(prod, dim=1, keepdim=True)[0]
-        final_tensor = torch.hstack((final_tensor, min_prod))
+#     for k in range(iters):
+#         start = batch_size*k
+#         end = start + batch_size
+#         data = V_torch[:, start:end]
+#         prod = torch_sparse.matmul(U_sparse_torch, data)
+#         min_prod = torch.min(prod, dim=1, keepdim=True)[0]
+#         final_tensor = torch.hstack((final_tensor, min_prod))
 
 
     
-    return torch.min(final_tensor, dim=1, keepdim=True)[0].cpu().numpy()
+#     return torch.min(final_tensor, dim=1, keepdim=True)[0].cpu().numpy()
 
 
 def get_median(tensor, axis):
@@ -2049,9 +2001,12 @@ def reshape_fortran(x, shape):
     if len(x.shape) > 0:
         x = x.permute(*reversed(range(len(x.shape))))
     return x.reshape(*reversed(shape)).permute(*reversed(range(len(shape))))   
+
+def reshape_c(x, shape):
+    return torch.reshape(x, shape)
     
 
-def find_superpixel_UV(U_sparse, V, dims, cut_off_point, length_cut, th, eight_neighbours=True, \
+def find_superpixel_UV(U_sparse, V, dims, cut_off_point, length_cut, th, order="C", eight_neighbours=True, \
                         device = 'cuda', a = None, c = None, batch_size = 10000, pseudo = 0, tol = 0.000001):
     """
     Find superpixels in Yt.  For each pixel, calculate its correlation with neighborhood pixels.
@@ -2080,11 +2035,6 @@ def find_superpixel_UV(U_sparse, V, dims, cut_off_point, length_cut, th, eight_n
         all the random numbers used to idicate superpixels in connect_mat_1
     """
     
-    
-    #First load objects..
-    U_sparse = torch_sparse.tensor.from_scipy(U_sparse).to(device)
-    V = torch.Tensor(V).to(device)
-    
     if a is not None and c is not None: 
         resid_flag = True
     else:
@@ -2092,13 +2042,12 @@ def find_superpixel_UV(U_sparse, V, dims, cut_off_point, length_cut, th, eight_n
 
     if resid_flag: 
         c = torch.Tensor(c).t().to(device)
-        # a_sparse = scipy.sparse.coo_matrix(a)
         a_sparse = torch_sparse.tensor.from_scipy(scipy.sparse.coo_matrix(a)).to(device)
     
 
     dims = (dims[0], dims[1], V.shape[1])
     T = V.shape[1]
-    ref_mat = np.arange(np.prod(dims[:-1])).reshape(dims[:-1],order='F')
+    ref_mat = np.arange(np.prod(dims[:-1])).reshape(dims[:-1],order=order)
     
         
     
@@ -2106,10 +2055,6 @@ def find_superpixel_UV(U_sparse, V, dims, cut_off_point, length_cut, th, eight_n
     
     iters_x = math.ceil((dims[0]/(tiles-1)))
     iters_y = math.ceil((dims[1]/(tiles-1)))
-    
-    
-#     if resid_flag: 
-#         a_sparse = scipy.sparse.csr_matrix(a)
         
     
     
@@ -2127,28 +2072,22 @@ def find_superpixel_UV(U_sparse, V, dims, cut_off_point, length_cut, th, eight_n
             indices_curr_2d = ref_mat[x_pt:x_end, y_pt:y_end]
             x_interval = indices_curr_2d.shape[0]
             y_interval = indices_curr_2d.shape[1]
-            indices_curr = indices_curr_2d.reshape((x_interval*y_interval,), order = "F")
+            indices_curr = indices_curr_2d.reshape((x_interval*y_interval,), order = order)
             
  
             indices_curr_torch = torch.from_numpy(indices_curr).to(device)
-            # print(" at {}".format(time.time() - start_time))
             U_sparse_crop = torch_sparse.index_select(U_sparse, 0, indices_curr_torch)
-            # print(type(U_sparse_crop))
-            # print(" at {}".format(time.time() - start_time))
-            Yd = reshape_fortran(torch_sparse.matmul(U_sparse_crop, V), (x_interval, y_interval, -1))
-            # print("the type of Yd is {}".format(type(Yd)))
-            # print("the shape of Yd is {}".format(Yd.shape))
+            if order == "F":
+                Yd = reshape_fortran(torch_sparse.matmul(U_sparse_crop, V), (x_interval, y_interval, -1))
+            else:
+                Yd = reshape_c(torch_sparse.matmul(U_sparse_crop, V), (x_interval, y_interval, -1))
             if resid_flag:
                 a_sparse_crop = torch_sparse.index_select(a_sparse, 0, indices_curr_torch)
-                ac_mov = reshape_fortran(torch_sparse.matmul(a_sparse_crop, c), (x_interval, y_interval, -1))
-                # ac_mov = a_sparse[indices_curr, :].dot(c.T)
-                # ac_mov = ac_mov.reshape((x_interval, y_interval, -1), order = "F")
+                if order == "F":
+                    ac_mov = reshape_fortran(torch_sparse.matmul(a_sparse_crop, c), (x_interval, y_interval, -1))
+                else:
+                    ac_mov = reshape_c(torch_sparse.matmul(a_sparse_crop, c), (x_interval, y_interval, -1))
                 Yd = torch.sub(Yd, ac_mov)
-                # Yd -= ac_mov
-            
-            # print("{}{}".format(tile_x, tile_y))
-                
-            # Yd = torch.from_numpy(Yd).to(device)   
             
             #Get MAD-thresholded movie in-place
             Yd = threshold_data_inplace(Yd, th)
@@ -2183,10 +2122,8 @@ def find_superpixel_UV(U_sparse, V, dims, cut_off_point, length_cut, th, eight_n
             
             #Horizonal pixel correlations
             rho = torch.mean(Yd[:, :, :-1] * Yd[:, :, 1:], dim = 0)
-            # print("horizontal. after the element-wise multiply, rrho shape is {}".format(rho.shape))
             rho = torch.cat( (rho,torch.zeros([rho.shape[0], 1]).double().to(device)), dim = 1)
             temp_rho = rho.cpu().numpy()
-            # print("the shape of rho in horizonttal is {}".format(temp_rho.shape))
             temp_indices = np.where(temp_rho > cut_off_point)
             A_curr = ref_mat[(temp_indices[0] + x_pt, temp_indices[1] + y_pt)]
             B_curr = ref_mat[(temp_indices[0] + x_pt, temp_indices[1] + y_pt + 1)]
@@ -2215,13 +2152,8 @@ def find_superpixel_UV(U_sparse, V, dims, cut_off_point, length_cut, th, eight_n
                 B_curr = ref_mat[(temp_indices[0] + x_pt + 1, temp_indices[1] + y_pt - 1)]
                 A_indices.append(A_curr)
                 B_indices.append(B_curr)
-                
-            # del rho
-            # del Yd
-            # torch.cuda.empty_cache()
             
-     
-    # torch.cuda.empty_cache()
+
     A = np.concatenate(A_indices)
     B = np.concatenate(B_indices)
 
@@ -2244,7 +2176,7 @@ def find_superpixel_UV(U_sparse, V, dims, cut_off_point, length_cut, th, eight_n
         if(len(comp) > length_cut):
             connect_mat[list(comp)] = permute_col[ii];
             ii = ii+1;
-    connect_mat_1 = connect_mat.reshape(dims[0],dims[1],order='F');
+    connect_mat_1 = connect_mat.reshape(dims[0],dims[1],order=order);
     return connect_mat_1, idx, comps, permute_col
 
 
@@ -2310,23 +2242,22 @@ def fit_large_spatial_support(comp, c_init, U_sparse_torch, V_torch, th, a_spars
 
     
 
-def spatial_temporal_ini_UV(U,V, dims, th, comps, idx, length_cut, a = None, c = None, device = 'cpu', pixel_limit=2000):
+def spatial_temporal_ini_UV(U_sparse_torch, V_torch, dims, th, comps, idx, length_cut, a = None, c = None, device = 'cpu', pixel_limit=2000):
     """
     Apply rank 1 NMF to find spatial and temporal initialization for each superpixel in Yt.
+    Params:
+        - U_sparse_torch: torch_sparse.Tensor, shape (d1*d2, R)
+        - V_torch: torch.Tensor. Shape (R, T)
     """
     if device == 'cuda':
         torch.cuda.empty_cache()
-    dims = (dims[0], dims[1], V.shape[1])
-    T = V.shape[1]
+    dims = (dims[0], dims[1], V_torch.shape[1])
+    T = V_torch.shape[1]
     ii = 0;
 
     
     V_mat = torch.zeros([T, idx], device=device);
     #Note: We define H_mat later to save space
-    
-    
-    V_torch = torch.from_numpy(V).to(device)
-    U_sparse_torch = torch_sparse.tensor.from_scipy(U).to(device)
     
     if a is not None and c is not None: 
         c = torch.Tensor(c).t().to(device)
@@ -2423,23 +2354,25 @@ def prune_zero_columns_UV(U, V):
     
     print("the new shapes of U and V are {} and {}".format(U_new.shape, V_new.shape))
     
-    return U_new, V_new
+    return U_new, V_new    
     
-def demix_whole_data_robust_ring_lowrank(U,V_PMD,r=10, cut_off_point=[0.95,0.9], length_cut=[15,10], th=[2,1], pass_num=1, residual_cut = [0.6,0.6],
+def demix_whole_data_robust_ring_lowrank(U_sparse,R,V,data_shape, data_order="F", r=10, cut_off_point=[0.95,0.9], length_cut=[15,10], th=[2,1], pass_num=1, residual_cut = [0.6,0.6],
                     corr_th_fix=0.31, corr_th_fix_sec = 0.4, corr_th_del = 0.2, switch_point=10, max_allow_neuron_size=0.3, merge_corr_thr=0.6, merge_overlap_thr=0.6, num_plane=1, patch_size=[100,100],
                     plot_en=False, TF=False, fudge_factor=1, text=True, max_iter=35, max_iter_fin=50,
-                    update_after=4, pseudo_1=[1/4, 1/4], pseudo_2=[5, 5], skips=2, update_type="Constant", init = ['mnmf', 'mnmf', 'lnmf'], custom_init = {}, block_dims=(16,16),frame_len=[100,50,50],confidence=0.99, spatial_thres=(0.75,0.50), model=None, allowed_overlap=5, \
-                                              plot_mnmf = True, sb=True, pseudo_corr = [0,0], device = 'cpu', batch_size = 10000, plot_debug = False, denoise = False):
+                    update_after=4, pseudo_1=[1/4, 1/4], pseudo_2=[5, 5], skips=2, update_type="Constant", init = ['lnmf', 'lnmf', 'lnmf'], custom_init = {}, sb=True, pseudo_corr = [0,0], device = 'cpu', batch_size = 10000, plot_debug = False, denoise = False):
     '''
     This function is a low-rank pipeline with robust correlation measures and a ring background model. The low-rank implementation is in the HALS updates.
     Args:
-        Yd_raw: ndarray, (d1 x d2 x T). 3D matrix describing raw video
-        Yd: ndarray, (d1 x d2 x T). 3D matrix which is suitably preprocessed. Might include denoising, motion correction
-            standardization, etc.
-        U: ndarray, (d1 x d2 x K). A PMD-denoised and compressed spatial representation of Yd_raw. K is the rank of the th
+        U_sparse: torch_sparse.Tensor, shape (d1*d2, R). A PMD-denoised and compressed spatial representation of Yd_raw. R is the rank of the
             PMD decomposition.
-        V: ndarray, (K x T). A PMD-denoised and compressed temporal representation of Yd_raw. K is the rank of the PMD 
-            decomposition
+        R: torch.Tensor, shape (R, R). 
+        V: torch.Tensor, shape (R, T). Matrix with orthonormal rows, describing the temporal basis of the PMD decomposition.
+        
+        KEY -- URV = PMD-denoised movie
+        
+        data_shape: tuple describing (d1, d2, T), all ints. These are the two FOV dimensions and the number of frames
+        data_order: "F" or "C" (string). Tells us how to reshape spatial matrices which have been "flattened" (i.e. instead of having separate dimensions (d1, d2, ...) they have (d1*d2, ..)
+        
         r: integer. The radius used in the ring model
         cut_off_point: list of values between 0 and 1, length = pass_num. Correlation thresholds used 
             in the superpixelization process
@@ -2479,34 +2412,18 @@ def demix_whole_data_robust_ring_lowrank(U,V_PMD,r=10, cut_off_point=[0.95,0.9],
             to be any value greater than both max_iter and max_iter_fin.
         update_type: string, either "Constant" or "Full". Describes the type of ring update being performed
         init: list of strings, length = pass_num. Options:
-                (a) 'mnmf' (neural network-based initialization)
-                (b) 'lnmf' (superpixel based initialization)
-                (c) 'custom' (custom init values provided). NOTE: only be used for pass #1
-            For example, init = ['mnmf', 'lnmf'] means the first pass is initialized with 
+                -  'lnmf' (superpixel based initialization)
+                - 'custom' (custom init values provided). NOTE: only be used for pass #1
+            For example, init = ['custom', 'lnmf'] means the first pass is initialized with 
             neural network, the second with superpixels.
-        custom_init: dict. keys: 'a','b', c'. A dictionary describing the custom values (a,b,c) provided for demixing.
+        custom_init: dict. keys: 'a','b','c'. A dictionary describing the custom values (a,b,c) provided for demixing.
             'a' is the spatial footprint, 'b' is the baseline, 'c' is the temporal trace
-        block_dims: tuple of integers, (a,b) (length 2). In 'mnmf' init, the algorithm breaks the field of view into tiles
-            of size (a x b). For each tile, we find the 'frame_len' brightest frames over that tile and run the network on 
-            those frames.
-        frame_len: list of integers (length = pass_num). For each pass, if the initialization method is 'mnmf', this describes
-            how many frames the algorithm looks at.
-        confidence: float betwee 0 and 1. Accepted confidence level at which we accept neural network's output. 
-            Generally keep at 0.99
-        spatial_thres: tuple (length 2), both values are float between 0 and 1. Maximum allowed cosine similarity between
-            neuron footprints identified in the 'mnmf' initialization. One threshold is between the footprints themselves, 
-            the other is between their masks
-        model: dict. data used to construct neural network Mask-RCNN data. Keys: 
-            (1) 'path': path to Mask-RCNN saved weights (.h5 file)
-            (2) 'inference_config' object, specifying details of Mask-RCNN execution
-        allowed_overlap: amount of acceptable overlap (in pixels) between two masks identified by Mask-RCNN from single frame
-        plot_mnmf: boolean. If true, we plot and display Mask-RCNN output as it is run at various point of pipeline
         sb: boolean. Stands for 'static background'. If false, we turn off static background estimates throughout pipeline
             Usually kept as true. 
         pseudo_corrr: list of nonnegative floats, length = pass_num. This is a robust correlation measure used when 
             calculating correlation images of neurons in the HALS updates. For data in which neurons don't overlap much, this
             should be left at 0.
-        device: string identifying whether certain operations (matrix updates, etc.) should be moved to gpu and 
+        device: string. identifies whether certain operations (matrix updates, etc.) should be moved to gpu and 
             accelerated. Standard options: 'cpu' for CPU-only. 'cuda' for GPU computations.
         batch_size: int. For GPU computing, identifies how many pixels to process at a time (to make the pipeline compatible 
             with GPUs of various memory constraints)
@@ -2514,37 +2431,28 @@ def demix_whole_data_robust_ring_lowrank(U,V_PMD,r=10, cut_off_point=[0.95,0.9],
             of visualization.
         
     '''
-    ## Define Ring Model values..
-    #First prune empty spatial basis vectors
-    d1,d2 = U.shape[:2]
-    dims = U.shape[:2];
-    T = V_PMD.shape[1];
     
-    
-    U_used = U.reshape((-1, U.shape[2]), order="F")
-    
-    #Prune any columns which are all 0
-    U_used, V_PMD = prune_zero_columns_UV(U_used, V_PMD)
-    
-    ##Subtraction Step
-    
+    #Move tensors to device and adjust rowspan of V
+    d1, d2, T = data_shape
+    dims = (d1, d2, T)
+    order = data_order
+    pad_flag, V = add_1s_to_rowspan(V)
 
-    print("BEFORE MIN SUB we have U is {} and V is {}".format((d1, d2, U_used.shape[1]), \
-                                                              V_PMD.shape))
-    ## if data has negative values then do pixel-wise minimum subtraction ##
     
+    if pad_flag: 
+        R = torch.hstack([R, torch.zeros([R.shape[1], 1], device=R.device)])
+        
+    #Placeholder code to make sure things work for now
+    V_PMD = torch.matmul(R, V)
     
-    U_sparse = ca_utils.construct_sparse(U_used)#.tocsr()
-    min_vals = get_min_vals(U_sparse, V_PMD, batch_size = batch_size, device=device)
-    U_sparse = scipy.sparse.hstack([U_sparse.tocsc(), min_vals], format = 'csc').tocsr()
-    V_PMD = np.hstack((V_PMD.T, -1*np.ones((V_PMD.shape[1], 1)))).T
-    
-    
-    V, R = orthogonalize_UV(V_PMD, device=device) #Now we use U_sparse * R * V as our representation
+    V_PMD = V_PMD.to(device)
+    V = V.to(device)
+    U_sparse = U_sparse.to(device)
+    R = R.to(device)
     
     ##TODO: Eliminate U_used entirely and use (U_sparse, R instead)
     if plot_en:
-        U_used = U_sparse.dot(R)
+        U_used = torch_sparse.matmul(U_sparse, R).cpu().numpy()
     
     superpixel_rlt = [];
     
@@ -2565,7 +2473,7 @@ def demix_whole_data_robust_ring_lowrank(U,V_PMD,r=10, cut_off_point=[0.95,0.9],
             height_num = int(np.ceil(dims[0]/patch_height));  ########### if need less data to find pure superpixel, change dims[0] here #################
             width_num = int(np.ceil(dims[1]/(patch_width*num_plane)));
             num_patch = height_num*width_num;
-            patch_ref_mat = np.array(range(num_patch)).reshape(height_num, width_num, order="F");
+            patch_ref_mat = np.array(range(num_patch)).reshape(height_num, width_num, order=data_order);
     
             if num_plane > 1:
                 raise ValueError('num_plane > 2 (higher dimensional data) not supported!')
@@ -2573,21 +2481,21 @@ def demix_whole_data_robust_ring_lowrank(U,V_PMD,r=10, cut_off_point=[0.95,0.9],
                 print("find superpixels!")
                 
                 if ii == 0:
-                    connect_mat_1, idx, comps, permute_col = find_superpixel_UV(U_sparse, V_PMD, dims, cut_off_point[ii],length_cut[ii], th[ii], eight_neighbours=True, device = device, batch_size = batch_size, pseudo=pseudo_2[ii]); 
+                    connect_mat_1, idx, comps, permute_col = find_superpixel_UV(U_sparse, V_PMD, dims, cut_off_point[ii],length_cut[ii], th[ii], order=data_order, eight_neighbours=True, device = device, batch_size = batch_size, pseudo=pseudo_2[ii]); 
                 else:
-                    connect_mat_1, idx, comps, permute_col = find_superpixel_UV(U_sparse, V_PMD, dims, cut_off_point[ii],length_cut[ii], th[ii], eight_neighbours=True, device = device, a=a, c=c, batch_size = batch_size, pseudo=pseudo_2[ii]);
+                    connect_mat_1, idx, comps, permute_col = find_superpixel_UV(U_sparse, V_PMD, dims, cut_off_point[ii],length_cut[ii], th[ii], order=data_order, eight_neighbours=True, device = device, a=a, c=c, batch_size = batch_size, pseudo=pseudo_2[ii]);
             print("time: " + str(time.time()-start));
 
             start = time.time();
             print("rank 1 svd!")
             if ii == 0:
                 # print("the type of U_sparse before this step is {}".format(type(U_sparse)))
-                c_ini, a_ini = spatial_temporal_ini_UV(U_sparse.tocoo(), V_PMD, dims, th[ii], comps, idx, length_cut[ii], device=device)
+                c_ini, a_ini = spatial_temporal_ini_UV(U_sparse, V_PMD, dims, th[ii], comps, idx, length_cut[ii], device=device)
             else:
-                c_ini, a_ini = spatial_temporal_ini_UV(U_sparse.tocoo(), V_PMD, dims, th[ii], comps, idx, length_cut[ii], a = a, c = c, device=device)
+                c_ini, a_ini = spatial_temporal_ini_UV(U_sparse, V_PMD, dims, th[ii], comps, idx, length_cut[ii], a = a, c = c, device=device)
                 
             
-            mask_a=None ## Disable the mask after first pass over data
+            
             unique_pix = np.asarray(np.sort(np.unique(connect_mat_1)),dtype="int");
             unique_pix = unique_pix[np.nonzero(unique_pix)];
             brightness_rank_sup = order_superpixels(permute_col, unique_pix, a_ini, c_ini);
@@ -2601,7 +2509,7 @@ def demix_whole_data_robust_ring_lowrank(U,V_PMD,r=10, cut_off_point=[0.95,0.9],
                 down=min(up+patch_height, dims[0]);
                 left=pos[1][0]*patch_width;
                 right=min(left+patch_width, dims[1]);
-                unique_pix_temp, M = search_superpixel_in_range((connect_mat_1.reshape(dims[0],int(dims[1]/num_plane),num_plane,order="F"))[up:down,left:right], permute_col, c_ini);
+                unique_pix_temp, M = search_superpixel_in_range((connect_mat_1.reshape(dims[0],int(dims[1]/num_plane),num_plane,order=data_order))[up:down,left:right], permute_col, c_ini);
                 pure_pix_temp = fast_sep_nmf(M, M.shape[1], residual_cut[ii]);
                 if len(pure_pix_temp)>0:
                     pure_pix = np.hstack((pure_pix, unique_pix_temp[pure_pix_temp]));
@@ -2610,29 +2518,34 @@ def demix_whole_data_robust_ring_lowrank(U,V_PMD,r=10, cut_off_point=[0.95,0.9],
             
             start = time.time();
             print("prepare iteration!")
+            mask_a=None ## Disable the mask after first pass over data
             if ii > 0:
                 a_ini, c_ini, brightness_rank = prepare_iteration_UV((dims[0], dims[1], T), connect_mat_1, permute_col, pure_pix, a_ini, c_ini);
                 a = np.hstack((a, a_ini));
                 c = np.hstack((c, c_ini));
+                a = torch_sparse.tensor.from_scipy(scipy.sparse.coo_matrix(a)).float().to(device)
+                c = torch.from_numpy(c).float().to(device)
+                uv_mean = get_mean_data(U_sparse, V, R=R)
+                b = regression_update.baseline_update(uv_mean, a, c)
             elif ii == 0:
-                a, c, brightness_rank = prepare_iteration_UV((dims[0], dims[1], T), connect_mat_1, permute_col, pure_pix, a_ini, c_ini, more=True);
-                uv_mean = U_sparse.dot(R.dot(V.mean(axis = 1, keepdims = True))) #Pixel-wise mean
-                b = regression_update.baseline_update(uv_mean, a, c, to_torch=True)
+                a, c, brightness_rank = prepare_iteration_UV((dims[0], dims[1], T), connect_mat_1, permute_col, pure_pix, a_ini, c_ini, more=True)
+                a = torch_sparse.tensor.from_scipy(scipy.sparse.coo_matrix(a)).float().to(device)
+                c = torch.from_numpy(c).float().to(device)
+                uv_mean = get_mean_data(U_sparse, V, R=R)
+                b = regression_update.baseline_update(uv_mean, a, c)
             
-            assert a.shape[1] > 0, 'Superpixels did not identify any components, re-run with different parameters before proceeding'
+            assert a.sparse_sizes()[1] > 0, 'Superpixels did not identify any components, re-run with different parameters before proceeding'
             
             #Plot superpixel correlation image
             if plot_en:
-                Cnt = local_correlations_fft_UV(U_used, V, dims);
-                pure_superpixel_corr_compare_plot(connect_mat_1, unique_pix, pure_pix, brightness_rank_sup, brightness_rank, Cnt, text);
+                Cnt = local_correlations_fft_UV(U_used, V.cpu().numpy(), dims, order=data_order);
+                pure_superpixel_corr_compare_plot(connect_mat_1, unique_pix, pure_pix, brightness_rank_sup, brightness_rank, Cnt, text, order=data_order);
             
             print("time: " + str(time.time()-start));
                 
         elif init[ii]=='custom' and ii == 0:
             assert custom_init['a'].shape[2] > 0, 'Must provide at least 1 spatial footprint' 
-            a_ini, mask_a, b, c_ini = process_custom_signals(custom_init['a'].copy(), U_sparse, V_PMD, device=device, order="F")
-            a = a_ini
-            c = c_ini
+            a, mask_a, b, c = process_custom_signals(custom_init['a'].copy(), U_sparse, V_PMD, device=device, order=data_order)
        
         else:
             raise ValueError("Invalid initialization scheme provided")
@@ -2659,7 +2572,7 @@ def demix_whole_data_robust_ring_lowrank(U,V_PMD,r=10, cut_off_point=[0.95,0.9],
             a, c, b, X, W, res, corr_img_all_r, num_list = update_AC_bg_l2_Y_ring_lowrank(U_sparse, R, V, V_PMD, r,dims,\
                                                                                        a, c, b, dims,
                                             corr_th_fix, corr_th_fix_sec, corr_th_del, switch_point, maxiter=maxiter, tol=1e-8, update_after=update_after,
-                                            merge_corr_thr=merge_corr_thr,merge_overlap_thr=merge_overlap_thr, num_plane=num_plane, plot_en=plot_en, max_allow_neuron_size=max_allow_neuron_size, skips=skips, update_type=update_type, mask_a=mask_a,sb=sb, pseudo_corr = pseudo_corr[ii], model = model, plot_mnmf = plot_mnmf, device = device, batch_size = batch_size, plot_debug = plot_debug, denoise = denoise);
+                                            merge_corr_thr=merge_corr_thr,merge_overlap_thr=merge_overlap_thr, num_plane=num_plane, plot_en=plot_en, max_allow_neuron_size=max_allow_neuron_size, skips=skips, update_type=update_type, mask_a=mask_a,sb=sb, pseudo_corr = pseudo_corr[ii],  batch_size = batch_size, plot_debug = plot_debug, denoise = denoise, data_order=data_order);
             print("time: " + str(time.time()-start));
             torch.cuda.empty_cache() #Test this as placeholder for now to avoid GPU memory getting clogged
 
@@ -2684,12 +2597,12 @@ def demix_whole_data_robust_ring_lowrank(U,V_PMD,r=10, cut_off_point=[0.95,0.9],
         sigma *= fudge_factor
         for ii in range(c.shape[1]):
             c_tf = np.hstack((c_tf, l1_tf(c[:,ii], sigma[ii])));
-        c_tf = c_tf.reshape(T,int(c_tf.shape[0]/T),order="F");
+        c_tf = c_tf.reshape(T,int(c_tf.shape[0]/T),order=data_order);
     print("time: " + str(time.time()-start));
     if plot_en:
         if pass_num > 1:
-            spatial_sum_plot(a0, a, dims, num_list, text);
-        Cnt = local_correlations_fft_UV(U_used, V, dims, a=a, c=c);
+            spatial_sum_plot(a0, a, dims[:2], num_list_fin = num_list, text = text, order=data_order);
+        Cnt = local_correlations_fft_UV(U_used, V.cpu().numpy(), dims, a=a, c=c);
         scale = np.maximum(1, int(Cnt.shape[1]/Cnt.shape[0]));
         plt.figure(figsize=(8*scale,8))
         ax1 = plt.subplot(1,1,1);
@@ -2708,8 +2621,10 @@ def demix_whole_data_robust_ring_lowrank(U,V_PMD,r=10, cut_off_point=[0.95,0.9],
     else:
         return {'fin_rlt':fin_rlt, "superpixel_rlt":superpixel_rlt}
     
-def get_mean_data(U_sparse, V):
+def get_mean_data(U_sparse, V, R=None):
     V_mean = torch.mean(V, dim=1, keepdim=True)
+    if R is not None: 
+        V_mean = torch.matmul(R, V_mean)
     mean_img = torch_sparse.matmul(U_sparse, V_mean)
     return mean_img
     
@@ -2717,23 +2632,19 @@ def update_AC_bg_l2_Y_ring_lowrank(U_sparse, R, V, V_orig,r,dims, a, c, b, patch
             maxiter=50, tol=1e-8, update_after=None,merge_corr_thr=0.5,
             merge_overlap_thr=0.7, num_plane=1, plot_en=False,
             max_allow_neuron_size=0.2, skips=2, update_type="Constant",\
-                                mask_a=None, sb=True, pseudo_corr = 0, model = None, plot_mnmf = False, device = 'cpu', batch_size = 10000, plot_debug = False, denoise = None):
+                                mask_a=None, sb=True, pseudo_corr = 0, batch_size = 10000, plot_debug = False, denoise = None, data_order = "C"):
     
     '''
     Function for computing background, spatial and temporal components of neurons. Uses HALS updates to iteratively
     refine spatial and temporal estimates. 
     
     See 'demix_whole_data_robust_ring_lowrank' for all documentation (parameters are identical)
+    
+    TODO: 
+    The use of V and V_orig is (a) not memory efficient and (b) confusing. Some functions rely on the orthonormal V, others use V_orig. Long term let's just use the orthogonal V (saves an R x T matrix on GPU) to do everything. 
     '''
     
-    a_scipy = scipy.sparse.coo_matrix(a)
-    a = torch_sparse.tensor.from_scipy(a_scipy).float().to(device)
-    U_sparse = torch_sparse.tensor.from_scipy(U_sparse).float().to(device)
-    V = torch.from_numpy(V).float().to(device)
-    V_orig = torch.from_numpy(V_orig).float().to(device)
-    R = torch.from_numpy(R).float().to(device)
-    c = torch.from_numpy(c).float().to(device)
-    b = torch.from_numpy(b).float().to(device)
+    device = V.device
 
     K = c.shape[1];
     res = np.zeros(maxiter);
@@ -2756,7 +2667,7 @@ def update_AC_bg_l2_Y_ring_lowrank(U_sparse, R, V, V_orig,r,dims, a, c, b, patch
     
     
     #Initialize empty ring model, and construct the nonempty once needed
-    W = ring_model(d1, d2, r, device=device, order="F", empty=True)
+    W = ring_model(d1, d2, r, device=device, order=data_order, empty=True)
     
     #Precompute VV^t for X updates
     VVt = torch.matmul(V, V.t()) #This is for the orthogonal V
@@ -2773,14 +2684,14 @@ def update_AC_bg_l2_Y_ring_lowrank(U_sparse, R, V, V_orig,r,dims, a, c, b, patch
         corr_img_all = vcorrcoef_UV_noise(U_sparse, R, V, c, batch_size = batch_size, device=device)
     else:
         corr_img_all = vcorrcoef_resid(U_sparse, R, V, a, c, batch_size = batch_size, device=device)
-    corr_img_all_r = corr_img_all.reshape(patch_size[0],patch_size[1],-1,order="F");
+    corr_img_all_r = corr_img_all.reshape(patch_size[0],patch_size[1],-1,order=data_order);
     print("Resid Corr Image Took {}".format(time.time() - corr_time))
     #Get regular correlation image
     
         
     corr_time = time.time()
     corr_img_all_reg = vcorrcoef_UV_noise(U_sparse, R, V, c, batch_size = batch_size, device=device)
-    corr_img_all_reg_r = corr_img_all_reg.reshape(patch_size[0],patch_size[1],-1,order="F");
+    corr_img_all_reg_r = corr_img_all_reg.reshape(patch_size[0],patch_size[1],-1,order=data_order);
     print("Standard Corr Image Took {}".format(time.time() - corr_time))
     
     
@@ -2833,7 +2744,7 @@ def update_AC_bg_l2_Y_ring_lowrank(U_sparse, R, V, V_orig,r,dims, a, c, b, patch
         start = time.time();
         
         if plot_debug:
-            corr_img_all_r = corr_img_all.reshape(patch_size[0],patch_size[1],-1,order="F");
+            corr_img_all_r = corr_img_all.reshape(patch_size[0],patch_size[1],-1,order=data_order);
             if True or (update_after and ((iters+1) % update_after == 0) or (update_after and ((iters) % update_after == 0))):
                     print_signals_corrimg(a, c, corr_th_fix, corr_img_all_r, (patch_size[0], patch_size[1],64))
 
@@ -2852,7 +2763,7 @@ def update_AC_bg_l2_Y_ring_lowrank(U_sparse, R, V, V_orig,r,dims, a, c, b, patch
         if iters >= skips:
             
             if iters == skips:
-                W = ring_model(d1, d2, r, empty=False, device=device, order="F")
+                W = ring_model(d1, d2, r, empty=False, device=device, order=data_order)
             
             # print("X estimate")
             Xtime = time.time()
@@ -2887,7 +2798,7 @@ def update_AC_bg_l2_Y_ring_lowrank(U_sparse, R, V, V_orig,r,dims, a, c, b, patch
         ### Delete Bad Components
         temp = torch_sparse.matmul(a.t(), a_summand).t() == 0 #Identify which columns of 'a' are all zeros
         if torch.sum(temp):
-            a, c, corr_img_all_reg, corr_img_all, mask_ab, num_list = delete_comp(a, c, corr_img_all_reg, corr_img_all, mask_ab, num_list, temp, "zero a!", plot_en, (d1, d2), order="F");
+            a, c, corr_img_all_reg, corr_img_all, mask_ab, num_list = delete_comp(a, c, corr_img_all_reg, corr_img_all, mask_ab, num_list, temp, "zero a!", plot_en, (d1, d2), order=data_order);
             X = regression_update.estimate_X(c, V_orig, VVt_orig)
         
         
@@ -2908,7 +2819,7 @@ def update_AC_bg_l2_Y_ring_lowrank(U_sparse, R, V, V_orig,r,dims, a, c, b, patch
         #Delete bad components
         temp = (torch.sum(c, dim=0) == 0);
         if torch.sum(temp):
-            a, c, corr_img_all_reg, corr_img_all, mask_ab, num_list = delete_comp(a, c, corr_img_all_reg, corr_img_all, mask_ab, num_list, temp, "zero c!", plot_en, (d1, d2), order="F");
+            a, c, corr_img_all_reg, corr_img_all, mask_ab, num_list = delete_comp(a, c, corr_img_all_reg, corr_img_all, mask_ab, num_list, temp, "zero c!", plot_en, (d1, d2), order=data_order);
             
             
 
@@ -2920,22 +2831,22 @@ def update_AC_bg_l2_Y_ring_lowrank(U_sparse, R, V, V_orig,r,dims, a, c, b, patch
             corr_img_all_reg = vcorrcoef_UV_noise(U_sparse, R, V, c, batch_size = batch_size, device=device) 
             
             mask_ab = a.bool()
-            corr_img_all_r = corr_img_all.reshape(patch_size[0],patch_size[1],-1,order="F");
+            corr_img_all_r = corr_img_all.reshape(patch_size[0],patch_size[1],-1,order=data_order);
 
             #Currently using rigid mask
             print("making dynamic support updates")
-            mask_a_rigid = make_mask_dynamic(corr_img_all_r, corr_th_fix, mask_ab.cpu().to_dense().numpy())
+            mask_a_rigid = make_mask_dynamic(corr_img_all_r, corr_th_fix, mask_ab.cpu().to_dense().numpy().astype('int'), data_order=data_order)
             mask_a_rigid_scipy = scipy.sparse.csr_matrix(mask_a_rigid)
             mask_ab = torch_sparse.tensor.from_scipy(mask_a_rigid_scipy).float().to(device)
 
             ## Now we delete components based on whether they have a 0 residual corr img with their supports or not...
             mask_ab_corr = mask_a_rigid_scipy.multiply(corr_img_all)
             mask_ab_corr = np.array((mask_ab_corr > corr_th_del).sum(axis=0))
-            mask_ab_corr = torch.from_numpy(mask_ab_corr).float().squeeze()
+            mask_ab_corr = torch.from_numpy(mask_ab_corr).float().squeeze().to(device)
             temp = (mask_ab_corr == 0)
             if torch.sum(temp):
                 print("we are at the delete step... corr img is {}".format(corr_th_del))
-                a, c, corr_img_all_reg, corr_img_all, mask_ab, num_list = delete_comp(a, c, corr_img_all_reg, corr_img_all, mask_ab, num_list, temp, "zero mask!", plot_en, (d1,d2), order="F");
+                a, c, corr_img_all_reg, corr_img_all, mask_ab, num_list = delete_comp(a, c, corr_img_all_reg, corr_img_all, mask_ab, num_list, temp, "zero mask!", plot_en, (d1,d2), order=data_order);
 
             #Do this different when pytorch_sparse implements scipy
             a_scipy = a.to_scipy().tocsr()
@@ -2944,14 +2855,12 @@ def update_AC_bg_l2_Y_ring_lowrank(U_sparse, R, V, V_orig,r,dims, a, c, b, patch
             a = torch_sparse.tensor.from_scipy(a_scipy).float().to(device)
             
             print("merging components")
-            if model is None:
-                #TODO: Eliminate the need for moving a and c off GPU
-                a = a.cpu().to_dense().numpy()
-                c = c.cpu().numpy()
-                rlt = merge_components(a,c,corr_img_all_reg,num_list,\
-                                       patch_size,merge_corr_thr=merge_corr_thr,merge_overlap_thr=merge_overlap_thr,plot_en=plot_en);
-            else:
-                raise ValueError("Model based merge selection not currently supported") 
+            #TODO: Eliminate the need for moving a and c off GPU
+            a = a.cpu().to_dense().numpy()
+            c = c.cpu().numpy()
+            rlt = merge_components(a,c,corr_img_all_reg,num_list,\
+                                   patch_size,merge_corr_thr=merge_corr_thr,merge_overlap_thr=merge_overlap_thr,plot_en=plot_en, data_order=data_order);
+
             flag = isinstance(rlt, int);
             
             
@@ -2971,8 +2880,7 @@ def update_AC_bg_l2_Y_ring_lowrank(U_sparse, R, V, V_orig,r,dims, a, c, b, patch
             
         print("time: " + str(time.time()-start));
         
-    ##Move everything off GPU. 
-    ##TODO: Do all this compute on GPU too
+
     a = a.cpu().to_dense().numpy()
     c = c.cpu().numpy()
     b = b.cpu().numpy()
@@ -2992,5 +2900,3 @@ def update_AC_bg_l2_Y_ring_lowrank(U_sparse, R, V, V_orig,r,dims, a, c, b, patch
     num_list = num_list[brightness_rank];
 
     return a, c, b, X, W, res, corr_img_all_r, num_list
-
-     

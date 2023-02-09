@@ -187,6 +187,54 @@ def construct_sparse(U):
     return U_sparse
 
 
+## Functionality for expanding the rowspan of the V matrix
+
+def check_1s_span(V):
+    ones = torch.ones((V.shape[1], 1), device=V.device)
+    
+    output = torch.matmul(V,ones)
+    
+    if torch.allclose(torch.matmul(V.T,output), ones):
+        return True
+    
+    else:
+        return False
+
+def get_distance_from_V(V):
+    '''
+    V is a R x T matrix with orthonormal rows. We want to project the 1's vector (dimensions 1 x T) onto the rows of V, which is equivalent to
+    projecting the 1's vector (dimensions 1 x T - transposed) onto the columns of V^T
+    '''
+    
+    ones_vec = torch.ones((V.shape[1], 1), device=V.device)
+    
+    projection = torch.matmul(V.T, torch.matmul(V, ones_vec)) #V.T.dot(V.dot(ones_vec))
+    
+    perpendicular_comp = ones_vec - projection
+    
+    return perpendicular_comp.T
+
+def normalize(v):
+    norm = torch.linalg.norm(v, dim = 1)
+    if norm == 0: 
+        return v
+    return v / norm
+
+def add_1s_to_rowspan(V):
+    
+    if check_1s_span(V):
+        return (False, V)
+    
+    else: 
+        perp_comp = get_distance_from_V(V)
+        perp_comp = normalize(perp_comp)
+        
+    return_val = torch.vstack([V, perp_comp])
+    
+    return (True, return_val)
+
+
+
 
 
 ####Multiprocessing Functions
