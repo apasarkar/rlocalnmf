@@ -2340,21 +2340,43 @@ def spatial_temporal_ini_UV(U_sparse_torch, V_torch, dims, th, comps, idx, lengt
 
 
 
-def prune_zero_columns_UV(U, V):
+def PMD_setup_routine(U_sparse, V, R, plot_en, device):
     '''
-    Prunes unused columns of U (and corresponding rows of V)
-    
+    Inputs: 
+        V: torch.Tensor of shape (R1, T) where R1 is the rank of the PMD decomposition
+        R: torch.Tensor of shape (R1, R1) where R1 is the rank of the PMD decomposition
+        plot_en: boolean. Indicates whether plotting functionality is going to be used in this pipeline
+        device: 'cpu' or 'cuda' depending on which device computation should be run 
+            
+    Outputs: 
+        R: torch.Tensor of shape (roughly) (R1, R2), where R1 is the rank of the PMD decomposition, and R2 is either equal to R1 or R1 + 1 depending on whether we decided to add another orthonormal basis vector to V
+        V: torch.Tensor of shape (R2,T)
+        V_PMD: torch.Tensor of shape 
+        U_used: None if plot_en is False, otherwise it is U_sparse multiplied by R
     '''
-    print('the original shape of U and V is {} and {}'.format(U.shape, V.shape))
-    col_count = np.sum((U != 0), axis = 0)
-    print("the shape of col_count is {}".format(col_count.shape))
-    keeps = np.argwhere(col_count != 0)
-    U_new = U[:, keeps].squeeze()
-    V_new = V[keeps, :].squeeze()
     
-    print("the new shapes of U and V are {} and {}".format(U_new.shape, V_new.shape))
+    pad_flag, V = add_1s_to_rowspan(V)
+    if pad_flag: 
+        R = torch.hstack([R, torch.zeros([R.shape[1], 1], device=R.device)])
+        
+    #Placeholder code to make sure things work for now
+    V_PMD = torch.matmul(R, V)
     
-    return U_new, V_new    
+    V_PMD = V_PMD.to(device)
+    V = V.to(device)
+    U_sparse = U_sparse.to(device)
+    R = R.to(device)
+    
+    ##TODO: Eliminate U_used entirely and use (U_sparse, R instead)
+    if plot_en:
+        U_used = torch_sparse.matmul(U_sparse.cpu(), R.cpu()).numpy()
+    else:
+        U_used = None
+
+        
+    return U_sparse, R, V, V_PMD, U_used
+
+
     
 def demix_whole_data_robust_ring_lowrank(U_sparse,R,V,data_shape, data_order="F", r=10, cut_off_point=[0.95,0.9], length_cut=[15,10], th=[2,1], pass_num=1, residual_cut = [0.6,0.6],
                     corr_th_fix=0.31, corr_th_fix_sec = 0.4, corr_th_del = 0.2, switch_point=10, max_allow_neuron_size=0.3, merge_corr_thr=0.6, merge_overlap_thr=0.6, num_plane=1, patch_size=[100,100],
@@ -2432,28 +2454,12 @@ def demix_whole_data_robust_ring_lowrank(U_sparse,R,V,data_shape, data_order="F"
         
     '''
     
-    #Move tensors to device and adjust rowspan of V
+    #Setup variables and R/V 
     d1, d2, T = data_shape
     dims = (d1, d2, T)
     order = data_order
-    pad_flag, V = add_1s_to_rowspan(V)
-
-    
-    if pad_flag: 
-        R = torch.hstack([R, torch.zeros([R.shape[1], 1], device=R.device)])
+    U_sparse, R, V, V_PMD, U_used = PMD_setup_routine(U_sparse, V, R, plot_en, device) 
         
-    #Placeholder code to make sure things work for now
-    V_PMD = torch.matmul(R, V)
-    
-    V_PMD = V_PMD.to(device)
-    V = V.to(device)
-    U_sparse = U_sparse.to(device)
-    R = R.to(device)
-    
-    ##TODO: Eliminate U_used entirely and use (U_sparse, R instead)
-    if plot_en:
-        U_used = torch_sparse.matmul(U_sparse, R).cpu().numpy()
-    
     superpixel_rlt = [];
     
     ii = 0;
@@ -2463,6 +2469,35 @@ def demix_whole_data_robust_ring_lowrank(U_sparse,R,V,data_shape, data_order="F"
         #######
         ### Initialize components
         #######
+        
+        
+        #### START OF FUNC2: LOCALNMF INIT
+        '''
+        API: 
+            Inputs (define variables here)
+                - U_sparse: torch_sparse.Tensor, dims (d1*d2, R)
+                - V_PMD: torch.Tensor, dims (R, T)
+                - patch_size: tuple (p1, p2) of integers. describes patches into which FOV is subdivided when finding pure superpixels (via SPA) 
+                - data_order: "F" or "C" depending on how the field of view "collapsed" into 1D vectors
+                - dims: tuple containing (d1, d2, T), the dimensions of the data
+                - cut_off_point: float between 0 and 1. Correlation thresholds used 
+            in the superpixelization process
+                - length_cut: integer. Minimum allowed sizes of superpixels
+                - th: integer. MAD threshold factor
+                - batch_size: integer. Batch size for various memory-constrained GPU calculations
+                - pseudo: the robust correlation threshold
+                - device: string, either 'cpu' or 'cuda'
+            
+                Optional parameters: 
+                - a: np.ndarray, shape (d1*d2, K)
+                - c: np.ndarray, shape (T, K)
+            
+            Outputs
+                - a. torch_sparse.Tensor, shape (d1*d2, K) where d1, d2 are the FOV dimensions and K is the number of signals identified
+                - c. torch_sparse.Tensor, shape (T,  K) where
+                - mask_ab. either None or torch_sparse.Tensor of shape same as "a"
+                - b: torch.Tensor, shape(d1*d2) 
+        '''
                 
         start = time.time();
         if init[ii] == 'lnmf':   
@@ -2550,6 +2585,7 @@ def demix_whole_data_robust_ring_lowrank(U_sparse,R,V,data_shape, data_order="F"
         else:
             raise ValueError("Invalid initialization scheme provided")
         
+        ## END OF FUNC2
 
         
         print("start " + str(ii+1) + " pass iteration!")
