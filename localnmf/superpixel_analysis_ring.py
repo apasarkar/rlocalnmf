@@ -37,7 +37,7 @@ from localnmf.constrained_ring.cnmf_e import ring_model, ring_model_update, ring
 from localnmf import regression_update
 
 
-# ----- utility functions (to decimate data and estimate noise level) -----
+# ----- utility functions (to decimate data and estimate noise level) ----
 #########################################################################################################
 
 
@@ -854,7 +854,7 @@ def pure_superpixel_corr_compare_plot(connect_mat_1, unique_pix, pure_pix, brigh
     ax2.title.set_fontweight("bold")
     plt.tight_layout()
     plt.show();
-    return fig
+    return fig, connect_mat_1_pure
 
 
 def show_img(ax, img,vmin=None,vmax=None):
@@ -2454,12 +2454,14 @@ def superpixel_init(U_sparse, R, V, V_PMD, patch_size, num_plane, data_order, di
     #Plot superpixel correlation image
     if plot_en:
         Cnt = local_correlations_fft_UV(U_used, V.cpu().numpy(), dims, order=data_order);
-        pure_superpixel_corr_compare_plot(connect_mat_1, unique_pix, pure_pix, brightness_rank_sup, brightness_rank, Cnt, text, order=data_order);
+        _, superpixel_img = pure_superpixel_corr_compare_plot(connect_mat_1, unique_pix, pure_pix, brightness_rank_sup, brightness_rank, Cnt, text, order=data_order);
+    else:
+        superpixel_img = None
         
     superpixel_dict = {'connect_mat_1':connect_mat_1, 'pure_pix':pure_pix,\
                        'unique_pix':unique_pix, 'brightness_rank':brightness_rank, 'brightness_rank_sup':brightness_rank_sup}
 
-    return a,mask_a,c,b,superpixel_dict
+    return a,mask_a,c,b,superpixel_dict, superpixel_img
 
 
 
@@ -2593,9 +2595,9 @@ def demix_whole_data_robust_ring_lowrank(U_sparse,R,V,data_shape, data_order="F"
         #######       
         if init[ii] == 'lnmf':   
             if ii == 0:
-                a, mask_a, c, b, output_dictionary = superpixel_init(U_sparse,R,V, V_PMD, patch_size, num_plane, data_order, dims, cut_off_point[ii], residual_cut[ii], length_cut[ii], th[ii], batch_size, pseudo_2[ii], device, U_used, text = text, plot_en = plot_en, a = None, c = None)
+                a, mask_a, c, b, output_dictionary, superpixel_image = superpixel_init(U_sparse,R,V, V_PMD, patch_size, num_plane, data_order, dims, cut_off_point[ii], residual_cut[ii], length_cut[ii], th[ii], batch_size, pseudo_2[ii], device, U_used, text = text, plot_en = plot_en, a = None, c = None)
             elif ii > 0:
-                a, mask_a, c, b, output_dictionary = superpixel_init(U_sparse,R,V, V_PMD, patch_size, num_plane, data_order, dims, cut_off_point[ii],  residual_cut[ii], length_cut[ii], th[ii], batch_size, pseudo_2[ii], device, U_used, text=text, plot_en = plot_en, a = a, c = c)
+                a, mask_a, c, b, output_dictionary, superpixel_image = superpixel_init(U_sparse,R,V, V_PMD, patch_size, num_plane, data_order, dims, cut_off_point[ii],  residual_cut[ii], length_cut[ii], th[ii], batch_size, pseudo_2[ii], device, U_used, text=text, plot_en = plot_en, a = a, c = c)
                 
             superpixel_rlt.append(output_dictionary)
                 
