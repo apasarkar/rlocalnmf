@@ -2340,6 +2340,129 @@ def spatial_temporal_ini_UV(U_sparse_torch, V_torch, dims, th, comps, idx, lengt
 
 
 
+def superpixel_init(U_sparse, R, V, V_PMD, patch_size, num_plane, data_order, dims, cut_off_point, residual_cut, length_cut, th, batch_size, pseudo, device, U_used, text =True, plot_en = False, a = None, c = None):
+    '''
+    API: 
+        Inputs (define variables here)
+            - U_sparse: torch_sparse.Tensor, dims (d1*d2, R)
+            - R: torch.Tensor, dims (R1, R2) where R = R1 and R2 is either R1 + 1 or R1
+            - V: torch.Tensor, dims (R2, T)
+            - V_PMD: torch.Tensor, dims (R2, T)
+            - patch_size: tuple (p1, p2) of integers. describes patches into which FOV is subdivided when finding pure superpixels (via SPA) 
+            - num_plane: number of planes to demix. Only valid value is 1 (for now) 
+            - data_order: "F" or "C" depending on how the field of view "collapsed" into 1D vectors
+            - dims: tuple containing (d1, d2, T), the dimensions of the data
+            - cut_off_point: float between 0 and 1. Correlation thresholds used 
+        in the superpixelization process
+            - residual_cut: list of values between 0 and 1. Length of list = pass_num
+                sqrt(1 - r_sqare of SPA)
+                Standard value = 0.6
+            - length_cut: integer. Minimum allowed sizes of superpixels
+            - th: integer. MAD threshold factor
+            - batch_size: integer. Batch size for various memory-constrained GPU calculations
+            - pseudo: the robust correlation threshold
+            - device: string, either 'cpu' or 'cuda'
+            - U_used: None or torch.Tensor on CPU. Used to do some basic plotting/visualization, if plot_en is True
+
+            Optional parameters: 
+            - text: Flag (boolean). Indicates whether some text is displayed in the plotting function
+            - plot_en: Flag (boolean). Used to determine whether or not we plot some results here 
+            - a: np.ndarray, shape (d1*d2, K)
+            - c: np.ndarray, shape (T, K)
+
+        Outputs
+            - a. torch_sparse.Tensor, shape (d1*d2, K) where d1, d2 are the FOV dimensions and K is the number of signals identified
+            - mask_ab. either None or torch_sparse.Tensor of shape same as "a"
+            - c. torch_sparse.Tensor, shape (T,  K) where
+            - b: torch.Tensor, shape(d1*d2) 
+    '''
+    assert num_plane == 1, 'number of planes to demix must be 1' 
+    
+    if a is None and c is None: 
+        first_init_flag = True
+    elif a is not None and c is not None: 
+        first_init_flag = False
+    else:
+        raise ValueError("Invalid configuration of c and a values were provided") 
+    ## cut image into small parts to find pure superpixels ##
+
+    patch_height = patch_size[0];
+    patch_width = patch_size[1];
+    height_num = int(np.ceil(dims[0]/patch_height));  ########### if need less data to find pure superpixel, change dims[0] here #################
+    width_num = int(np.ceil(dims[1]/(patch_width*num_plane)));
+    num_patch = height_num*width_num;
+    patch_ref_mat = np.array(range(num_patch)).reshape(height_num, width_num, order=data_order);
+
+    if num_plane > 1:
+        raise ValueError('num_plane > 2 (higher dimensional data) not supported!')
+    else:
+        print("find superpixels!")
+
+        if first_init_flag:
+            connect_mat_1, idx, comps, permute_col = find_superpixel_UV(U_sparse, V_PMD, dims, cut_off_point,length_cut, th, order=data_order, eight_neighbours=True, device = device, batch_size = batch_size, pseudo=pseudo); 
+        else:
+            connect_mat_1, idx, comps, permute_col = find_superpixel_UV(U_sparse, V_PMD, dims, cut_off_point,length_cut, th, order=data_order, eight_neighbours=True, device = device, a=a, c=c, batch_size = batch_size, pseudo=pseudo);
+
+    if first_init_flag:
+        # print("the type of U_sparse before this step is {}".format(type(U_sparse)))
+        c_ini, a_ini = spatial_temporal_ini_UV(U_sparse, V_PMD, dims, th, comps, idx, length_cut, device=device)
+    else:
+        c_ini, a_ini = spatial_temporal_ini_UV(U_sparse, V_PMD, dims, th, comps, idx, length_cut, a = a, c = c, device=device)
+
+
+
+    unique_pix = np.asarray(np.sort(np.unique(connect_mat_1)),dtype="int");
+    unique_pix = unique_pix[np.nonzero(unique_pix)];
+    brightness_rank_sup = order_superpixels(permute_col, unique_pix, a_ini, c_ini);
+    pure_pix = [];
+
+    start = time.time();
+    print("find pure superpixels!")
+    for kk in range(num_patch):
+        pos = np.where(patch_ref_mat==kk);
+        up=pos[0][0]*patch_height;
+        down=min(up+patch_height, dims[0]);
+        left=pos[1][0]*patch_width;
+        right=min(left+patch_width, dims[1]);
+        unique_pix_temp, M = search_superpixel_in_range((connect_mat_1.reshape(dims[0],int(dims[1]/num_plane),num_plane,order=data_order))[up:down,left:right], permute_col, c_ini);
+        pure_pix_temp = fast_sep_nmf(M, M.shape[1], residual_cut);
+        if len(pure_pix_temp)>0:
+            pure_pix = np.hstack((pure_pix, unique_pix_temp[pure_pix_temp]));
+    pure_pix = np.unique(pure_pix);
+
+
+    start = time.time();
+    print("prepare iteration!")
+    mask_a=None ## Disable the mask after first pass over data
+    if not first_init_flag:
+        a_ini, c_ini, brightness_rank = prepare_iteration_UV((dims[0], dims[1], dims[2]), connect_mat_1, permute_col, pure_pix, a_ini, c_ini);
+        a = np.hstack((a, a_ini));
+        c = np.hstack((c, c_ini));
+        a = torch_sparse.tensor.from_scipy(scipy.sparse.coo_matrix(a)).float().to(device)
+        c = torch.from_numpy(c).float().to(device)
+        uv_mean = get_mean_data(U_sparse, V, R=R)
+        b = regression_update.baseline_update(uv_mean, a, c)
+    else:
+        a, c, brightness_rank = prepare_iteration_UV((dims[0], dims[1], dims[2]), connect_mat_1, permute_col, pure_pix, a_ini, c_ini, more=True)
+        a = torch_sparse.tensor.from_scipy(scipy.sparse.coo_matrix(a)).float().to(device)
+        c = torch.from_numpy(c).float().to(device)
+        uv_mean = get_mean_data(U_sparse, V, R=R)
+        b = regression_update.baseline_update(uv_mean, a, c)
+
+    assert a.sparse_sizes()[1] > 0, 'Superpixels did not identify any components, re-run with different parameters before proceeding'
+
+    #Plot superpixel correlation image
+    if plot_en:
+        Cnt = local_correlations_fft_UV(U_used, V.cpu().numpy(), dims, order=data_order);
+        pure_superpixel_corr_compare_plot(connect_mat_1, unique_pix, pure_pix, brightness_rank_sup, brightness_rank, Cnt, text, order=data_order);
+        
+    superpixel_dict = {'connect_mat_1':connect_mat_1, 'pure_pix':pure_pix,\
+                       'unique_pix':unique_pix, 'brightness_rank':brightness_rank, 'brightness_rank_sup':brightness_rank_sup}
+
+    return a,mask_a,c,b,superpixel_dict
+
+
+
 def PMD_setup_routine(U_sparse, V, R, plot_en, device):
     '''
     Inputs: 
@@ -2467,116 +2590,15 @@ def demix_whole_data_robust_ring_lowrank(U_sparse,R,V,data_shape, data_order="F"
         print("start " + str(ii+1) + " pass!");
                 
         #######
-        ### Initialize components
-        #######
-        
-        
-        #### START OF FUNC2: LOCALNMF INIT
-        '''
-        API: 
-            Inputs (define variables here)
-                - U_sparse: torch_sparse.Tensor, dims (d1*d2, R)
-                - V_PMD: torch.Tensor, dims (R, T)
-                - patch_size: tuple (p1, p2) of integers. describes patches into which FOV is subdivided when finding pure superpixels (via SPA) 
-                - data_order: "F" or "C" depending on how the field of view "collapsed" into 1D vectors
-                - dims: tuple containing (d1, d2, T), the dimensions of the data
-                - cut_off_point: float between 0 and 1. Correlation thresholds used 
-            in the superpixelization process
-                - length_cut: integer. Minimum allowed sizes of superpixels
-                - th: integer. MAD threshold factor
-                - batch_size: integer. Batch size for various memory-constrained GPU calculations
-                - pseudo: the robust correlation threshold
-                - device: string, either 'cpu' or 'cuda'
-            
-                Optional parameters: 
-                - a: np.ndarray, shape (d1*d2, K)
-                - c: np.ndarray, shape (T, K)
-            
-            Outputs
-                - a. torch_sparse.Tensor, shape (d1*d2, K) where d1, d2 are the FOV dimensions and K is the number of signals identified
-                - c. torch_sparse.Tensor, shape (T,  K) where
-                - mask_ab. either None or torch_sparse.Tensor of shape same as "a"
-                - b: torch.Tensor, shape(d1*d2) 
-        '''
-                
-        start = time.time();
+        ### Initialization method
+        #######       
         if init[ii] == 'lnmf':   
-            ## cut image into small parts to find pure superpixels ##
-
-            patch_height = patch_size[0];
-            patch_width = patch_size[1];
-            height_num = int(np.ceil(dims[0]/patch_height));  ########### if need less data to find pure superpixel, change dims[0] here #################
-            width_num = int(np.ceil(dims[1]/(patch_width*num_plane)));
-            num_patch = height_num*width_num;
-            patch_ref_mat = np.array(range(num_patch)).reshape(height_num, width_num, order=data_order);
-    
-            if num_plane > 1:
-                raise ValueError('num_plane > 2 (higher dimensional data) not supported!')
-            else:
-                print("find superpixels!")
-                
-                if ii == 0:
-                    connect_mat_1, idx, comps, permute_col = find_superpixel_UV(U_sparse, V_PMD, dims, cut_off_point[ii],length_cut[ii], th[ii], order=data_order, eight_neighbours=True, device = device, batch_size = batch_size, pseudo=pseudo_2[ii]); 
-                else:
-                    connect_mat_1, idx, comps, permute_col = find_superpixel_UV(U_sparse, V_PMD, dims, cut_off_point[ii],length_cut[ii], th[ii], order=data_order, eight_neighbours=True, device = device, a=a, c=c, batch_size = batch_size, pseudo=pseudo_2[ii]);
-            print("time: " + str(time.time()-start));
-
-            start = time.time();
-            print("rank 1 svd!")
             if ii == 0:
-                # print("the type of U_sparse before this step is {}".format(type(U_sparse)))
-                c_ini, a_ini = spatial_temporal_ini_UV(U_sparse, V_PMD, dims, th[ii], comps, idx, length_cut[ii], device=device)
-            else:
-                c_ini, a_ini = spatial_temporal_ini_UV(U_sparse, V_PMD, dims, th[ii], comps, idx, length_cut[ii], a = a, c = c, device=device)
+                a, mask_a, c, b, output_dictionary = superpixel_init(U_sparse,R,V, V_PMD, patch_size, num_plane, data_order, dims, cut_off_point[ii], residual_cut[ii], length_cut[ii], th[ii], batch_size, pseudo_2[ii], device, U_used, text = text, plot_en = plot_en, a = None, c = None)
+            elif ii > 0:
+                a, mask_a, c, b, output_dictionary = superpixel_init(U_sparse,R,V, V_PMD, patch_size, num_plane, data_order, dims, cut_off_point[ii],  residual_cut[ii], length_cut[ii], th[ii], batch_size, pseudo_2[ii], device, U_used, text=text, plot_en = plot_en, a = a, c = c)
                 
-            
-            
-            unique_pix = np.asarray(np.sort(np.unique(connect_mat_1)),dtype="int");
-            unique_pix = unique_pix[np.nonzero(unique_pix)];
-            brightness_rank_sup = order_superpixels(permute_col, unique_pix, a_ini, c_ini);
-            pure_pix = [];
-
-            start = time.time();
-            print("find pure superpixels!")
-            for kk in range(num_patch):
-                pos = np.where(patch_ref_mat==kk);
-                up=pos[0][0]*patch_height;
-                down=min(up+patch_height, dims[0]);
-                left=pos[1][0]*patch_width;
-                right=min(left+patch_width, dims[1]);
-                unique_pix_temp, M = search_superpixel_in_range((connect_mat_1.reshape(dims[0],int(dims[1]/num_plane),num_plane,order=data_order))[up:down,left:right], permute_col, c_ini);
-                pure_pix_temp = fast_sep_nmf(M, M.shape[1], residual_cut[ii]);
-                if len(pure_pix_temp)>0:
-                    pure_pix = np.hstack((pure_pix, unique_pix_temp[pure_pix_temp]));
-            pure_pix = np.unique(pure_pix);
-            
-            
-            start = time.time();
-            print("prepare iteration!")
-            mask_a=None ## Disable the mask after first pass over data
-            if ii > 0:
-                a_ini, c_ini, brightness_rank = prepare_iteration_UV((dims[0], dims[1], T), connect_mat_1, permute_col, pure_pix, a_ini, c_ini);
-                a = np.hstack((a, a_ini));
-                c = np.hstack((c, c_ini));
-                a = torch_sparse.tensor.from_scipy(scipy.sparse.coo_matrix(a)).float().to(device)
-                c = torch.from_numpy(c).float().to(device)
-                uv_mean = get_mean_data(U_sparse, V, R=R)
-                b = regression_update.baseline_update(uv_mean, a, c)
-            elif ii == 0:
-                a, c, brightness_rank = prepare_iteration_UV((dims[0], dims[1], T), connect_mat_1, permute_col, pure_pix, a_ini, c_ini, more=True)
-                a = torch_sparse.tensor.from_scipy(scipy.sparse.coo_matrix(a)).float().to(device)
-                c = torch.from_numpy(c).float().to(device)
-                uv_mean = get_mean_data(U_sparse, V, R=R)
-                b = regression_update.baseline_update(uv_mean, a, c)
-            
-            assert a.sparse_sizes()[1] > 0, 'Superpixels did not identify any components, re-run with different parameters before proceeding'
-            
-            #Plot superpixel correlation image
-            if plot_en:
-                Cnt = local_correlations_fft_UV(U_used, V.cpu().numpy(), dims, order=data_order);
-                pure_superpixel_corr_compare_plot(connect_mat_1, unique_pix, pure_pix, brightness_rank_sup, brightness_rank, Cnt, text, order=data_order);
-            
-            print("time: " + str(time.time()-start));
+            superpixel_rlt.append(output_dictionary)
                 
         elif init[ii]=='custom' and ii == 0:
             assert custom_init['a'].shape[2] > 0, 'Must provide at least 1 spatial footprint' 
@@ -2585,23 +2607,16 @@ def demix_whole_data_robust_ring_lowrank(U_sparse,R,V,data_shape, data_order="F"
         else:
             raise ValueError("Invalid initialization scheme provided")
         
-        ## END OF FUNC2
-
         
-        print("start " + str(ii+1) + " pass iteration!")
+        ## TODO: Get rid of this convention - not really useful 
         if ii == pass_num - 1:
             maxiter = max_iter_fin;
         else:
             maxiter=max_iter;
-        start = time.time();
-        
-        
-        print("pre update AC")
 
         #######
         ## Run demixing pipeline
         #######
-        print("BEFORE ENTERINIG DEMIX THE PATCH SIZE IS {}".format(patch_size))
 
         with torch.no_grad():
 
@@ -2609,15 +2624,8 @@ def demix_whole_data_robust_ring_lowrank(U_sparse,R,V,data_shape, data_order="F"
                                                                                        a, c, b, dims,
                                             corr_th_fix, corr_th_fix_sec, corr_th_del, switch_point, maxiter=maxiter, tol=1e-8, update_after=update_after,
                                             merge_corr_thr=merge_corr_thr,merge_overlap_thr=merge_overlap_thr, num_plane=num_plane, plot_en=plot_en, max_allow_neuron_size=max_allow_neuron_size, skips=skips, update_type=update_type, mask_a=mask_a,sb=sb, pseudo_corr = pseudo_corr[ii],  batch_size = batch_size, plot_debug = plot_debug, denoise = denoise, data_order=data_order);
-            print("time: " + str(time.time()-start));
             torch.cuda.empty_cache() #Test this as placeholder for now to avoid GPU memory getting clogged
-
-        
-        print("POST update AC")
-        
-        
-        if init[ii] == 'lnmf':
-            superpixel_rlt.append({'connect_mat_1':connect_mat_1, 'pure_pix':pure_pix, 'unique_pix':unique_pix, 'brightness_rank':brightness_rank, 'brightness_rank_sup':brightness_rank_sup});
+            
         
         #If multi-pass, save results from first pass
         if pass_num > 1 and ii == 0:
@@ -2628,6 +2636,8 @@ def demix_whole_data_robust_ring_lowrank(U_sparse,R,V,data_shape, data_order="F"
 
     c_tf = [];
     start = time.time();
+    
+    #TODO: Remove the trend filter option
     if TF:
         sigma = noise_estimator(c.T);
         sigma *= fudge_factor
