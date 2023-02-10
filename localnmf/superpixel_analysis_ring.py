@@ -2503,8 +2503,7 @@ def PMD_setup_routine(U_sparse, V, R, plot_en, device):
     
 def demix_whole_data_robust_ring_lowrank(U_sparse,R,V,data_shape, data_order="F", r=10, cut_off_point=[0.95,0.9], length_cut=[15,10], th=[2,1], pass_num=1, residual_cut = [0.6,0.6],
                     corr_th_fix=0.31, corr_th_fix_sec = 0.4, corr_th_del = 0.2, switch_point=10, max_allow_neuron_size=0.3, merge_corr_thr=0.6, merge_overlap_thr=0.6, num_plane=1, patch_size=[100,100],
-                    plot_en=False, text=True, max_iter=35, max_iter_fin=50,
-                    update_after=4, pseudo_1=[1/4, 1/4], pseudo_2=[5, 5], skips=2, update_type="Constant", init = ['lnmf', 'lnmf', 'lnmf'], custom_init = {}, sb=True, pseudo_corr = [0,0], device = 'cpu', batch_size = 10000, plot_debug = False, denoise = False):
+                    plot_en=False, text=True, maxiter=35, update_after=4, pseudo_1=[1/4, 1/4], pseudo_2=[5, 5], skips=2, update_type="Constant", init = ['lnmf', 'lnmf', 'lnmf'], custom_init = {}, sb=True, pseudo_corr = [0,0], device = 'cpu', batch_size = 10000, plot_debug = False, denoise = False):
     '''
     This function is a low-rank pipeline with robust correlation measures and a ring background model. The low-rank implementation is in the HALS updates.
     Args:
@@ -2608,12 +2607,6 @@ def demix_whole_data_robust_ring_lowrank(U_sparse,R,V,data_shape, data_order="F"
             raise ValueError("Invalid initialization scheme provided")
         
         
-        ## TODO: Get rid of this convention - not really useful 
-        if ii == pass_num - 1:
-            maxiter = max_iter_fin;
-        else:
-            maxiter=max_iter;
-
         #######
         ## Run demixing pipeline
         #######
