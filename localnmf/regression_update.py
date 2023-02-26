@@ -68,7 +68,7 @@ def project_U_HALS(U_sparse, U_sparse_inverse, W, vector, a_sparse):
     
     return UU_invUtWv
     
-def spatial_update_HALS(U_sparse, V, W, X, a_sparse, c, b, U_sparse_inner=None, mask_ab = None):
+def spatial_update_HALS(U_sparse, V, W, X, a_sparse, c, b, s, U_sparse_inner=None, mask_ab = None):
     '''
     Computes a spatial HALS updates: 
     Params: 
@@ -98,8 +98,8 @@ def spatial_update_HALS(U_sparse, V, W, X, a_sparse, c, b, U_sparse_inner=None, 
         U_sparse_inner = torch.inverse(torch_sparse.matmul(U_sparse.t(), U_sparse).to_dense())
     
     #Init s such that bsV = static background
-    s = torch.zeros([1, V.shape[0]], device=device)
-    s[:, -1] = -1
+    # s = torch.zeros([1, V.shape[0]], device=device)
+    # s[:, -1] = -1
     
     #Init s such that bsV = static background
     C_prime = torch.matmul(c.t(), c)
@@ -190,7 +190,7 @@ def left_project_U_HALS(a_sparse, U_sparse, U_sparse_inverse, W):
     return final
     
     
-def temporal_update_HALS(U_sparse, V, W, X, a_sparse, c, b, U_sparse_inner=None):
+def temporal_update_HALS(U_sparse, V, W, X, a_sparse, c, b, s, U_sparse_inner=None):
     '''
     Inputs: 
         U_sparse: (d1*d2, R)-shaped torch_sparse.tensor
@@ -201,6 +201,7 @@ def temporal_update_HALS(U_sparse, V, W, X, a_sparse, c, b, U_sparse_inner=None)
         c: (T, k)-shaped torch.Tensor
         b: (d1*d2, 1)-shaped torch.Tensor
         U_sparse_inner: (R, R)-shaped torch.Tensor
+        
         
     Returns: 
         c: (T, k)-shaped np.ndarray. Updated temporal components
@@ -214,8 +215,8 @@ def temporal_update_HALS(U_sparse, V, W, X, a_sparse, c, b, U_sparse_inner=None)
 
     
     #Init s such that bsV = static background
-    s = torch.zeros([1, V.shape[0]], device=device)
-    s[:, -1] = -1
+    # s = torch.zeros([1, V.shape[0]], device=device)
+    # s[:, -1] = -1
     
     
     ##Precompute quantities used throughout all iterations

@@ -887,13 +887,18 @@ def delete_comp(a, c, corr_img_all_reg, corr_img_all, mask_a, num_list, temp, wo
     print(word);
     pos = torch.nonzero(temp)[:, 0]
     neg = torch.nonzero(temp == 0)[:, 0]
+    if int(torch.sum(temp).cpu()) == a.sparse_sizes()[1]:
+        raise ValueError("All Components are slated to be deleted")
     
     pos_for_cpu = pos.cpu().numpy()
     neg_for_cpu = neg.cpu().numpy()
     print("delete components" + str(num_list[pos_for_cpu]+1));
     corr_img_all_reg_r = corr_img_all_reg.reshape((fov_dims[0], fov_dims[1], -1), order = order)
     if plot_en:
-        spatial_comp_plot(a[:,pos_for_cpu], corr_img_all_reg_r[:,:,pos_for_cpu], num_list=num_list[pos_for_cpu], ini=False);
+        a_used = a.cpu().to_dense().numpy()
+        spatial_comp_plot(a_used[:,pos_for_cpu],\
+                          corr_img_all_reg_r[:,:,pos_for_cpu],\
+                          num_list=num_list[pos_for_cpu], ini=False, order=order);
     corr_img_all_reg = np.delete(corr_img_all_reg, pos_for_cpu, axis=1);
     corr_img_all = np.delete(corr_img_all, pos_for_cpu, axis = 1);
     mask_a = torch_sparse.index_select(mask_a, 1, neg)
@@ -1031,9 +1036,9 @@ def temporal_comp_plot(c, num_list=None, ini = False):
     return fig
 
 
-def spatial_comp_plot(a, corr_img_all_r, num_list=None, ini=False):
-    a = np.array(a.cpu().to_scipy().todense())
-    num = a.shape[1];
+def spatial_comp_plot(a, corr_img_all_r, num_list=None, ini=False, order="C"):
+    print("DISPLAYING SOME OF THE COMPONENTS")
+    num = min(3, a.shape[1]);
     patch_size = corr_img_all_r.shape[:2];
     scale = np.maximum(1, (corr_img_all_r.shape[1]/corr_img_all_r.shape[0]));
     fig = plt.figure(figsize=(8*scale,4*num));
@@ -1041,7 +1046,7 @@ def spatial_comp_plot(a, corr_img_all_r, num_list=None, ini=False):
         num_list = np.arange(num);
     for ii in range(num):
         plt.subplot(num,2,2*ii+1);
-        plt.imshow(a[:,ii].reshape(patch_size,order="F"),cmap='nipy_spectral_r');
+        plt.imshow(a[:,ii].reshape(patch_size,order=order),cmap='nipy_spectral_r');
         plt.ylabel(str(num_list[ii]+1),fontsize=15,fontweight="bold");
         if ii==0:
             if ini:
@@ -1845,7 +1850,7 @@ def vcorrcoef_UV_noise(U_sparse, R, V, c_orig, pseudo = 0, batch_size = 1000, to
     fin_corr = torch.nan_to_num(fin_corr, nan = 0, posinf = 0, neginf = 0)
     return fin_corr.cpu().numpy()    
 
-
+##TODO: REMOVE THIS
 def merge_components_priors(a,c,corr_img_all_r,num_list,patch_size,merge_corr_thr=0.6,merge_overlap_thr=0.6,plot_en=False, dims = (64,64,3600), \
                            frame_len = 25, confidence = 0.99, spatial_thres = [0.8,0.8], allowed_overlap = 30, model = None, plot_mnmf = True):
     """ want to merge components whose correlation images are highly overlapped,
@@ -2836,6 +2841,8 @@ def update_AC_bg_l2_Y_ring_lowrank(U_sparse, R, V, V_orig,r,dims, a, c, b, patch
     #Precompute VV^t for X updates
     VVt = torch.matmul(V, V.t()) #This is for the orthogonal V
     VVt_orig = torch.matmul(V_orig, V_orig.t()) #This is for the original V
+    s = regression_update.estimate_X(torch.ones([1, T], device=device).t(), V_orig, VVt_orig) #sV is the vector of 1's
+    
     U_sparse_inner = torch.inverse(torch_sparse.matmul(U_sparse.t(), U_sparse).to_dense())
     a_summand = torch.ones((d1*d2, 1)).to(device)
 
@@ -2956,7 +2963,7 @@ def update_AC_bg_l2_Y_ring_lowrank(U_sparse, R, V, V_orig,r,dims, a, c, b, patch
         
         #Approximate c as XV for some X:
         X = regression_update.estimate_X(c, V_orig, VVt_orig)       
-        a = regression_update.spatial_update_HALS(U_sparse, V_orig, W, X, a, c, b, U_sparse_inner=U_sparse_inner, mask_ab=mask_ab.t())
+        a = regression_update.spatial_update_HALS(U_sparse, V_orig, W, X, a, c, b, s, U_sparse_inner=U_sparse_inner, mask_ab=mask_ab.t())
         
 
         ### Delete Bad Components
@@ -2972,7 +2979,7 @@ def update_AC_bg_l2_Y_ring_lowrank(U_sparse, R, V, V_orig,r,dims, a, c, b, patch
             
         ###TEMPORAL UPDATE
         test_time = time.time()
-        c = regression_update.temporal_update_HALS(U_sparse, V_orig, W, X, a, c, b, U_sparse_inner=U_sparse_inner)
+        c = regression_update.temporal_update_HALS(U_sparse, V_orig, W, X, a, c, b, s, U_sparse_inner=U_sparse_inner)
         #Denoise 'c' components if desired
         if denoise[iters]:
             c = c.cpu().numpy()
@@ -2996,6 +3003,8 @@ def update_AC_bg_l2_Y_ring_lowrank(U_sparse, R, V, V_orig,r,dims, a, c, b, patch
             
             mask_ab = a.bool()
             corr_img_all_r = corr_img_all.reshape(patch_size[0],patch_size[1],-1,order=data_order);
+            
+            
 
             #Currently using rigid mask
             print("making dynamic support updates")
