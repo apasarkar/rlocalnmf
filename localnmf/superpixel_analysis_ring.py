@@ -2761,7 +2761,7 @@ def demix_whole_data_robust_ring_lowrank(U_sparse,R,V,data_shape, data_order="F"
         #If multi-pass, save results from first pass
         if pass_num > 1 and ii == 0:
             W_final = W.create_complete_ring_matrix(a)
-            rlt = {'a':a, 'c':c, 'b':b, "X":X, "W":W_final, 'res':res, 'corr_img_all_r':corr_img_all_r, 'num_list':num_list};
+            rlt = {'a':a, 'c':c, 'b':b, "X":X, "W":W_final, 'res':res, 'corr_img_all_r':corr_img_all_r, 'num_list':num_list, 'data_order': data_order, 'data_shape':(d1, d2, T)};
             a0 = a.copy();
         ii = ii+1;
 
@@ -2782,7 +2782,7 @@ def demix_whole_data_robust_ring_lowrank(U_sparse,R,V,data_shape, data_order="F"
         plt.show();
     
     W_final = W.create_complete_ring_matrix(a)
-    fin_rlt = {'a':a, 'c':c, 'b':b, "X":X, "W":W_final, 'res':res, 'corr_img_all_r':corr_img_all_r, 'num_list':num_list};
+    fin_rlt = {'a':a, 'c':c, 'b':b, "X":X, "W":W_final, 'res':res, 'corr_img_all_r':corr_img_all_r, 'num_list':num_list, 'data_order': data_order, 'data_shape':(d1, d2, T)};
     
     
     if pass_num > 1:
