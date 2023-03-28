@@ -200,6 +200,7 @@ def temporal_update_HALS(U_sparse, V, W, X, a_sparse, c, b, s, U_sparse_inner=No
         a: (d1*d2, k)-shaped torch_sparse.tensor
         c: (T, k)-shaped torch.Tensor
         b: (d1*d2, 1)-shaped torch.Tensor
+        s: (1, R)-shaped torch.Tensor. Has the property that sV is the 1 x T vector of all 1's
         U_sparse_inner: (R, R)-shaped torch.Tensor
         
         
