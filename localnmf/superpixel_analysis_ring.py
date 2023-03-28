@@ -2028,7 +2028,14 @@ def process_custom_signals(a_init, U_sparse_torch, V_torch, device='cpu', order=
     c = np.zeros((dims[2], a_init.shape[2]))
 
     X = np.zeros((a_init.shape[2], V_torch.shape[0]))
-    b = np.zeros((d1*d2, 1))
+    b = np.zeros((dims[0]*dims[1], 1))
+    
+    ##MAKE THIS BETTER...
+    T = V_torch.shape[1]
+    VVt_orig = torch.matmul(V_torch, V_torch.t()) #This is for the original V
+    s = regression_update.estimate_X(torch.ones([1, T], device=device).t(), V_torch, VVt_orig) #sV is the vector of 1's
+    
+    
     
     #Cast the data to torch tensors 
     a_torch = torch_sparse.tensor.from_scipy(scipy.sparse.coo_matrix(a)).float().to(device)
@@ -2045,14 +2052,14 @@ def process_custom_signals(a_init, U_sparse_torch, V_torch, device='cpu', order=
 
     #Baseline update followed by 'c' update:
     b_torch = regression_update.baseline_update(uv_mean, a_torch, c_torch)
-    c_torch = regression_update.temporal_update_HALS(U_sparse_torch, V_torch, W_torch, X_torch, a_torch, c_torch, b_torch).cpu().detach().numpy()
+    c_torch = regression_update.temporal_update_HALS(U_sparse_torch, V_torch, W_torch, X_torch, a_torch, c_torch, b_torch, s)
     
     c_norm = torch.linalg.norm(c_torch, dim = 0)
     nonzero_dim1 = torch.nonzero(c_norm).squeeze()
     
     #Only keep the good indices, based on nonzero_dim1
     c_torch = torch.index_select(c_torch, 1, nonzero_dim1)
-    a_torch = torch_sparse.index_select(a_torch, 0, nonzero_dim1)
+    a_torch = torch_sparse.index_select(a_torch, 1, nonzero_dim1)
     a_mask= a_torch.bool()
     
     return a_torch, a_mask, b_torch, c_torch
@@ -2830,8 +2837,9 @@ def update_AC_bg_l2_Y_ring_lowrank(U_sparse, R, V, V_orig,r,dims, a, c, b, patch
         mask_a = a.bool();
     else:
         print("MASK IS NOT NONE")
-        mask_a_scipy = scipy.sparse.coo_matrix(mask_a);
-        mask_a = torch_sparse.tensor.from_scipy(mask_a_scipy).to(device)
+        #Assumed here that mask_a is going to be a torch_sparse tensor
+        # mask_a_scipy = scipy.sparse.coo_matrix(mask_a);
+        # mask_a = torch_sparse.tensor.from_scipy(mask_a_scipy).to(device)
     mask_ab = mask_a;
     
     
