@@ -25,6 +25,8 @@ from matplotlib import ticker
 from scipy import ndimage as ndimage
 import math
 
+
+
 import torchnmf
 import os
 import sys
@@ -2817,7 +2819,7 @@ def update_AC_bg_l2_Y_ring_lowrank(U_sparse, R, V, V_orig,r,dims, a, c, b, patch
     See 'demix_whole_data_robust_ring_lowrank' for all documentation (parameters are identical)
     
     TODO: 
-    The use of V and V_orig is (a) not memory efficient and (b) confusing. Some functions rely on the orthonormal V, others use V_orig. Long term let's just use the orthogonal V (saves an R x T matrix on GPU) to do everything. 
+    The use of V and V_orig is (a) not memory efficient and (b) confusing. Some functions rely on the orthonormal V, others use V_orig. Long term let's just use the orthogonal V (saves an R x T matrix on GPU) to do everything. It's also very confusing that V_orig is actually R * V, the 'orig' seems to imply that this is the original, orthogonal row V
     '''
     
     device = V.device
@@ -3081,3 +3083,534 @@ def update_AC_bg_l2_Y_ring_lowrank(U_sparse, R, V, V_orig,r,dims, a, c, b, patch
     num_list = num_list[brightness_rank];
 
     return a, c, b, X, W, res, corr_img_all_r, num_list
+
+
+
+
+def demix_whole_data_robust_ring_lowrank_exp(pmd_video, cut_off_point=[0.95,0.9], length_cut=[15,10], th=[2,1], pass_num=1, residual_cut = [0.6,0.6],
+                    corr_th_fix=0.31, corr_th_fix_sec = 0.4, corr_th_del = 0.2, switch_point=10, merge_corr_thr=0.6, merge_overlap_thr=0.6, num_plane=1,
+                    plot_en=False, text=True, maxiter=35, update_after=4, pseudo_2=[0.1, 0.1], skips=2, custom_init = {}, init=['lnmf', 'lnmf'], plot_debug = False, denoise = False):
+    '''
+    This function is a low-rank pipeline with robust correlation measures and a ring background model. The low-rank implementation is in the HALS updates.
+    Args:
+    
+    Part of pmd_video constructor:
+        - U_sparse
+        - R
+        - V
+        - data_shape
+        - data_order
+        - r
+    
+    
+        
+    Part of core localNMF algorithm: 
+    
+        INITIALIZATION: 
+            - cut_off_point: this is the cut off for the superpixelization. In the "initialize signals" bit, this is passed to the pmd object
+            - length_cut: this is another threshold used in the superpixelization. It is passed to the pmd object while doing the superpixel initialization
+            - th: MAD threshold limit: this is another parameter passed to pmd_video when we do the initialization
+        - pass_num: number of times we run this procedure (this is part of the "outer loop" of the algorithm, so let's leave this here)
+            - residual_cut: SPA parameter, this should be passed to pmd object while doing superpixel init
+        
+        LOCALNMF LOOP:
+            - corr_th_fix: this is a core localnmf algorithm, should be passed in to pmd_video
+            - corr_th_fix_sec: same as corr_th_fix
+            - corr_th_del: same as above two
+            - switch_point: same deal
+            - max_allow_neuron_size: same as above
+            - merge_corr_thr: same as above
+            - merge_overlap_thr: same as above
+            - num_plane: same as above (but long term, need to eliminate this)
+            - patch_size: Same as above. (Long term completely eliminate this!!)
+            - plot_en: Same as above
+            - text: Same 
+            - maxiter: Same
+            - update_after: Same
+            - Pseudo
+    
+        
+    
+    
+    
+        U_sparse: torch_sparse.Tensor, shape (d1*d2, R). A PMD-denoised and compressed spatial representation of Yd_raw. R is the rank of the
+            PMD decomposition.
+        R: torch.Tensor, shape (R, R). 
+        V: torch.Tensor, shape (R, T). Matrix with orthonormal rows, describing the temporal basis of the PMD decomposition.
+        
+        KEY -- URV = PMD-denoised movie
+        
+        data_shape: tuple describing (d1, d2, T), all ints. These are the two FOV dimensions and the number of frames
+        data_order: "F" or "C" (string). Tells us how to reshape spatial matrices which have been "flattened" (i.e. instead of having separate dimensions (d1, d2, ...) they have (d1*d2, ..)
+        
+        r: integer. The radius used in the ring model
+        cut_off_point: list of values between 0 and 1, length = pass_num. Correlation thresholds used 
+            in the superpixelization process
+        length_cut: list of integers, length = pass_num. Minimum allowed sizes of superpixels in
+            different passes. If length_cut = [2,3], it means in first pass, 
+            minimum size is 2. In second pass, minimum size is 3
+        th: list of integers, length = pass_num. Describes, for each pass, what median absolute deviation (MAD) 
+            threshold is applied to the data during superpixelization process
+        pass_num: number of passes localNMF algorithm takes over the dataset to identify neurons
+        residual_cut: list of values between 0 and 1. Length of list = pass_num
+            sqrt(1 - r_sqare of SPA)
+            Standard value = 0.6
+        corr_th_fix: correlation value (between 0 and 1). Correlation threshold used to update 
+            support of neurons during localNMF updates
+        corr_th_fix_sec: correlation value (between 0 and 1). Correlation threshold
+            after 'switch_point' number of HALS updates 
+        max_allow_neuron_size: value betwee 0 and 1. Max allowed max_i supp(ai) / (d1 x d2).
+            If neuron i exceed this range, then when updating spatial support of ai, corr_th_fix will automatically increase 0.1; and will print("corr too low!") on screen.
+            If there're too many corr too low on screen, you should consider increasing corr_th_fix.
+        merge_corr_thr: float, correlation threshold for truncating corr(Yd, ci) when merging
+        merge_overlap_thr: float, overlapped threshold for truncated correlation images (corr(Yd, ci)) when merging
+        num_plane: integer. Currently, only num_plane = 1 is fully supporte
+        patch_size: list, length = 2. Patch size used to find pure superpixels. Typical values = [100,100]. This parameter automatically adjusted if the field of view has any dimension with length less than 100.
+        plot_en: boolean. If true, pipeline plots initialization and neuron estimates intermittently.
+        TF: boolean. If True, then run l1_TF on temporal components after local NMF
+        fudge_factor: float, usually set to 1
+            do l1_TF up to fudge_factor*noise level i.e.
+            min_ci' |ci'|_1 s.t. |ci' - ci|_F <= fudge_factor*sigma_i\sqrt(T)
+        text: boolean. If true, prints numbers for each superpixel in the superpixel plot
+        max_iter_fin: integer, number of HALS iterations in final pass
+        max_iter: integer. Number of HALS updates for all pre-final passes (if pass_num > 0)
+        update_after: integer. Merge and update spatial support every 'update_after' iterations
+        pseudo_1: float (nonnegative). Robust parameter for MAD thresholding step
+        pseudo_2: float nonnegsative). Robust parameter for correlation measures used in superpixel step
+        skips: integer (nonnegative). For each pass of localNMF, the first 'skips' HALS updates 
+            do not estimate the fluctuating background. NOTE: if you do not want fluctuating background at all, set skips
+            to be any value greater than both max_iter and max_iter_fin.
+        update_type: string, either "Constant" or "Full". Describes the type of ring update being performed
+        init: list of strings, length = pass_num. Options:
+                -  'lnmf' (superpixel based initialization)
+                - 'custom' (custom init values provided). NOTE: only be used for pass #1
+            For example, init = ['custom', 'lnmf'] means the first pass is initialized with 
+            neural network, the second with superpixels.
+        custom_init: dict. keys: 'a','b','c'. A dictionary describing the custom values (a,b,c) provided for demixing.
+            'a' is the spatial footprint, 'b' is the baseline, 'c' is the temporal trace
+        sb: boolean. Stands for 'static background'. If false, we turn off static background estimates throughout pipeline
+            Usually kept as true. 
+        pseudo_corrr: list of nonnegative floats, length = pass_num. This is a robust correlation measure used when 
+            calculating correlation images of neurons in the HALS updates. For data in which neurons don't overlap much, this
+            should be left at 0.
+        device: string. identifies whether certain operations (matrix updates, etc.) should be moved to gpu and 
+            accelerated. Standard options: 'cpu' for CPU-only. 'cuda' for GPU computations.
+        batch_size: int. For GPU computing, identifies how many pixels to process at a time (to make the pipeline compatible 
+            with GPUs of various memory constraints)
+        plot_debug: boolean. Indicates whether intermediate-step visualizations should be generated during demixing. Used for purposes
+            of visualization.
+        
+    '''
+    
+    #Setup variables and R/V 
+    
+    ###THIS NOW GOES TO THE PMD VIDEO SETUP
+#         d1, d2, T = data_shape
+#         dims = (d1, d2, T)
+#         order = data_order
+#         U_sparse, R, V, V_PMD = PMD_setup_routine(U_sparse, V, R, device) 
+    dims = pmd_video.shape
+    d1, d2, T  = dims
+    order = pmd_video.data_order
+    
+    ii = 0;
+    while ii < pass_num:
+        print("start " + str(ii+1) + " pass!");
+                
+        #######
+        ### Initialization method
+        #######       
+        if init[ii] == 'lnmf':  
+            if ii == 0:
+                a = None
+                c = None
+            pmd_video.initialize_signals_superpixels(num_plane, cut_off_point[ii], residual_cut[ii], length_cut[ii], th[ii], pseudo_2[ii], \
+                                       text =text, plot_en = plot_en, a = a, c = c)
+#             if ii == 0:
+#                 a, mask_a, c, b, output_dictionary, superpixel_image = superpixel_init(U_sparse,R,V, V_PMD, num_plane, data_order, dims, cut_off_point[ii], residual_cut[ii], length_cut[ii], th[ii], batch_size, pseudo_2[ii], device, text = text, plot_en = plot_en, a = None, c = None)
+#             elif ii > 0:
+#                 a, mask_a, c, b, output_dictionary, superpixel_image = superpixel_init(U_sparse,R,V, V_PMD, num_plane, data_order, dims, cut_off_point[ii],  residual_cut[ii], length_cut[ii], th[ii], batch_size, pseudo_2[ii], device, text=text, plot_en = plot_en, a = a, c = c)
+                
+#             superpixel_rlt.append(output_dictionary) #This is in the pmd_video object now
+                
+        elif init[ii]=='custom' and ii == 0:
+#             assert custom_init['a'].shape[2] > 0, 'Must provide at least 1 spatial footprint' 
+#             a, mask_a, b, c = process_custom_signals(custom_init['a'].copy(), U_sparse, V_PMD, device=device, order=data_order)
+            pmd_video.initialize_signals_custom(custom_init)
+       
+        else:
+            raise ValueError("Invalid initialization scheme provided")
+        
+        
+        #######
+        ## Run demixing pipeline
+        #######
+
+        with torch.no_grad():
+            
+            a, c, b, X, W, res, corr_img_all_r, num_list = update_AC_bg_l2_Y_ring_lowrank_exp(pmd_video, maxiter, corr_th_fix, corr_th_fix_sec, corr_th_del, switch_point, skips, merge_corr_thr, merge_overlap_thr, denoise=denoise, plot_en=plot_en, plot_debug=plot_debug, update_after=update_after);
+            torch.cuda.empty_cache() #Test this as placeholder for now to avoid GPU memory getting clogged
+            
+        
+        #If multi-pass, save results from first pass
+        if pass_num > 1 and ii == 0:
+            W_final = W.create_complete_ring_matrix(a)
+            rlt = {'a':a, 'c':c, 'b':b, "X":X, "W":W_final, 'res':res, 'corr_img_all_r':corr_img_all_r, 'num_list':num_list, 'data_order': order, 'data_shape':(d1, d2, T)};
+            a0 = a.copy();
+        ii = ii+1;
+
+    if plot_en:
+        if pass_num > 1:
+            spatial_sum_plot(a0, a, dims[:2], num_list_fin = num_list, text = text, order=order);
+            
+        ##TODO: This should be in the PMD movie functionality, not here
+        Cnt = local_correlation_mat(pmd_video.U_sparse, pmd_video.R, pmd_video.V, dims, pseudo_2[ii], \
+                                    a= torch_sparse.tensor.from_scipy(scipy.sparse.coo_matrix(a)).float().to(pmd_video.device), \
+                                    c= torch.from_numpy(c).float().to(pmd_video.device),\
+                                    order=order)
+        scale = np.maximum(1, int(Cnt.shape[1]/Cnt.shape[0]));
+        plt.figure(figsize=(8*scale,8))
+        ax1 = plt.subplot(1,1,1);
+        show_img(ax1, Cnt);
+        ax1.set(title="Local mean correlation for residual")
+        ax1.title.set_fontsize(15)
+        ax1.title.set_fontweight("bold")
+        plt.show();
+    
+    W_final = W.create_complete_ring_matrix(a)
+    fin_rlt = {'a':a, 'c':c, 'b':b, "X":X, "W":W_final, 'res':res, 'corr_img_all_r':corr_img_all_r, 'num_list':num_list, 'data_order': order, 'data_shape':(d1, d2, T)};
+    
+    
+    if pass_num > 1:
+        return {'rlt':rlt, 'fin_rlt':fin_rlt, "superpixel_rlt":pmd_video.superpixel_rlt}
+    else:
+        return {'fin_rlt':fin_rlt, "superpixel_rlt":pmd_video.superpixel_rlt}
+
+
+def update_AC_bg_l2_Y_ring_lowrank_exp(pmd_video, maxiter,corr_th_fix, corr_th_fix_sec, corr_th_del, switch_point, skips,merge_corr_thr, merge_overlap_thr, denoise=None, plot_en=False, plot_debug=False, update_after=4):
+    
+    '''
+    U_sparse, R, V, V_orig,r,dims, a, c, b, patch_size, corr_th_fix, corr_th_fix_sec = 0.4, corr_th_del = 0.2, switch_point = 10,
+            maxiter=50, tol=1e-8, update_after=None,merge_corr_thr=0.5,
+            merge_overlap_thr=0.7, num_plane=1, plot_en=False,
+            max_allow_neuron_size=0.2, skips=2, update_type="Constant",\
+                                mask_a=None, sb=True, pseudo_corr = 0, batch_size = 10000, plot_debug = False, denoise = None, data_order = "C"
+    
+    '''
+    
+    '''
+    Function for computing background, spatial and temporal components of neurons. Uses HALS updates to iteratively
+    refine spatial and temporal estimates. 
+    
+    See 'demix_whole_data_robust_ring_lowrank' for all documentation (parameters are identical)
+    
+    TODO: 
+    The use of V and V_orig is (a) not memory efficient and (b) confusing. Some functions rely on the orthonormal V, others use V_orig. Long term let's just use the orthogonal V (saves an R x T matrix on GPU) to do everything. 
+    '''
+    ##Step 0: There should be some basic device logic, data order, etc. 
+    '''
+    data_order = pmd_video.order
+    d1, d2, T = pmd_video.shape
+    self.d1 = pmd_video.shape[0]
+    self.d2 = pmd_video.shape[1]
+    self.T = pmd_video.shape[2]
+    '''
+    data_order = pmd_video.data_order
+    d1, d2, T = pmd_video.shape
+    
+    ##Step 1: Initialize precomputed quantities (do this every time you enter this loop just for sanity, though maybe unnecessary)
+    
+    '''
+    def _precompute_quantities(self):
+        self.K = self.c.shape[1]
+        self.res = np.zeros(self.maxiter)
+        self.uv_mean = get_mean_data(self.U_sparse, V_orig)
+        self.num_list = np.arange(self.K)
+
+        if self.mask_a is None:
+            self.mask_a = self.a.bool()
+        else:
+            print("MASK IS NOT NONE")
+        self.mask_ab = self.mask_a
+
+        self.W = ring_model(self.d1, self.d2, self.r, device=self.device, order = self.order, empty=True)
+        self.VVt = torch.matmul(self.V, self.V.t())
+        self.VVt_orig = torch.matmul(V_orig, V_orig.t())
+        self.s = regression_update.estimate_X(torch.ones([1, self.T], device=self.device).t(), self.V_orig, self.VVt_orig) #sV is the vector of 1's
+        
+        self.U_sparse_inner = torch.inverse(torch_sparse.matmul(self.U_sparse.t(), self.U_sparse).to_dense())
+        self.a_summand = torch.ones((self.d1*self.d2, 1)).to(self.device)
+    '''
+    
+    
+    pmd_video.precompute_quantities(maxiter)
+#         print("the patch size is {}".format(patch_size))
+#         K = c.shape[1];
+#         res = np.zeros(maxiter);
+#         uv_mean = get_mean_data(U_sparse, V_orig)
+#         num_list = np.arange(K);
+#         d1, d2 = dims[:2]
+#         T = V.shape[1]
+
+#         ## initialize spatial support ##
+#         if mask_a is None: 
+#             mask_a = a.bool();
+#         else:
+#             print("MASK IS NOT NONE")
+
+#         mask_ab = mask_a;
+
+
+#         #Initialize empty ring model, and construct the nonempty once needed
+#         W = ring_model(d1, d2, r, device=device, order=data_order, empty=True)
+
+#         #Precompute VV^t for X updates
+#         VVt = torch.matmul(V, V.t()) #This is for the orthogonal V
+#         VVt_orig = torch.matmul(V_orig, V_orig.t()) #This is for the original V
+#         s = regression_update.estimate_X(torch.ones([1, T], device=device).t(), V_orig, VVt_orig) #sV is the vector of 1's
+
+#         U_sparse_inner = torch.inverse(torch_sparse.matmul(U_sparse.t(), U_sparse).to_dense())
+#         a_summand = torch.ones((d1*d2, 1)).to(device)
+
+    
+    ##Step 2: Initialize the correlation images
+    '''
+    pmd_video.compute_standard_correlation_image()
+    pmd_video.compute_residual_correlation_image()
+
+    corr_img_all = pmd_video.standard_correlation_image
+    corr_img_all_r = corr_img_all.reshape(d1, d2, -1, order=data_order)
+    corr_image_all_reg = pmd_video.residual_correlation_image
+    corr_img_all_reg_r = corr_img_all_reg.reshape(d1, d2, -1, order=data_order)
+
+    NOTE: the output here should be ndarrays
+    '''
+    pmd_video.compute_standard_correlation_image()
+    pmd_video.compute_residual_correlation_image()
+
+    corr_img_all = pmd_video.standard_correlation_image
+    corr_img_all_r = corr_img_all.reshape(d1, d2, -1, order=data_order)
+    corr_img_all_reg = pmd_video.residual_correlation_image
+    corr_img_all_reg_r = corr_img_all_reg.reshape(d1, d2, -1, order=data_order)
+
+        
+#         #Get residual correlation image
+#         corr_time = time.time()
+#         if a.sparse_sizes()[1] == 1:
+#             #In this case, the "residual image" is not well defined
+#             print("Only one component; resid corr image and standard corr image are the same")
+#             corr_img_all = vcorrcoef_UV_noise(U_sparse, R, V, c, batch_size = batch_size, device=device)
+#         else:
+#             corr_img_all = vcorrcoef_resid(U_sparse, R, V, a, c, batch_size = batch_size, device=device)
+#         corr_img_all_r = corr_img_all.reshape(d1,d2,-1,order=data_order);
+#         print("Resid Corr Image Took {}".format(time.time() - corr_time))
+#         #Get regular correlation image
+
+
+#         corr_time = time.time()
+#         corr_img_all_reg = vcorrcoef_UV_noise(U_sparse, R, V, c, batch_size = batch_size, device=device)
+#         corr_img_all_reg_r = corr_img_all_reg.reshape(d1,d2,-1,order=data_order);
+#         print("Standard Corr Image Took {}".format(time.time() - corr_time))
+#         print("shape of corr_img_all_r is {}".format(corr_img_all_r.shape)) 
+
+    
+    ###NOTE: ADD BACK THE PLOT DEBUG PRINTING IF DESIRED LATER
+    
+    if denoise is None: 
+        denoise = [False for i in range(maxiter)]
+    elif len(denoise) != maxiter:
+        print("Length of denoise list is not consistent, setting all denoise values to false for this pass of NMF")
+        denoise = [False for i in range(maxiter)]
+           
+    for iters in range(maxiter):
+        #Change correlation for last few iterations to pick dendrites
+        if iters >= maxiter - switch_point:
+            corr_th_fix = corr_th_fix_sec 
+        start = time.time();
+
+        ##TODO: Add back the plot corr image bit here if desired
+        
+        
+        pmd_video.static_baseline_update()
+#             b = regression_update.baseline_update(uv_mean, a, c)
+        
+        test_time = time.time()
+        
+        if iters >= skips:
+            
+            pmd_video.fluctuating_baseline_update()
+            
+#             if iters == skips:
+#                 W = ring_model(d1, d2, r, empty=False, device=device, order=data_order)
+            
+#             # print("X estimate")
+#             Xtime = time.time()
+#             X = regression_update.estimate_X(c, V, VVt) #Estimate using orthogonal V, not regular V
+
+#             #Specify which ring model update we want
+#             if update_type == "Full":
+#                 raise ValueError('Full Ring Model no longer supported')
+#             elif update_type == "Constant":
+#                 update_start = time.time()
+#                 ring_model_update(U_sparse, R, V, W, X, b, a, d1, d2, device='cuda')
+#             elif update_type == "Sampling":
+#                 ring_model_update_sampling(U_sparse, V_orig, W, c, b, a, d1, d2, device=device)
+#             else:
+#                 raise ValueError("Not supported model. Try either Full, Constant, or Sampling")
+        else:
+            pass
+
+        test_time = time.time()
+        
+        
+        
+        ###SPATIAL UPDATE
+        test_time = time.time()
+        
+        
+        #Approximate c as XV for some X:
+        pmd_video.spatial_update(plot_en=plot_en)
+        
+#         THIS IS THE ORIGINAL CODE
+#         X = regression_update.estimate_X(c, V_orig, VVt_orig)       
+#         a = regression_update.spatial_update_HALS(U_sparse, V_orig, W, X, a, c, b, s, U_sparse_inner=U_sparse_inner, mask_ab=mask_ab.t())
+        ### Delete Bad Components
+#         temp = torch_sparse.matmul(a.t(), a_summand).t() == 0 #Identify which columns of 'a' are all zeros
+#         if torch.sum(temp):
+#             a, c, corr_img_all_reg, corr_img_all, mask_ab, num_list = delete_comp(a, c, corr_img_all_reg, corr_img_all, mask_ab, num_list, temp, "zero a!", plot_en, (d1, d2), order=data_order);
+#             X = regression_update.estimate_X(c, V_orig, VVt_orig)
+        
+        
+        ### BASELINE UPDATE
+        
+        pmd_video.static_baseline_update()
+#         b = regression_update.baseline_update(uv_mean, a, c)
+    
+            
+        ###TEMPORAL UPDATE
+        denoise_flag = denoise[iters]
+        pmd_video.temporal_update(denoise=denoise_flag, plot_en=plot_en)
+        
+#         test_time = time.time()
+#         c = regression_update.temporal_update_HALS(U_sparse, V_orig, W, X, a, c, b, s, U_sparse_inner=U_sparse_inner)
+#         #Denoise 'c' components if desired
+#         if denoise[iters]:
+#             c = c.cpu().numpy()
+#             c = ca_utils.denoise(c) #We now use OASIS denoising to improve improve signals
+#             c = np.nan_to_num(c, posinf = 0, neginf = 0, nan = 0) #Gracefully handle invalid values
+#             c = torch.from_numpy(c).float().to(device)
+        
+#         #Delete bad components
+#         temp = (torch.sum(c, dim=0) == 0);
+#         if torch.sum(temp):
+#             a, c, corr_img_all_reg, corr_img_all, mask_ab, num_list = delete_comp(a, c, corr_img_all_reg, corr_img_all, mask_ab, num_list, temp, "zero c!", plot_en, (d1, d2), order=data_order);
+            
+            
+
+        if update_after and ((iters+1) % update_after == 0):
+            
+            ##First: Compute correlation images
+            print("Computing Corr Img")
+            pmd_video.compute_standard_correlation_image()
+            pmd_video.compute_residual_correlation_image()
+
+            corr_img_all = pmd_video.standard_correlation_image
+            corr_img_all_r = corr_img_all.reshape(d1, d2, -1, order=data_order)
+            corr_image_all_reg = pmd_video.residual_correlation_image
+            corr_img_all_reg_r = corr_img_all_reg.reshape(d1, d2, -1, order=data_order)
+            
+            
+            
+            ##Second: Compute masks
+#             pmd_video.support_update()
+            print("mask, support, and deletion update")
+            pmd_video.support_update_prune_elements_apply_mask(corr_th_fix, corr_th_del, plot_en)
+
+    #             #Currently using rigid mask
+    #             print("making dynamic support updates")
+    #             mask_ab = a.bool()
+    #             mask_a_rigid = make_mask_dynamic(corr_img_all_r, corr_th_fix, mask_ab.cpu().to_dense().numpy().astype('int'), data_order=data_order)
+    #             mask_a_rigid_scipy = scipy.sparse.csr_matrix(mask_a_rigid)
+    #             mask_ab = torch_sparse.tensor.from_scipy(mask_a_rigid_scipy).float().to(device)
+
+            ##Third: Prune bad components
+#             pmd_video.prune_elements()
+#                 ## Now we delete components based on whether they have a 0 residual corr img with their supports or not...
+#                 mask_ab_corr = mask_a_rigid_scipy.multiply(corr_img_all)
+#                 mask_ab_corr = np.array((mask_ab_corr > corr_th_del).sum(axis=0))
+#                 mask_ab_corr = torch.from_numpy(mask_ab_corr).float().squeeze().to(device)
+#                 temp = (mask_ab_corr == 0)
+#                 if torch.sum(temp):
+#                     print("we are at the delete step... corr img is {}".format(corr_th_del))
+#                     a, c, corr_img_all_reg, corr_img_all, mask_ab, num_list = delete_comp(a, c, corr_img_all_reg, corr_img_all, mask_ab, num_list, temp, "zero mask!", plot_en, (d1,d2), order=data_order);
+
+            #Do this different when pytorch_sparse implements scipy
+#             pmd_video.apply_mask()
+#                 a_scipy = a.to_scipy().tocsr()
+#                 mask_ab_scipy = mask_ab.to_scipy().tocsr()
+#                 a_scipy = a_scipy.multiply(mask_ab_scipy)
+#                 a = torch_sparse.tensor.from_scipy(a_scipy).float().to(device)
+            
+            print("merging components")
+            #TODO: Eliminate the need for moving a and c off GPU
+            pmd_video.merge_signals(merge_corr_thr, merge_overlap_thr, plot_en, data_order)
+#                 a = a.cpu().to_dense().numpy()
+#                 c = c.cpu().numpy()
+#                 rlt = merge_components(a,c,corr_img_all_reg,num_list,\
+#                                        patch_size,merge_corr_thr=merge_corr_thr,merge_overlap_thr=merge_overlap_thr,plot_en=plot_en, data_order=data_order);
+
+#                 flag = isinstance(rlt, int);
+
+
+#                 if ~np.array(flag):
+#                     a_scipy = scipy.sparse.csr_matrix(rlt[1]);
+#                     a = torch_sparse.tensor.from_scipy(a_scipy).float().to(device)
+#                     c = rlt[2];
+#                     c = torch.from_numpy(c).float().to(device)
+#                     num_list = rlt[3];
+#                 else:
+#                     a_scipy = scipy.sparse.csr_matrix(a);
+#                     a = torch_sparse.tensor.from_scipy(a_scipy).float().to(device)
+#                     c = torch.from_numpy(c).float().to(device)
+#                     print("no merge!");
+
+
+            
+        print("time: " + str(time.time()-start));
+        
+
+    '''
+    pmd_video.delete_precomputed()
+    a, c, b, X, W, res, corr_img_all_r, num_list = pmd_video.brightness_order_and_return_state()
+    - NOTE: move W matrix here too
+    - brightness_order will currently not be implemented for gpu -- the data will necessarily be moved to CPU first (i.e. self.to('cpu') will be run)
+    
+    Long term, all data, from beginning of this object, should be consistently kept on a single device, and modified using that datatype. But this is acceptable as a temporary workaround.
+    '''
+    pmd_video.delete_precomputed()
+    a, c, b, X, W, res, corr_img_all_r, num_list = pmd_video.brightness_order_and_return_state()
+#         a = a.cpu().to_dense().numpy()
+#         c = c.cpu().numpy()
+#         b = b.cpu().numpy()
+#         X = X.cpu().numpy()
+
+#         temp = np.sqrt((a**2).sum(axis=0,keepdims=True));
+#         c = c*temp;
+#         a = a/temp;
+#         brightness = np.zeros(a.shape[1]);
+#         a_max = a.max(axis=0);
+#         c_max = c.max(axis=0);
+#         brightness = a_max * c_max;
+#         brightness_rank = np.argsort(-brightness);
+#         a = a[:,brightness_rank];
+#         c = c[:,brightness_rank];
+#         corr_img_all_r = corr_img_all_r[:,:,brightness_rank];
+#         num_list = num_list[brightness_rank];
+
+    
+    return a, c, b, X, W, res, corr_img_all_r, num_list
+    '''
+    Long Term: eliminate the following variables: 
+    - res (it's never used)
+    - num_list (figure out what it's used for...)
+    '''

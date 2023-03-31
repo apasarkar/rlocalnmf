@@ -26,11 +26,13 @@ class ring_model:
             value = torch.Tensor([]).to(device).bool()
             self.W_mat = torch_sparse.tensor.SparseTensor(row = row, col = col, value=value, sparse_sizes=(d1*d2, d1*d2))
             self.weights = torch.zeros((d1*d2, 1), device=device)
+            self.empty=True
         else:
             row_coordinates, column_coordinates, values = self._construct_init_values(d1, d2, r, device=device, order=order)
             torch.cuda.empty_cache()
             self.W_mat = torch_sparse.tensor.SparseTensor(row=row_coordinates, col=column_coordinates, value=values, sparse_sizes = (d1*d2, d1*d2))
             self.weights = torch.ones((d1*d2, 1), device=device)
+            self.empty=False
 
     
 
@@ -237,6 +239,4 @@ def ring_model_update(U_sparse, R, V, W, X, b, a, d1, d2, num_samples=1000, devi
     values = torch.nan_to_num(numerator/denominator, nan=0.0, posinf=0.0, neginf=0.0)
     threshold_function = torch.nn.ReLU()
     values = threshold_function(values)
-    
     W.set_weights(values[:, None])
-   
