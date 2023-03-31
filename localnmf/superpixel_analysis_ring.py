@@ -3202,13 +3202,6 @@ def demix_whole_data_robust_ring_lowrank_exp(pmd_video, cut_off_point=[0.95,0.9]
         
     '''
     
-    #Setup variables and R/V 
-    
-    ###THIS NOW GOES TO THE PMD VIDEO SETUP
-#         d1, d2, T = data_shape
-#         dims = (d1, d2, T)
-#         order = data_order
-#         U_sparse, R, V, V_PMD = PMD_setup_routine(U_sparse, V, R, device) 
     dims = pmd_video.shape
     d1, d2, T  = dims
     order = pmd_video.data_order
@@ -3226,16 +3219,8 @@ def demix_whole_data_robust_ring_lowrank_exp(pmd_video, cut_off_point=[0.95,0.9]
                 c = None
             pmd_video.initialize_signals_superpixels(num_plane, cut_off_point[ii], residual_cut[ii], length_cut[ii], th[ii], pseudo_2[ii], \
                                        text =text, plot_en = plot_en, a = a, c = c)
-#             if ii == 0:
-#                 a, mask_a, c, b, output_dictionary, superpixel_image = superpixel_init(U_sparse,R,V, V_PMD, num_plane, data_order, dims, cut_off_point[ii], residual_cut[ii], length_cut[ii], th[ii], batch_size, pseudo_2[ii], device, text = text, plot_en = plot_en, a = None, c = None)
-#             elif ii > 0:
-#                 a, mask_a, c, b, output_dictionary, superpixel_image = superpixel_init(U_sparse,R,V, V_PMD, num_plane, data_order, dims, cut_off_point[ii],  residual_cut[ii], length_cut[ii], th[ii], batch_size, pseudo_2[ii], device, text=text, plot_en = plot_en, a = a, c = c)
-                
-#             superpixel_rlt.append(output_dictionary) #This is in the pmd_video object now
                 
         elif init[ii]=='custom' and ii == 0:
-#             assert custom_init['a'].shape[2] > 0, 'Must provide at least 1 spatial footprint' 
-#             a, mask_a, b, c = process_custom_signals(custom_init['a'].copy(), U_sparse, V_PMD, device=device, order=data_order)
             pmd_video.initialize_signals_custom(custom_init)
        
         else:
@@ -3307,84 +3292,12 @@ def update_AC_bg_l2_Y_ring_lowrank_exp(pmd_video, maxiter,corr_th_fix, corr_th_f
     TODO: 
     The use of V and V_orig is (a) not memory efficient and (b) confusing. Some functions rely on the orthonormal V, others use V_orig. Long term let's just use the orthogonal V (saves an R x T matrix on GPU) to do everything. 
     '''
-    ##Step 0: There should be some basic device logic, data order, etc. 
-    '''
-    data_order = pmd_video.order
-    d1, d2, T = pmd_video.shape
-    self.d1 = pmd_video.shape[0]
-    self.d2 = pmd_video.shape[1]
-    self.T = pmd_video.shape[2]
-    '''
+
     data_order = pmd_video.data_order
     d1, d2, T = pmd_video.shape
     
-    ##Step 1: Initialize precomputed quantities (do this every time you enter this loop just for sanity, though maybe unnecessary)
-    
-    '''
-    def _precompute_quantities(self):
-        self.K = self.c.shape[1]
-        self.res = np.zeros(self.maxiter)
-        self.uv_mean = get_mean_data(self.U_sparse, V_orig)
-        self.num_list = np.arange(self.K)
-
-        if self.mask_a is None:
-            self.mask_a = self.a.bool()
-        else:
-            print("MASK IS NOT NONE")
-        self.mask_ab = self.mask_a
-
-        self.W = ring_model(self.d1, self.d2, self.r, device=self.device, order = self.order, empty=True)
-        self.VVt = torch.matmul(self.V, self.V.t())
-        self.VVt_orig = torch.matmul(V_orig, V_orig.t())
-        self.s = regression_update.estimate_X(torch.ones([1, self.T], device=self.device).t(), self.V_orig, self.VVt_orig) #sV is the vector of 1's
-        
-        self.U_sparse_inner = torch.inverse(torch_sparse.matmul(self.U_sparse.t(), self.U_sparse).to_dense())
-        self.a_summand = torch.ones((self.d1*self.d2, 1)).to(self.device)
-    '''
-    
     
     pmd_video.precompute_quantities(maxiter)
-#         print("the patch size is {}".format(patch_size))
-#         K = c.shape[1];
-#         res = np.zeros(maxiter);
-#         uv_mean = get_mean_data(U_sparse, V_orig)
-#         num_list = np.arange(K);
-#         d1, d2 = dims[:2]
-#         T = V.shape[1]
-
-#         ## initialize spatial support ##
-#         if mask_a is None: 
-#             mask_a = a.bool();
-#         else:
-#             print("MASK IS NOT NONE")
-
-#         mask_ab = mask_a;
-
-
-#         #Initialize empty ring model, and construct the nonempty once needed
-#         W = ring_model(d1, d2, r, device=device, order=data_order, empty=True)
-
-#         #Precompute VV^t for X updates
-#         VVt = torch.matmul(V, V.t()) #This is for the orthogonal V
-#         VVt_orig = torch.matmul(V_orig, V_orig.t()) #This is for the original V
-#         s = regression_update.estimate_X(torch.ones([1, T], device=device).t(), V_orig, VVt_orig) #sV is the vector of 1's
-
-#         U_sparse_inner = torch.inverse(torch_sparse.matmul(U_sparse.t(), U_sparse).to_dense())
-#         a_summand = torch.ones((d1*d2, 1)).to(device)
-
-    
-    ##Step 2: Initialize the correlation images
-    '''
-    pmd_video.compute_standard_correlation_image()
-    pmd_video.compute_residual_correlation_image()
-
-    corr_img_all = pmd_video.standard_correlation_image
-    corr_img_all_r = corr_img_all.reshape(d1, d2, -1, order=data_order)
-    corr_image_all_reg = pmd_video.residual_correlation_image
-    corr_img_all_reg_r = corr_img_all_reg.reshape(d1, d2, -1, order=data_order)
-
-    NOTE: the output here should be ndarrays
-    '''
     pmd_video.compute_standard_correlation_image()
     pmd_video.compute_residual_correlation_image()
 
@@ -3393,28 +3306,6 @@ def update_AC_bg_l2_Y_ring_lowrank_exp(pmd_video, maxiter,corr_th_fix, corr_th_f
     corr_img_all_reg = pmd_video.residual_correlation_image
     corr_img_all_reg_r = corr_img_all_reg.reshape(d1, d2, -1, order=data_order)
 
-        
-#         #Get residual correlation image
-#         corr_time = time.time()
-#         if a.sparse_sizes()[1] == 1:
-#             #In this case, the "residual image" is not well defined
-#             print("Only one component; resid corr image and standard corr image are the same")
-#             corr_img_all = vcorrcoef_UV_noise(U_sparse, R, V, c, batch_size = batch_size, device=device)
-#         else:
-#             corr_img_all = vcorrcoef_resid(U_sparse, R, V, a, c, batch_size = batch_size, device=device)
-#         corr_img_all_r = corr_img_all.reshape(d1,d2,-1,order=data_order);
-#         print("Resid Corr Image Took {}".format(time.time() - corr_time))
-#         #Get regular correlation image
-
-
-#         corr_time = time.time()
-#         corr_img_all_reg = vcorrcoef_UV_noise(U_sparse, R, V, c, batch_size = batch_size, device=device)
-#         corr_img_all_reg_r = corr_img_all_reg.reshape(d1,d2,-1,order=data_order);
-#         print("Standard Corr Image Took {}".format(time.time() - corr_time))
-#         print("shape of corr_img_all_r is {}".format(corr_img_all_r.shape)) 
-
-    
-    ###NOTE: ADD BACK THE PLOT DEBUG PRINTING IF DESIRED LATER
     
     if denoise is None: 
         denoise = [False for i in range(maxiter)]
@@ -3423,7 +3314,6 @@ def update_AC_bg_l2_Y_ring_lowrank_exp(pmd_video, maxiter,corr_th_fix, corr_th_f
         denoise = [False for i in range(maxiter)]
            
     for iters in range(maxiter):
-        #Change correlation for last few iterations to pick dendrites
         if iters >= maxiter - switch_point:
             corr_th_fix = corr_th_fix_sec 
         start = time.time();
@@ -3432,31 +3322,12 @@ def update_AC_bg_l2_Y_ring_lowrank_exp(pmd_video, maxiter,corr_th_fix, corr_th_f
         
         
         pmd_video.static_baseline_update()
-#             b = regression_update.baseline_update(uv_mean, a, c)
+
         
         test_time = time.time()
         
         if iters >= skips:
-            
             pmd_video.fluctuating_baseline_update()
-            
-#             if iters == skips:
-#                 W = ring_model(d1, d2, r, empty=False, device=device, order=data_order)
-            
-#             # print("X estimate")
-#             Xtime = time.time()
-#             X = regression_update.estimate_X(c, V, VVt) #Estimate using orthogonal V, not regular V
-
-#             #Specify which ring model update we want
-#             if update_type == "Full":
-#                 raise ValueError('Full Ring Model no longer supported')
-#             elif update_type == "Constant":
-#                 update_start = time.time()
-#                 ring_model_update(U_sparse, R, V, W, X, b, a, d1, d2, device='cuda')
-#             elif update_type == "Sampling":
-#                 ring_model_update_sampling(U_sparse, V_orig, W, c, b, a, d1, d2, device=device)
-#             else:
-#                 raise ValueError("Not supported model. Try either Full, Constant, or Sampling")
         else:
             pass
 
@@ -3470,47 +3341,17 @@ def update_AC_bg_l2_Y_ring_lowrank_exp(pmd_video, maxiter,corr_th_fix, corr_th_f
         
         #Approximate c as XV for some X:
         pmd_video.spatial_update(plot_en=plot_en)
-        
-#         THIS IS THE ORIGINAL CODE
-#         X = regression_update.estimate_X(c, V_orig, VVt_orig)       
-#         a = regression_update.spatial_update_HALS(U_sparse, V_orig, W, X, a, c, b, s, U_sparse_inner=U_sparse_inner, mask_ab=mask_ab.t())
-        ### Delete Bad Components
-#         temp = torch_sparse.matmul(a.t(), a_summand).t() == 0 #Identify which columns of 'a' are all zeros
-#         if torch.sum(temp):
-#             a, c, corr_img_all_reg, corr_img_all, mask_ab, num_list = delete_comp(a, c, corr_img_all_reg, corr_img_all, mask_ab, num_list, temp, "zero a!", plot_en, (d1, d2), order=data_order);
-#             X = regression_update.estimate_X(c, V_orig, VVt_orig)
-        
-        
-        ### BASELINE UPDATE
-        
         pmd_video.static_baseline_update()
-#         b = regression_update.baseline_update(uv_mean, a, c)
     
             
         ###TEMPORAL UPDATE
         denoise_flag = denoise[iters]
         pmd_video.temporal_update(denoise=denoise_flag, plot_en=plot_en)
-        
-#         test_time = time.time()
-#         c = regression_update.temporal_update_HALS(U_sparse, V_orig, W, X, a, c, b, s, U_sparse_inner=U_sparse_inner)
-#         #Denoise 'c' components if desired
-#         if denoise[iters]:
-#             c = c.cpu().numpy()
-#             c = ca_utils.denoise(c) #We now use OASIS denoising to improve improve signals
-#             c = np.nan_to_num(c, posinf = 0, neginf = 0, nan = 0) #Gracefully handle invalid values
-#             c = torch.from_numpy(c).float().to(device)
-        
-#         #Delete bad components
-#         temp = (torch.sum(c, dim=0) == 0);
-#         if torch.sum(temp):
-#             a, c, corr_img_all_reg, corr_img_all, mask_ab, num_list = delete_comp(a, c, corr_img_all_reg, corr_img_all, mask_ab, num_list, temp, "zero c!", plot_en, (d1, d2), order=data_order);
-            
-            
+           
 
         if update_after and ((iters+1) % update_after == 0):
             
             ##First: Compute correlation images
-            print("Computing Corr Img")
             pmd_video.compute_standard_correlation_image()
             pmd_video.compute_residual_correlation_image()
 
@@ -3521,92 +3362,19 @@ def update_AC_bg_l2_Y_ring_lowrank_exp(pmd_video, maxiter,corr_th_fix, corr_th_f
             
             
             
-            ##Second: Compute masks
-#             pmd_video.support_update()
+
             print("mask, support, and deletion update")
             pmd_video.support_update_prune_elements_apply_mask(corr_th_fix, corr_th_del, plot_en)
-
-    #             #Currently using rigid mask
-    #             print("making dynamic support updates")
-    #             mask_ab = a.bool()
-    #             mask_a_rigid = make_mask_dynamic(corr_img_all_r, corr_th_fix, mask_ab.cpu().to_dense().numpy().astype('int'), data_order=data_order)
-    #             mask_a_rigid_scipy = scipy.sparse.csr_matrix(mask_a_rigid)
-    #             mask_ab = torch_sparse.tensor.from_scipy(mask_a_rigid_scipy).float().to(device)
-
-            ##Third: Prune bad components
-#             pmd_video.prune_elements()
-#                 ## Now we delete components based on whether they have a 0 residual corr img with their supports or not...
-#                 mask_ab_corr = mask_a_rigid_scipy.multiply(corr_img_all)
-#                 mask_ab_corr = np.array((mask_ab_corr > corr_th_del).sum(axis=0))
-#                 mask_ab_corr = torch.from_numpy(mask_ab_corr).float().squeeze().to(device)
-#                 temp = (mask_ab_corr == 0)
-#                 if torch.sum(temp):
-#                     print("we are at the delete step... corr img is {}".format(corr_th_del))
-#                     a, c, corr_img_all_reg, corr_img_all, mask_ab, num_list = delete_comp(a, c, corr_img_all_reg, corr_img_all, mask_ab, num_list, temp, "zero mask!", plot_en, (d1,d2), order=data_order);
-
-            #Do this different when pytorch_sparse implements scipy
-#             pmd_video.apply_mask()
-#                 a_scipy = a.to_scipy().tocsr()
-#                 mask_ab_scipy = mask_ab.to_scipy().tocsr()
-#                 a_scipy = a_scipy.multiply(mask_ab_scipy)
-#                 a = torch_sparse.tensor.from_scipy(a_scipy).float().to(device)
             
             print("merging components")
             #TODO: Eliminate the need for moving a and c off GPU
             pmd_video.merge_signals(merge_corr_thr, merge_overlap_thr, plot_en, data_order)
-#                 a = a.cpu().to_dense().numpy()
-#                 c = c.cpu().numpy()
-#                 rlt = merge_components(a,c,corr_img_all_reg,num_list,\
-#                                        patch_size,merge_corr_thr=merge_corr_thr,merge_overlap_thr=merge_overlap_thr,plot_en=plot_en, data_order=data_order);
-
-#                 flag = isinstance(rlt, int);
-
-
-#                 if ~np.array(flag):
-#                     a_scipy = scipy.sparse.csr_matrix(rlt[1]);
-#                     a = torch_sparse.tensor.from_scipy(a_scipy).float().to(device)
-#                     c = rlt[2];
-#                     c = torch.from_numpy(c).float().to(device)
-#                     num_list = rlt[3];
-#                 else:
-#                     a_scipy = scipy.sparse.csr_matrix(a);
-#                     a = torch_sparse.tensor.from_scipy(a_scipy).float().to(device)
-#                     c = torch.from_numpy(c).float().to(device)
-#                     print("no merge!");
-
 
             
         print("time: " + str(time.time()-start));
-        
 
-    '''
     pmd_video.delete_precomputed()
     a, c, b, X, W, res, corr_img_all_r, num_list = pmd_video.brightness_order_and_return_state()
-    - NOTE: move W matrix here too
-    - brightness_order will currently not be implemented for gpu -- the data will necessarily be moved to CPU first (i.e. self.to('cpu') will be run)
-    
-    Long term, all data, from beginning of this object, should be consistently kept on a single device, and modified using that datatype. But this is acceptable as a temporary workaround.
-    '''
-    pmd_video.delete_precomputed()
-    a, c, b, X, W, res, corr_img_all_r, num_list = pmd_video.brightness_order_and_return_state()
-#         a = a.cpu().to_dense().numpy()
-#         c = c.cpu().numpy()
-#         b = b.cpu().numpy()
-#         X = X.cpu().numpy()
-
-#         temp = np.sqrt((a**2).sum(axis=0,keepdims=True));
-#         c = c*temp;
-#         a = a/temp;
-#         brightness = np.zeros(a.shape[1]);
-#         a_max = a.max(axis=0);
-#         c_max = c.max(axis=0);
-#         brightness = a_max * c_max;
-#         brightness_rank = np.argsort(-brightness);
-#         a = a[:,brightness_rank];
-#         c = c[:,brightness_rank];
-#         corr_img_all_r = corr_img_all_r[:,:,brightness_rank];
-#         num_list = num_list[brightness_rank];
-
     
     return a, c, b, X, W, res, corr_img_all_r, num_list
     '''
