@@ -1206,6 +1206,43 @@ def prepare_iteration_UV(dims, connect_mat_1, permute_col, pure_pix, U_mat, V_ma
     return U_mat, V_mat, brightness_rank
 
 
+def fit_large_spatial_support(comp, c_init, U_sparse_torch, V_torch, th, a_sparse=None, c=None, batch_size = 500):
+    '''
+    Routine for estimating 
+    '''
+    print("Fitting larger spatial support")
+    comp = list(comp)
+    num_iters = math.ceil(len(comp)/batch_size)
+    final_values = torch.zeros(0, device=V_torch.device)
+    
+    for k in range(num_iters):
+        start_pt = batch_size * k
+        end_pt = min(len(comp), batch_size*(k+1))
+        components = comp[start_pt:end_pt]
+        comp_tensor = torch.LongTensor(components).to(V_torch.device)
+        U_subset = torch_sparse.index_select(U_sparse_torch, 0, comp_tensor)
+        y_temp = torch_sparse.matmul(U_subset, V_torch)
+        
+
+        if a_sparse is not None and c is not None:
+            a_subset = torch_sparse.index_select(a_sparse, 0, comp_tensor)
+            ac_prod = torch_sparse.matmul(a_subset, c)
+            y_temp = torch.sub(y_temp, ac_prod)
+            
+        y_temp = threshold_data_inplace(y_temp, th, axisVal=1)
+        
+        normalizer = torch.sum(c_init * c_init)
+        elt_product = torch.sum(c_init[None, :] * y_temp, axis = 1)
+        
+        curr_values = elt_product / normalizer
+        threshold_function = torch.nn.ReLU()
+        curr_values_thr = threshold_function(curr_values)
+    
+        final_values = torch.cat((final_values, curr_values_thr.type(final_values.dtype)), dim=0)
+        
+    return final_values
+
+
 def superpixel_init(U_sparse, R, V, V_PMD, patch_size, num_plane, data_order, dims, cut_off_point, residual_cut, length_cut, th, batch_size, pseudo, device, text =True, plot_en = False, a = None, c = None):
     '''
     API: 
@@ -1471,8 +1508,18 @@ class PMDVideo():
         self.a = None
         self.c = None
         self.b = None
-        self.initialized = False
+        self.a_init = None
+        self.mask_a_init = None
+        self.c_init = None
+        self.b_init = None
+        self.num_passes_run = 0
+        
+        
+        # self.initialized = False
+        
+        self.superpixel_rlt_recent = None
         self.superpixel_rlt = []
+        self.superpixel_image_recent = None
         self.superpixel_image_list=[]
         
         
@@ -1480,32 +1527,53 @@ class PMDVideo():
         self.r = ring_radius
         self.W = ring_model(self.d1, self.d2, self.r, device=self.device, order=self.data_order, empty=True)
         
+     
+    def finalize_initialization(self):
+        self.demixing_state = True
+        self.a = self.a_init
+        self.b = self.b_init
+        self.c = self.c_init
+        self.mask_a = self.mask_a_init
+        
+        if self.superpixel_rlt_recent is not None: 
+            self.superpixel_rlt.append(self.superpixel_rlt_recent)
+            self.superpixel_image_list.append(self.superpixel_image_recent)
+            
+            self.superpixel_rlt_recent = None
+            self.superpixel_image_recent = None
+        
+        
     def initialize_signals_superpixels(self, num_plane, cut_off_point, residual_cut, length_cut, th, pseudo_2, \
                                        text =True, plot_en = False, a = None, c = None):
         '''
         See superpixel_init function above for a clear explanation of what each of these parameters should be
         '''
-        patch_size = [100, 100]
-        self.a, self.mask_a, self.c, self.b, output_dictionary, superpixel_image = superpixel_init(self.U_sparse,self.R,self.V, self.V_orig, patch_size, num_plane, self.data_order, self.shape, cut_off_point, residual_cut, length_cut, th, self.batch_size, pseudo_2, self.device, text = text, plot_en = plot_en, a = self.a, c = self.c)
-        
-        self.superpixel_rlt.append(output_dictionary)
-        self.superpixel_image_list.append(superpixel_image)
-        self.initialized = True
-        self.demixing_state = True
-        
+
+        if not self.demixing_state:
+            patch_size = [100, 100]
+            self.a_init, self.mask_a_init, self.c_init, self.b_init, output_dictionary, superpixel_image = superpixel_init(self.U_sparse,self.R,self.V, self.V_orig, patch_size, num_plane, self.data_order, self.shape, cut_off_point, residual_cut, length_cut, th, self.batch_size, pseudo_2, self.device, text = text, plot_en = plot_en, a = self.a, c = self.c)
+
+
+            self.superpixel_rlt_recent = output_dictionary
+            self.superpixel_image_recent = superpixel_image
+            # self.initialized = True
+
+        else:
+            print("Cannot run initialization until current round of demixing is done")
+
     def initialize_signals_custom(self, custom_init):
         
         assert custom_init['a'].shape[2] > 0, 'Must provide at least 1 spatial footprint'
         assert self.a is None and self.c is None, 'Custom init is only supported for the first initialization, not for subsequent initializations'
-        self.a, self.mask_a, self.c, self.b = process_custom_signals(custom_init['a'].copy(), self.U_sparse, self.V_orig, device=self.device, order=self.data_order)
-        self.initialized = True
-        self.demixing_state = True
+        self.a_init, self.mask_a_init, self.c_init, self.b_init = process_custom_signals(custom_init['a'].copy(), self.U_sparse, self.V_orig, device=self.device, order=self.data_order)
+        # self.initialized = True
         
     def precompute_quantities(self, maxiter):
         '''
         Args: 
             maxiter: int. Number of iterations to be run (long term eliminate this)
         '''
+        self.finalize_initialization()
         self.K = self.c.shape[1]
         self.res = np.zeros(maxiter)
         self.uv_mean = get_mean_data(self.U_sparse, self.V_orig)
@@ -1531,7 +1599,7 @@ class PMDVideo():
         self.precomputed=True
         
     def _assert_initialization(self):
-        assert self.initialized, "Initialization was not run"
+        assert self.a is not None and self.c is not None, "Initialization was not run"
         
     def _assert_ready_to_demix(self):
         assert self.precomputed, "The values were precomputed"
@@ -1565,7 +1633,6 @@ class PMDVideo():
             #This means we need to create the actual W matrix (i.e. it can't just be empty)
             self.W = ring_model(self.d1, self.d2, self.r, empty=False, device=self.device, order=self.data_order)
         ring_model_update(self.U_sparse, self.R, self.V, self.W, X_temp, self.b, self.a, self.d1, self.d2, device=self.device)
-        # ring_model_update(self.U_sparse, self.R, self.V, self.W, self.c, self.b, self.a, self.d1, self.d2, device=self.device)
         
     def temporal_update(self, denoise=False, plot_en=False):
         self._assert_initialization()
@@ -1680,6 +1747,7 @@ class PMDVideo():
         
         self.demixing_state = False
         self.precomputed=False
+        # self.initialized = False
         
         return self.a, self.c, self.b, self.X, self.W, self.res, corr_img_all_r, self.num_list
 
