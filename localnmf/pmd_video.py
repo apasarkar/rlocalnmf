@@ -26,6 +26,7 @@ from matplotlib import ticker
 from scipy.ndimage.filters import convolve
 from scipy.ndimage.morphology import distance_transform_bf
 from scipy.sparse import csc_matrix
+from localnmf import ca_utils
 from localnmf.ca_utils import add_1s_to_rowspan, denoise 
 from localnmf.constrained_ring.cnmf_e import ring_model, ring_model_update, ring_model_update_sampling
 from localnmf import regression_update
@@ -1479,7 +1480,7 @@ def spatial_comp_plot(a, corr_img_all_r, num_list=None, ini=False, order="C"):
 class PMDVideo():
     
     
-    def __init__(self, U_sparse, R, s, V, ring_radius, dimensions, data_order="F", device='cpu'):
+    def __init__(self, U_sparse, R, s, V, dimensions, data_order="F", device='cpu'):
         '''
         Things to manage: 
             - pmd_setup_routine should be executed at init time here, so that the data representation has the 1's vector in the rowspan of V from the beginning. 
@@ -1524,8 +1525,8 @@ class PMDVideo():
         
         
         ## Initialize ring model object for neuropil estimation
-        self.r = ring_radius
-        self.W = ring_model(self.d1, self.d2, self.r, device=self.device, order=self.data_order, empty=True)
+        ring_placeholder = 5
+        self.W = ring_model(self.d1, self.d2, ring_placeholder, device=self.device, order=self.data_order, empty=True)
         
      
     def finalize_initialization(self):
@@ -1544,7 +1545,7 @@ class PMDVideo():
         
         
     def initialize_signals_superpixels(self, num_plane, cut_off_point, residual_cut, length_cut, th, pseudo_2, \
-                                       text =True, plot_en = False, a = None, c = None):
+                                       text =True, plot_en = False):
         '''
         See superpixel_init function above for a clear explanation of what each of these parameters should be
         '''
@@ -1568,11 +1569,13 @@ class PMDVideo():
         self.a_init, self.mask_a_init, self.c_init, self.b_init = process_custom_signals(custom_init['a'].copy(), self.U_sparse, self.V_orig, device=self.device, order=self.data_order)
         # self.initialized = True
         
-    def precompute_quantities(self, maxiter):
+    def precompute_quantities(self, maxiter, ring_radius=15):
         '''
         Args: 
             maxiter: int. Number of iterations to be run (long term eliminate this)
+            ring_radius. int, default of 15 
         '''
+        self.r = ring_radius
         self.finalize_initialization()
         self.K = self.c.shape[1]
         self.res = np.zeros(maxiter)
@@ -1718,6 +1721,19 @@ class PMDVideo():
         a_scipy = a_scipy.multiply(mask_ab_scipy)
         self.a = torch_sparse.tensor.from_scipy(a_scipy).float().to(self.device)
 
+        
+    def reset(self):
+        '''
+        Generic reset to "initial" state of PMD demixing object
+        '''
+        self.a = None
+        self.c = None
+        self.mask_a = None
+        self.b = None
+        self.a_init = None
+        self.c_init = None
+        self.mask_a_init = None
+        self.b_init = None
 
     
             
