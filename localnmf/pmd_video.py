@@ -1356,7 +1356,7 @@ def superpixel_init(U_sparse, R, V, V_PMD, patch_size, num_plane, data_order, di
 
     #Plot superpixel correlation image
     if plot_en:
-        Cnt = local_correlation_mat(U_sparse, R, V, dims, pseudo, a=None, c=None, order=data_order)
+        Cnt = local_correlation_mat(U_sparse, R, V, dims, pseudo, a=a, c=c, order=data_order)
         _, superpixel_img = pure_superpixel_corr_compare_plot(connect_mat_1, unique_pix, pure_pix, brightness_rank_sup, brightness_rank, Cnt, text, order=data_order);
     else:
         superpixel_img = None
@@ -1665,6 +1665,11 @@ class PMDVideo():
             self.a, self.c, self.standard_correlation_image, self.residual_correlation_image, self.mask_ab, self.num_list = delete_comp(self.a, self.c, self.standard_correlation_image, self.residual_correlation_image, self.mask_ab, self.num_list, temp, "zero a!", plot_en, (self.d1, self.d2), order=self.data_order);
             self.X = regression_update.estimate_X(self.c, self.V_orig, self.VVt_orig)
             
+    def compute_local_correlation_image(self, pseudo):
+        ##Long term: the currently initialized "a" and "c" should just be on the same device as U_sparse,R,V
+        a_device = torch_sparse.tensor.from_scipy(scipy.sparse.coo_matrix(self.a)).float().to(self.device)
+        c_device = torch.from_numpy(self.c).float().to(self.device)
+        return local_correlation_mat(self.U_sparse, self.R, self.V, self.shape, pseudo, a=a_device, c=c_device, order=self.data_order, batch_size=self.batch_size)
             
     def compute_standard_correlation_image(self):
         self.standard_correlation_image = vcorrcoef_UV_noise(self.U_sparse, self.R, self.V, self.c, batch_size = self.batch_size,  device=self.device)
@@ -1719,8 +1724,7 @@ class PMDVideo():
         a_scipy = self.a.to_scipy().tocsr()
         mask_ab_scipy = self.mask_ab.to_scipy().tocsr()
         a_scipy = a_scipy.multiply(mask_ab_scipy)
-        self.a = torch_sparse.tensor.from_scipy(a_scipy).float().to(self.device)
-
+        self.a = torch_sparse.tensor.from_scipy(a_scipy).float().to(self.device)        
         
     def reset(self):
         '''
@@ -1734,8 +1738,11 @@ class PMDVideo():
         self.c_init = None
         self.mask_a_init = None
         self.b_init = None
-
-    
+        
+        self.superpixel_rlt_recent = None
+        self.superpixel_rlt = []
+        self.superpixel_image_recent = None
+        self.superpixel_image_list=[]
             
 
     def brightness_order_and_return_state(self):
