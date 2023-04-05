@@ -243,6 +243,8 @@ def vcorrcoef_resid(U_sparse, R, V, a_sparse, c_orig, batch_size = 10000, device
         
     return corr_img.cpu().numpy()
 
+   
+
 
 def vcorrcoef_UV_noise(U_sparse, R, V, c_orig, pseudo = 0, batch_size = 1000, tol = 0.000001, device='cpu'):
     '''
@@ -1150,6 +1152,43 @@ def local_correlation_mat(U, R, V, dims, pseudo, a=None, c=None, order="C", batc
     
     return compute_correlation(I, U, R, m, s, norm, a=a, X=X, batch_size=batch_size).cpu().numpy().reshape((dims[0], dims[1], -1), order=order)
 
+
+def single_pixel_correlation_image(row_index, U_sparse, R, V, a=None, c=None, batch_size=100):
+    device = R.device
+    if a is not None and c is not None:
+        X = torch.matmul(V,c).t() #Equivalently a linear subspace projection of c onto V...
+    else:
+        row = torch.Tensor([]).to(device).long()
+        col = torch.Tensor([]).to(device).long()
+        value = torch.Tensor([]).to(device).bool()
+        a = torch_sparse.tensor.SparseTensor(row = row, col = col, value=value, sparse_sizes=(U_sparse.sparse_sizes()[0], 1))
+        X = torch.zeros(1, V.shape[0], device=device)
+        
+    m, s = get_mean(U_sparse, R, V, a=a, X=X)
+    norm = get_pixel_normalizer(U_sparse, R, V, m, s, 0, a=a, X=X, batch_size=batch_size)
+    
+    #Finally, get the centered row of interest: 
+    row_index_tensor = torch.Tensor([row_index]).to(device).long()
+    U_sparse_row = torch_sparse.index_select(U_sparse, 0, row_index_tensor )
+    a_sparse_row = torch_sparse.index_select(a, 0, row_index_tensor)
+    
+    centered_pixel = torch_sparse.matmul(U_sparse_row, R) - torch_sparse.matmul(a_sparse_row, X) - torch.matmul(m[[row_index], :], s)
+    centered_pixel = centered_pixel.t()
+    
+    Rprod = torch.matmul(R, centered_pixel)
+    URprod = torch_sparse.matmul(U_sparse, Rprod)
+    
+    Xprod = torch.matmul(X, centered_pixel)
+    aXprod = torch_sparse.matmul(a, Xprod) 
+    
+    sprod = torch.matmul(s, centered_pixel) 
+    msprod = torch.matmul(m, sprod) 
+    
+    final_result = URprod - aXprod - msprod
+    
+    final_normalizer = norm * norm[row_index]
+    final_normalizer[ final_normalizer == 0] = 1
+    return final_result / final_normalizer
     
 def prepare_iteration_UV(dims, connect_mat_1, permute_col, pure_pix, U_mat, V_mat, more=False):
     """
@@ -1670,6 +1709,18 @@ class PMDVideo():
         a_device = torch_sparse.tensor.from_scipy(scipy.sparse.coo_matrix(self.a)).float().to(self.device)
         c_device = torch.from_numpy(self.c).float().to(self.device)
         return local_correlation_mat(self.U_sparse, self.R, self.V, self.shape, pseudo, a=a_device, c=c_device, order=self.data_order, batch_size=self.batch_size)
+    
+    def compute_single_pixel_correlation_image(self, row_index, residual=True):
+        '''
+        Calculates the residual correlation image
+        '''
+        if self.a is not None and self.c is not None and residual: 
+            a_device = torch_sparse.tensor.from_scipy(scipy.sparse.coo_matrix(self.a)).float().to(self.device)
+            c_device = torch.from_numpy(self.c).float().to(self.device)
+        else:
+            a_device = None
+            c_device = None
+        return single_pixel_correlation_image(row_index, self.U_sparse, self.R, self.V, a=a_device, c=c_device, batch_size=self.batch_size)
             
     def compute_standard_correlation_image(self):
         self.standard_correlation_image = vcorrcoef_UV_noise(self.U_sparse, self.R, self.V, self.c, batch_size = self.batch_size,  device=self.device)
