@@ -1777,6 +1777,24 @@ class PMDVideo():
         a_scipy = a_scipy.multiply(mask_ab_scipy)
         self.a = torch_sparse.tensor.from_scipy(a_scipy).float().to(self.device)        
         
+    def get_PMD_row(self, row_index):
+        '''
+        Utility function for accessing a single row of the PMD denoised data
+        '''
+        assert 0 <= row_index and row_index < self.U_sparse.sparse_sizes()[0], "Row Index is out of range"
+        
+        row_index_tensor = torch.Tensor([row_index]).to(self.device).long()
+        my_row = torch_sparse.index_select(self.U_sparse, 0, row_index_tensor)
+        my_row_R = torch_sparse.matmul(my_row, self.R)
+        my_row_RV = torch.matmul(my_row_R, self.V)
+        
+        return my_row_RV
+        
+    
+    def get_background_row(self, row_index):
+        pass
+    
+    
     def reset(self):
         '''
         Generic reset to "initial" state of PMD demixing object
