@@ -150,6 +150,45 @@ class ring_model:
         else:
             return product.t()
         
+    def compute_fluctuating_background_row(self, U_sparse, R, V, a, b, row_index):
+        '''
+        Computes a specific row of W(URV - ac - b), which is the fluctuating background. 
+        Recall  we enforce that column i of W contains all zeros whenever row 'i' of a contains nonzero entries. So Wa will always be zero, and the above expression becomes: 
+        W(URV - b)
+        Parameters: 
+            U_sparse. torch_sparse Tensor. Dimensions (d1*d2, d1*d2)
+            R: torch.Tensor. Dimensions (r x r)
+            V: torch.Tensor. Dimensions (r x T) 
+            a_sparse: numpy.ndarray. Dimensions (d1*d2, K) where K is the number of neural shapes
+            b: numpy.ndarray. Dimensions (d1*d2, 1)
+            
+        TODO: Splitting between torch and numpy here is bad design, long term fix this
+        '''
+        device = R.device
+        b_torch = torch.Tensor(b).float().to(device)
+        
+        a_support = np.sum(a, axis = 1) == 0
+        row_index_tensor = torch.Tensor([row_index]).to(device).long()
+        W_selected = torch_sparse.index_select(self.W_mat, 0, row_index_tensor).float()
+        
+        #Apply unweighted ring model to W(URV - b)
+        sparsity_selector_matrix = scipy.sparse.diags(a_support.astype("float32"), shape = (U_sparse.sparse_sizes()[0], U_sparse.sparse_sizes()[0]))
+        sparsity_selector_matrix = torch_sparse.tensor.from_scipy(sparsity_selector_matrix).to(device)
+        sparser_U = torch_sparse.matmul(sparsity_selector_matrix, U_sparse)
+        sparse_WU = torch_sparse.matmul(W_selected, sparser_U)
+        sparse_WUR = torch_sparse.matmul(sparse_WU, R)
+        WURV = torch.matmul(sparse_WUR, V)
+        
+        sparser_b = torch_sparse.matmul(sparsity_selector_matrix, b_torch)
+        Wb = torch_sparse.matmul(W_selected, sparser_b)
+        
+        difference = WURV - Wb
+        
+        #Apply weight at end
+        weighted_row = self.weights[row_index_tensor] * difference
+        return weighted_row
+        
+        
     
     def zero_weights(self):
         self.weights = self.weights * 0

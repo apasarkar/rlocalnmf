@@ -1792,7 +1792,7 @@ class PMDVideo():
         
     
     def get_background_row(self, row_index):
-        pass
+        return self.W.compute_fluctuating_background_row(self.U_sparse, self.R, self.V, self.a, self.b, row_index)
     
     
     def reset(self):
