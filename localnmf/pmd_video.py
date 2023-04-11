@@ -489,35 +489,48 @@ def reshape_c(x, shape):
     return torch.reshape(x, shape)
     
 
-def find_superpixel_UV(U_sparse, V, dims, cut_off_point, length_cut, th, order="C", eight_neighbours=True, \
-                        device = 'cuda', a = None, c = None, batch_size = 10000, pseudo = 0, tol = 0.000001):
-    """
-    Find superpixels in Yt.  For each pixel, calculate its correlation with neighborhood pixels.
-    If it's larger than threshold, we connect them together.  In this way, we form a lot of connected components.
-    If its length is larger than threshold, we keep it as a superpixel.
-    Parameters:
-    ----------------
-    Yt: 3d np.darray, dimension d1 x d2 x T
-        thresholded data
-    cut_off_point: double scalar
-        correlation threshold
-    length_cut: double scalar
-        length threshold
-    eight_neighbours: Boolean
-        Use 8 neighbors if true.  Defalut value is True.
-    Return:
-    ----------------
-    connect_mat_1: 2d np.darray, d1 x d2
-        illustrate position of each superpixel.
-        Each superpixel has a random number "indicator".  Same number means same superpixel.
-    idx: double scalar
-        number of superpixels
-    comps: list, length = number of superpixels
-        comp on comps is also list, its value is position of each superpixel in Yt_r = Yt.reshape(np.prod(dims[:2]),-1,order="F")
-    permute_col: list, length = number of superpixels
-        all the random numbers used to idicate superpixels in connect_mat_1
-    """
+def get_total_edges(d1, d2):
+    assert d1 > 2 and d2 > 2, "At least one dimensions is less than 2 pixels. Not supported" 
+    overcount = 8*(d1-2)*(d2-2) + 2*(d1-2)*5 + 2*(d2-2)*5 + 4*3
+    return (math.ceil(overcount / 2))
+
+def get_local_correlation_structure(U_sparse, V, dims, th, order = "C", batch_size = 10000, pseudo=0, tol = 0.000001, a = None, c = None):
+    '''
+    Computes a local correlation data structure, which describes the correlations between all neighboring pairs of pixels
     
+    Context: here, 
+    d1, d2 are the fov dimensions of the original data (i.e. 512 x 512 pixels or the like) 
+    T is the number of frames in the video
+    R is the rank of the PMD decomposition (so U_sparse has shape (d1*d2, R) and V has shape (R, T)) 
+    K is the number of neural signals identified (in "a" and "c", if they are provided)
+    
+    Inputs: 
+        U_sparse: torch_sparse.Tensor object, shape (d1*d2, T)
+        V: torch.Tensor, shape (R, T)
+        dims: (d1, d2, T)
+        th: int (positive integer), describes the MAD threshold. We use this to threshold the pixels for when we compute correlations. 
+            We compute the median and median absolute deviation (MAD), then zero all bins (x,t) such that Yd(x,t) < med(x) + th * MAD(x). 
+        order: "C" or "F" Indicates how we reshape the 2D images of the video (d1, d2) into (d1*d2) column vectors. The order here is important for consistency.
+        batch_size: int. Maximum number of pixels of the movie that we fully expand out (i.e. we never have more than batch_size * T -sized Tensor in device memory.
+            This is useful for GPU memory management, especially on small graphics cards.
+        pseudo: float >= 0. a robust correlation parameter, used in the robust correlation calculation between every pair of neighboring pixels.
+            In general, a higher value of pseudo will reduce the compute correlation between two pixels.
+        tol: float. A tolerance parameter used when normalizing time series (to avoid divide by "close to 0" issues).
+        (Optional) a: numpy.ndarray. A (d1*d2, K)-shaped ndarray whose columns describe the correlation structure of the data. 
+        (Optional) c: numpy.ndarray. A (T, K)-shaped array whose columns describe the estimated fluorescence time course of each signal.
+        
+    Returns:
+    The following correlation Data Structure: 
+    To understand this, recall that we flatten the 2D field of view into a 1 dimensional column vector
+        dim1_coordinates: torch.Tensor, 1 dimensional. Describes a list of row coordinates in the field of view 
+        dim2_coordinates: torch.Tensor, 1 dimensional. Describes a list of row coordinates in the field of view
+        correlations: torch.Tensor, 1 dimensional. 
+        
+    Key: each element at index i of "correlations" describes the computed correlation between the adjacent pixels given by 
+            dim1_coordinates[i] and dim2_coordinates[i]
+    '''
+    
+    device = V.device
     if a is not None and c is not None: 
         resid_flag = True
     else:
@@ -530,7 +543,12 @@ def find_superpixel_UV(U_sparse, V, dims, cut_off_point, length_cut, th, order="
 
     dims = (dims[0], dims[1], V.shape[1])
     T = V.shape[1]
-    ref_mat = np.arange(np.prod(dims[:-1])).reshape(dims[:-1],order=order)
+    
+    ref_mat = torch.arange(np.prod(dims[:-1]), device=device)
+    if order == "F":
+        ref_mat = reshape_fortran(ref_mat, (dims[0], dims[1]))
+    else:
+        ref_mat = reshape_c(ref_mat, (dims[0], dims[1]))
     
         
     
@@ -542,9 +560,13 @@ def find_superpixel_UV(U_sparse, V, dims, cut_off_point, length_cut, th, order="
     
     
     #Pixel-to-pixel coordinates for highly-correlated neighbors
-    A_indices = []
-    B_indices = []
+    total_edges = 2*get_total_edges(dims[0], dims[1])  #Here we multiply by two because when we tile the FOV, some correlations are computed twice
+    point1_indices = torch.zeros((total_edges), dtype=torch.int32, device=device)
+    point2_indices = torch.zeros((total_edges), dtype=torch.int32, device=device)
+    correlation_values = torch.zeros((total_edges), dtype=torch.float32, device=device)
     
+    
+    progress_index = 0
     for tile_x in range(iters_x):
         for tile_y in range(iters_y):
             x_pt = (tiles-1)*tile_x
@@ -555,17 +577,22 @@ def find_superpixel_UV(U_sparse, V, dims, cut_off_point, length_cut, th, order="
             indices_curr_2d = ref_mat[x_pt:x_end, y_pt:y_end]
             x_interval = indices_curr_2d.shape[0]
             y_interval = indices_curr_2d.shape[1]
-            indices_curr = indices_curr_2d.reshape((x_interval*y_interval,), order = order)
             
- 
-            indices_curr_torch = torch.from_numpy(indices_curr).to(device)
-            U_sparse_crop = torch_sparse.index_select(U_sparse, 0, indices_curr_torch)
+            
+            if order == "F":
+                indices_curr = reshape_fortran(indices_curr_2d, (x_interval*y_interval,))
+            else:
+                indices_curr = reshape_c(indices_curr_2d, (x_interval*y_interval,))
+                
+            
+            
+            U_sparse_crop = torch_sparse.index_select(U_sparse, 0, indices_curr)
             if order == "F":
                 Yd = reshape_fortran(torch_sparse.matmul(U_sparse_crop, V), (x_interval, y_interval, -1))
             else:
                 Yd = reshape_c(torch_sparse.matmul(U_sparse_crop, V), (x_interval, y_interval, -1))
             if resid_flag:
-                a_sparse_crop = torch_sparse.index_select(a_sparse, 0, indices_curr_torch)
+                a_sparse_crop = torch_sparse.index_select(a_sparse, 0, indices_curr)
                 if order == "F":
                     ac_mov = reshape_fortran(torch_sparse.matmul(a_sparse_crop, c), (x_interval, y_interval, -1))
                 else:
@@ -593,52 +620,94 @@ def find_superpixel_UV(U_sparse, V, dims, cut_off_point, length_cut, th, order="
            
             #Vertical pixel correlations
             rho = torch.mean(Yd[:, :-1, :] * Yd[:, 1:, :], dim = 0)
-            # print("vertical. after the elt wise mult, rho shape is {}".format(rho.shape))
-            rho = torch.cat( (rho,torch.zeros([1, rho.shape[1]]).double().to(device)), dim = 0)
-            temp_rho = rho.cpu().numpy()
-            temp_indices = np.where(temp_rho > cut_off_point)
-            A_curr = ref_mat[(temp_indices[0] + x_pt, temp_indices[1] + y_pt)]
-            B_curr = ref_mat[(temp_indices[0] + x_pt + 1, temp_indices[1] + y_pt)]
-            A_indices.append(A_curr)
-            B_indices.append(B_curr)
-            
+            point1_curr = indices_curr_2d[:-1, :].flatten()
+            point2_curr = indices_curr_2d[1:, :].flatten()
+            rho_curr = rho.flatten()
+            point1_indices[progress_index:progress_index+point1_curr.shape[0]] = point1_curr
+            point2_indices[progress_index:progress_index+point1_curr.shape[0]] = point2_curr
+            correlation_values[progress_index:progress_index+point1_curr.shape[0]] = rho_curr
+            progress_index = progress_index + point1_curr.shape[0]
+                        
             
             #Horizonal pixel correlations
             rho = torch.mean(Yd[:, :, :-1] * Yd[:, :, 1:], dim = 0)
-            rho = torch.cat( (rho,torch.zeros([rho.shape[0], 1]).double().to(device)), dim = 1)
-            temp_rho = rho.cpu().numpy()
-            temp_indices = np.where(temp_rho > cut_off_point)
-            A_curr = ref_mat[(temp_indices[0] + x_pt, temp_indices[1] + y_pt)]
-            B_curr = ref_mat[(temp_indices[0] + x_pt, temp_indices[1] + y_pt + 1)]
-            A_indices.append(A_curr)
-            B_indices.append(B_curr)
+            point1_curr = indices_curr_2d[:, :-1].flatten()
+            point2_curr = indices_curr_2d[:, 1:].flatten()
+            rho_curr = rho.flatten()
+            point1_indices[progress_index:progress_index+point1_curr.shape[0]] = point1_curr
+            point2_indices[progress_index:progress_index+point1_curr.shape[0]] = point2_curr
+            correlation_values[progress_index:progress_index+point1_curr.shape[0]] = rho_curr
+            progress_index = progress_index + point1_curr.shape[0]
             
-            if eight_neighbours:
-                #Right-sided pixel correlations
-                rho = torch.mean(Yd[:, :-1, :-1]*Yd[:, 1:, 1:], dim=0)
-                rho = torch.cat((rho, torch.zeros([rho.shape[0],1]).double().to(device)), dim=1)
-                rho = torch.cat((rho, torch.zeros([1, rho.shape[1]]).double().to(device)), dim=0)
-                temp_rho = rho.cpu().numpy()
-                temp_indices = np.where(temp_rho > cut_off_point)
-                A_curr = ref_mat[(temp_indices[0] + x_pt, temp_indices[1] + y_pt)]
-                B_curr = ref_mat[(temp_indices[0] + x_pt + 1, temp_indices[1] + y_pt + 1)]
-                A_indices.append(A_curr)
-                B_indices.append(B_curr)
-                
-                #Left-sided pixel correlations
-                rho = torch.mean(Yd[:, 1:, :-1]*Yd[:, :-1, 1:], dim=0)
-                rho = torch.cat( (torch.zeros([rho.shape[0],1]).double().to(device), rho), dim=1)
-                rho = torch.cat((rho, torch.zeros([1, rho.shape[1]]).double().to(device)), dim=0)
-                temp_rho = rho.cpu().numpy()
-                temp_indices = np.where(temp_rho > cut_off_point)
-                A_curr = ref_mat[(temp_indices[0] + x_pt, temp_indices[1] + y_pt)]
-                B_curr = ref_mat[(temp_indices[0] + x_pt + 1, temp_indices[1] + y_pt - 1)]
-                A_indices.append(A_curr)
-                B_indices.append(B_curr)
-            
+            #Top left and bottom right diagonal correlations
+            rho = torch.mean(Yd[:, :-1, :-1]*Yd[:, 1:, 1:], dim=0)
+            point1_curr = indices_curr_2d[:-1, :-1].flatten()
+            point2_curr = indices_curr_2d[1:, 1:].flatten()
+            rho_curr = rho.flatten()
+            point1_indices[progress_index:progress_index+point1_curr.shape[0]] = point1_curr
+            point2_indices[progress_index:progress_index+point1_curr.shape[0]] = point2_curr
+            correlation_values[progress_index:progress_index+point1_curr.shape[0]] = rho_curr
+            progress_index = progress_index + point1_curr.shape[0]
 
-    A = np.concatenate(A_indices)
-    B = np.concatenate(B_indices)
+            #Bottom left and top right diagonal correlations
+            rho = torch.mean(Yd[:, 1:, :-1]*Yd[:, :-1, 1:], dim=0)
+            point1_curr = indices_curr_2d[1:, :-1].flatten()
+            point2_curr = indices_curr_2d[:-1, 1:].flatten()
+            rho_curr = rho.flatten()
+            point1_indices[progress_index:progress_index+point1_curr.shape[0]] = point1_curr
+            point2_indices[progress_index:progress_index+point1_curr.shape[0]] = point2_curr
+            correlation_values[progress_index:progress_index+point1_curr.shape[0]] = rho_curr
+            progress_index = progress_index + point1_curr.shape[0]
+                
+    return point1_indices[:progress_index], point2_indices[:progress_index], correlation_values[:progress_index]
+
+    
+
+def find_superpixel_UV(dims, cut_off_point, length_cut, dim1_coordinates, dim2_coordinates, correlations, order):
+    """
+    Find in the PMD denoised movie. We are given arrays describing the 'local' correlation structure for each pixel of the movie. 
+    We can threshold this correlation to identify the pairs of neighboring pixels with high correlations. This produces a "graph", whose nodes are the set 
+    of pixels. The clusters of connected components in this graph are superpixels. 
+
+
+    Context: 
+        d1, d2: the FOV dimensions
+        T: The number of frames 
+        R: rank of PMD decomposition
+    Parameters:
+    ----------------
+    U_sparse: torch_sparse.Tensor object, shape (d1*d2, T)
+    V: torch.Tensor, shape (R, T)
+    dims: (d1, d2, T)
+    cut_off_point: float between 0 and 1. Correlation threshold which we use to determine whether two neighboring pixels are "highly correlated" 
+    length_cut: int. Minimum size of a connected component required for us to call it a superpixel
+    
+    Correlation Data Structure: 
+    To understand this, note that we flatten the 2D field of view into a 1 dimensional column vector
+        dim1_coordinates: torch.Tensor, 1 dimensional. Describes a list of row coordinates in the field of view 
+        dim2_coordinates: torch.Tensor, 1 dimensional. Describes a list of row coordinates in the field of view
+        correlations: torch.Tensor, 1 dimensional. Element at index i of this matrix describes the correlation the pixels given by 
+            dim1_coordinates[i] and dim2_coordinates[i]
+    
+    order: "F" or "C", indicates the order in which we reshape 2D (d1, d2)-shaped images into (d1*d2)-shaped column vectors
+    Return:
+    ----------------
+    connect_mat_1: 2d np.darray, d1 x d2
+        illustrate position of each superpixel.
+        Each superpixel has a random number "indicator".  Same number means same superpixel.
+    idx: double scalar
+        number of superpixels
+    comps: list, length = number of superpixels
+        comp on comps is also list, its value is position of each superpixel in Yt_r = Yt.reshape(np.prod(dims[:2]),-1,order="F")
+    permute_col: list, length = number of superpixels
+        all the random numbers used to idicate superpixels in connect_mat_1
+    """
+    
+    #Here we can apply the threshold: 
+    good_indices = torch.where(correlations > cut_off_point)[0]
+    A = torch.index_select(dim1_coordinates, 0, good_indices).cpu().numpy()
+    B = torch.index_select(dim2_coordinates, 0, good_indices).cpu().numpy()
+    values = torch.index_select(correlations, 0, good_indices).cpu().numpy()
 
     ########### form connected componnents #########
     G = nx.Graph();
@@ -661,7 +730,6 @@ def find_superpixel_UV(U_sparse, V, dims, cut_off_point, length_cut, th, order="
             ii = ii+1;
     connect_mat_1 = connect_mat.reshape(dims[0],dims[1],order=order);
     return connect_mat_1, idx, comps, permute_col
-
   
 def spatial_temporal_ini_UV(U_sparse_torch, V_torch, dims, th, comps, idx, length_cut, a = None, c = None, device = 'cpu', pixel_limit=2000):
     """
@@ -1327,8 +1395,29 @@ def superpixel_init(U_sparse, R, V, V_PMD, patch_size, num_plane, data_order, di
         first_init_flag = False
     else:
         raise ValueError("Invalid configuration of c and a values were provided") 
-    ## cut image into small parts to find pure superpixels ##
+    
 
+
+    # if num_plane > 1:
+        # raise ValueError('num_plane > 2 (higher dimensional data) not supported!')
+    assert num_plane == 1, "Only single-plane data is currently supported"
+    
+    print("find superpixels!")
+
+
+    dim1_coordinates, dim2_coordinates, correlations = get_local_correlation_structure(U_sparse, V_PMD, dims, th, order = data_order,\
+                                                                               batch_size = batch_size, pseudo=pseudo, a = a, c = c)
+    connect_mat_1, idx, comps, permute_col= find_superpixel_UV(dims, cut_off_point, length_cut, dim1_coordinates, dim2_coordinates, correlations, data_order)
+
+    c_ini, a_ini = spatial_temporal_ini_UV(U_sparse, V_PMD, dims, th, comps, idx, length_cut, a = a, c = c, device=device)
+
+
+
+
+    start = time.time();
+    
+    print("find pure superpixels!")
+    ## cut image into small parts to find pure superpixels ##
     patch_height = patch_size[0];
     patch_width = patch_size[1];
     height_num = int(np.ceil(dims[0]/patch_height));  ########### if need less data to find pure superpixel, change dims[0] here #################
@@ -1336,30 +1425,11 @@ def superpixel_init(U_sparse, R, V, V_PMD, patch_size, num_plane, data_order, di
     num_patch = height_num*width_num;
     patch_ref_mat = np.array(range(num_patch)).reshape(height_num, width_num, order=data_order);
 
-    if num_plane > 1:
-        raise ValueError('num_plane > 2 (higher dimensional data) not supported!')
-    else:
-        print("find superpixels!")
-
-        if first_init_flag:
-            connect_mat_1, idx, comps, permute_col = find_superpixel_UV(U_sparse, V_PMD, dims, cut_off_point,length_cut, th, order=data_order, eight_neighbours=True, device = device, batch_size = batch_size, pseudo=pseudo); 
-        else:
-            connect_mat_1, idx, comps, permute_col = find_superpixel_UV(U_sparse, V_PMD, dims, cut_off_point,length_cut, th, order=data_order, eight_neighbours=True, device = device, a=a, c=c, batch_size = batch_size, pseudo=pseudo);
-
-    if first_init_flag:
-        c_ini, a_ini = spatial_temporal_ini_UV(U_sparse, V_PMD, dims, th, comps, idx, length_cut, device=device)
-    else:
-        c_ini, a_ini = spatial_temporal_ini_UV(U_sparse, V_PMD, dims, th, comps, idx, length_cut, a = a, c = c, device=device)
-
-
-
     unique_pix = np.asarray(np.sort(np.unique(connect_mat_1)),dtype="int");
     unique_pix = unique_pix[np.nonzero(unique_pix)];
     brightness_rank_sup = order_superpixels(permute_col, unique_pix, a_ini, c_ini);
     pure_pix = [];
-
-    start = time.time();
-    print("find pure superpixels!")
+    
     for kk in range(num_patch):
         pos = np.where(patch_ref_mat==kk);
         up=pos[0][0]*patch_height;
