@@ -1351,7 +1351,7 @@ def fit_large_spatial_support(comp, c_init, U_sparse_torch, V_torch, th, a_spars
     return final_values
 
 
-def superpixel_init(U_sparse, R, V, V_PMD, patch_size, num_plane, data_order, dims, cut_off_point, residual_cut, length_cut, th, batch_size, pseudo, device, text =True, plot_en = False, a = None, c = None):
+def superpixel_init(U_sparse, R, V, V_PMD, patch_size, num_plane, data_order, dims, cut_off_point, residual_cut, length_cut, th, batch_size, pseudo, device, dim1_coordinates, dim2_coordinates, correlations, text =True, plot_en = False, a = None, c = None):
     '''
     API: 
         Inputs (define variables here)
@@ -1396,24 +1396,12 @@ def superpixel_init(U_sparse, R, V, V_PMD, patch_size, num_plane, data_order, di
     else:
         raise ValueError("Invalid configuration of c and a values were provided") 
     
-
-
-    # if num_plane > 1:
-        # raise ValueError('num_plane > 2 (higher dimensional data) not supported!')
     assert num_plane == 1, "Only single-plane data is currently supported"
     
     print("find superpixels!")
-
-
-    dim1_coordinates, dim2_coordinates, correlations = get_local_correlation_structure(U_sparse, V_PMD, dims, th, order = data_order,\
-                                                                               batch_size = batch_size, pseudo=pseudo, a = a, c = c)
     connect_mat_1, idx, comps, permute_col= find_superpixel_UV(dims, cut_off_point, length_cut, dim1_coordinates, dim2_coordinates, correlations, data_order)
 
     c_ini, a_ini = spatial_temporal_ini_UV(U_sparse, V_PMD, dims, th, comps, idx, length_cut, a = a, c = c, device=device)
-
-
-
-
     start = time.time();
     
     print("find pure superpixels!")
@@ -1632,6 +1620,11 @@ class PMDVideo():
         self.superpixel_image_recent = None
         self.superpixel_image_list=[]
         
+        #Reset the local pixelwise correlation connectivity data structure
+        self.dim1_coordinates = None
+        self.dim2_coordinates = None
+        self.correlations = None
+        
         
         ## Initialize ring model object for neuropil estimation
         ring_placeholder = 5
@@ -1644,6 +1637,12 @@ class PMDVideo():
         self.b = self.b_init
         self.c = self.c_init
         self.mask_a = self.mask_a_init
+        
+        #Reset the local pixelwise correlation connectivity data structure
+        self.dim1_coordinates = None
+        self.dim2_coordinates = None
+        self.correlations = None
+        
         
         if self.superpixel_rlt_recent is not None: 
             self.superpixel_rlt.append(self.superpixel_rlt_recent)
@@ -1659,14 +1658,21 @@ class PMDVideo():
         See superpixel_init function above for a clear explanation of what each of these parameters should be
         '''
 
+        import time
         if not self.demixing_state:
             patch_size = [100, 100]
-            self.a_init, self.mask_a_init, self.c_init, self.b_init, output_dictionary, superpixel_image = superpixel_init(self.U_sparse,self.R,self.V, self.V_orig, patch_size, num_plane, self.data_order, self.shape, cut_off_point, residual_cut, length_cut, th, self.batch_size, pseudo_2, self.device, text = text, plot_en = plot_en, a = self.a, c = self.c)
+            if self.dim1_coordinates is None:
+                #This indicates that it is the first time we are running the superpixel init with this set of pre-existing self.a and self.c values, so we need to compute the local correlation data
+                start_time = time.time()
+                self.dim1_coordinates, self.dim2_coordinates, self.correlations = get_local_correlation_structure(self.U_sparse, self.V_orig, self.shape, th, order = self.data_order,batch_size = self.batch_size, pseudo=pseudo_2, a = self.a, c = self.c)
+                print("the time to run the one time only local corr data structure computation is {}".format(time.time() - start_time))
 
+            start_time = time.time()
+            self.a_init, self.mask_a_init, self.c_init, self.b_init, output_dictionary, superpixel_image = superpixel_init(self.U_sparse,self.R,self.V, self.V_orig, patch_size, num_plane, self.data_order, self.shape, cut_off_point, residual_cut, length_cut, th, self.batch_size, pseudo_2, self.device, self.dim1_coordinates, self.dim2_coordinates, self.correlations, text = text, plot_en = plot_en, a = self.a, c = self.c)
+            print("the time to run pure superpixelization is {}".format(time.time() - start_time))
 
             self.superpixel_rlt_recent = output_dictionary
             self.superpixel_image_recent = superpixel_image
-            # self.initialized = True
 
         else:
             print("Cannot run initialization until current round of demixing is done")
@@ -1684,8 +1690,8 @@ class PMDVideo():
             maxiter: int. Number of iterations to be run (long term eliminate this)
             ring_radius. int, default of 15 
         '''
-        self.r = ring_radius
         self.finalize_initialization()
+        self.r = ring_radius
         self.K = self.c.shape[1]
         self.res = np.zeros(maxiter)
         self.uv_mean = get_mean_data(self.U_sparse, self.V_orig)
@@ -1909,7 +1915,11 @@ class PMDVideo():
         
         self.demixing_state = False
         self.precomputed=False
-        # self.initialized = False
+
+        #Reset the local pixelwise correlation connectivity data structure
+        self.dim1_coordinates = None
+        self.dim2_coordinates = None
+        self.correlations = None
         
         return self.a, self.c, self.b, self.X, self.W, self.res, corr_img_all_r, self.num_list
 
