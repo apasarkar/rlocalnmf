@@ -103,6 +103,8 @@ def spatial_update_HALS(U_sparse, V, W, X, a_sparse, c, b, s, U_sparse_inner=Non
     
     #Init s such that bsV = static background
     C_prime = torch.matmul(c.t(), c)
+    C_prime_diag = torch.diag(C_prime)
+    C_prime_diag[C_prime_diag == 0] = 1 # For division safety
     
     ctVt = torch.matmul(V, c).t()
     
@@ -148,7 +150,7 @@ def spatial_update_HALS(U_sparse, V, W, X, a_sparse, c, b, s, U_sparse_inner=Non
 
         
         cca = torch_sparse.matmul(a_sparse, C_prime[[i], :].t()).t()
-        final_vec = (ctVtUt_net[[i], :] - cca)/C_prime[i, i]
+        final_vec = (ctVtUt_net[[i], :] - cca)/C_prime_diag[i]
 
         
         #Crop final_vec
@@ -251,12 +253,15 @@ def temporal_update_HALS(U_sparse, V, W, X, a_sparse, c, b, s, U_sparse_inner=No
     
     ata = torch_sparse.matmul(a_sparse.t(), a_sparse).to_dense()
     
+    ata_d = torch.diag(ata)
+    ata_d[ata_d == 0] = 1 #For division-safety
+    
     threshold_function = torch.nn.ReLU()
     for i in range(c.shape[1]):
         a_ia = ata[[i], :]
         a_iaC = torch.matmul(a_ia, c.t())
         
-        c[:, [i]] += ((atU_net_V[[i], :] - a_iaC)/ata[i, i]).t()
+        c[:, [i]] += ((atU_net_V[[i], :] - a_iaC)/ata_d[i]).t()
         
         c[:, [i]] = threshold_function(c[:, [i]])
         
