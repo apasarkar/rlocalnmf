@@ -731,100 +731,124 @@ def find_superpixel_UV(dims, cut_off_point, length_cut, dim1_coordinates, dim2_c
     connect_mat_1 = connect_mat.reshape(dims[0],dims[1],order=order);
     return connect_mat_1, idx, comps, permute_col
   
-def spatial_temporal_ini_UV(U_sparse_torch, V_torch, dims, th, comps, idx, length_cut, a = None, c = None, device = 'cpu', pixel_limit=2000):
+def spatial_temporal_ini_UV(U_sparse_torch, V_torch, dims, th, comps, idx, length_cut, a = None, c = None):
     """
     Apply rank 1 NMF to find spatial and temporal initialization for each superpixel in Yt.
     Params:
         - U_sparse_torch: torch_sparse.Tensor, shape (d1*d2, R)
         - V_torch: torch.Tensor. Shape (R, T)
+        - dims: tuple, contains (d1, d2, T) )
+        - comps: list of sets. The i-th set here describes the spatial support of the i-th neural component
+        - idx: int. number of components (in comps)
+        - length_cut: int. Min size of superpixel
+        Optional inputs: 
+            - a: numpy.ndarray, dimensions (d1*d2, K)
+            - c: numpy.ndarray, dimensions (T, K)
+    Outputs: 
+        - a_init: np.ndarray. Shape (d1*d2, K) where K is the total number of neurons AFTER this round of initialization
+        - c_init: np.ndarray. Shape (T, K). Describes temporal initializations
     """
-    if device == 'cuda':
-        torch.cuda.empty_cache()
+    device = V_torch.device
     dims = (dims[0], dims[1], V_torch.shape[1])
     T = V_torch.shape[1]
-    ii = 0;
+    
+    pre_existing = a is not None and c is not None
+    if pre_existing:
+        K = c.shape[1]
+    else:
+        K = 0
 
-    
-    V_mat = torch.zeros([T, idx], device=device);
-    #Note: We define H_mat later to save space
-    
-    if a is not None and c is not None: 
-        c = torch.Tensor(c).t().to(device)
-        a_sparse = torch_sparse.tensor.from_scipy(scipy.sparse.coo_matrix(a)).to(device)
-    
-
-    
-    
-    #Define a sparse row, column, value data structure for storing the U_mat 
-    final_rows = torch.zeros(0, device=device)
-    final_columns = torch.zeros(0, device=device)
-    final_values = torch.zeros(0, device=device)
-    final_shape = [np.prod(dims[:2]), idx]
-
+    total_length = 0
+    good_indices = []
+    index_val = 0
     for comp in comps:
-        oversized=False
-        if(len(comp) > length_cut):
-            if ii % 100 == 0:
-                print("we are initializing component {} out of {}".format(ii, idx))
-            if len(comp) > pixel_limit:
-                oversized=True
-                print("Found large component with support of {} pixels. Might be worth raising correlation thresholds in superpixel step".format(len(comp)))
-                selections = np.random.choice(list(comp), size=pixel_limit, replace=False)
-                comp_tensor = torch.LongTensor(selections).to(device)
-            else:
-                oversized=False
-                comp_tensor = torch.LongTensor(list(comp)).to(device)
-            U_subset = torch_sparse.index_select(U_sparse_torch, 0, comp_tensor)
-            y_temp = torch_sparse.matmul(U_subset, V_torch)
-            
-            if a is not None and c is not None:
-                a_subset = torch_sparse.index_select(a_sparse, 0, comp_tensor)
-                ac_prod = torch_sparse.matmul(a_subset, c)
-                y_temp = torch.sub(y_temp, ac_prod)
-            
-            y_temp = threshold_data_inplace(y_temp, th, axisVal=1)
-
-            model = torchnmf.nmf.NMF(y_temp.shape, rank=1, H = torch.mean(y_temp, dim=1, keepdim=True), \
-                                     W = y_temp.mean(axis=0, keepdim=True).t()).to(device)
-            outputs = model.fit(y_temp)
-            
-            
-       
-            ##Keep constructing H
-            
-            
-            
-            if not oversized:
-                curr_rows = torch.zeros_like(comp_tensor, device=device) 
-                curr_cols = torch.add(curr_rows, ii)
-                curr_values = model.H[:, 0]
-            elif oversized:
-                c_init = model.W
-                c_init = torch.squeeze(c_init).t()
-                with torch.no_grad():
-                    if a is not None and c is not None:
-                        curr_values = fit_large_spatial_support(comp, c_init, U_sparse_torch, V_torch, th, a_sparse=a_sparse, c=c,batch_size = pixel_limit)
-                    else:
-                        curr_values = fit_large_spatial_support(comp, c_init, U_sparse_torch, V_torch, th, a_sparse=None, c=None,batch_size = pixel_limit)
-                comp_tensor = torch.LongTensor(list(comp)).to(device)
-                curr_rows = torch.zeros_like(comp_tensor, device=device) 
-                curr_cols = torch.add(curr_rows, ii)
-            final_values = torch.cat((final_values, curr_values), dim=0)
-            final_columns = torch.cat((final_columns, curr_cols), dim=0)
-            final_rows = torch.cat((final_rows, comp_tensor), dim=0)
-            
-            
-            V_mat[:,[ii]] = model.W
-            ii = ii+1;
-     
-    final_rows = final_rows.cpu().numpy()
-    final_columns = final_columns.cpu().numpy()
-    final_values = final_values.detach().cpu().numpy()
+        curr_length = len(list(comp))
+        if curr_length > length_cut: 
+            good_indices.append(index_val)
+            total_length += curr_length 
+        index_val += 1
+    comps = [comps[good_indices[i]] for i in range(len(good_indices))]
     
-    U_mat = scipy.sparse.coo_matrix((final_values, (final_rows, final_columns)), shape = final_shape)
-    U_mat = np.array(U_mat.todense())
-    V_mat = V_mat.detach().cpu().numpy()
-    return V_mat, U_mat
+    UV_mean = torch_sparse.matmul(U_sparse_torch, torch.mean(V_torch, dim=1, keepdim=True))
+    if pre_existing: 
+        c_orig = torch.from_numpy(c).to(device)
+        c_final = torch.cat([c_orig, torch.zeros(T, len(comps), device=device)], dim=1)
+        a_orig = torch_sparse.tensor.from_scipy(scipy.sparse.coo_matrix(a)).to(device)
+        mean_ac = torch_sparse.matmul(a_orig, torch.mean(c_orig.t(), dim=1, keepdim=True))
+        UV_mean = UV_mean - mean_ac 
+        # UV_mean[UV_mean < 0] = 1
+    else:
+        c_final = torch.zeros(T, len(comps), device=device)
+        
+    UV_mean = UV_mean.cpu()
+    
+    a_row_init = torch.zeros(total_length, dtype=torch.long)
+    a_col_init = torch.zeros(total_length, dtype=torch.long)
+    a_value_init = torch.zeros(total_length, dtype=V_torch.dtype)
+    
+    ref_point = 0
+    counter = 0
+    for comp in comps:
+        curr_length = len(list(comp))
+        a_col_init[ref_point:ref_point+curr_length] = counter + K
+        comp_tensor = torch.Tensor(list(comp))
+        a_row_init[ref_point:ref_point+curr_length] = torch.Tensor(list(comp))
+        a_value_init[ref_point:ref_point+curr_length] = 1 #UV_mean[list(comp), :].squeeze()
+        ref_point += curr_length
+        counter = counter + 1
+    
+    #Finally, combine a_orig and new a: 
+    
+    a_row_init = a_row_init.to(device)
+    a_col_init = a_col_init.to(device)
+    a_value_init = a_value_init.to(device) 
+    
+    if pre_existing:
+        a_orig_row = a_orig.storage.row()
+        a_orig_col = a_orig.storage.col()
+        a_orig_values = a_orig.storage.value()
+
+        final_rows = torch.cat([a_row_init, a_orig_row], dim=0)
+        final_cols = torch.cat([a_col_init, a_orig_col], dim=0)
+        final_values = torch.cat([a_value_init, a_orig_values], dim=0)
+    else:
+        final_rows =  a_row_init
+        final_cols = a_col_init
+        final_values = a_value_init
+        
+    a_sparse = torch_sparse.tensor.SparseTensor(row=final_rows, col=final_cols, value=final_values, \
+                                                    sparse_sizes = (dims[0]*dims[1], K+len(comps))).coalesce().to(device)
+    
+    T = V_torch.shape[1]
+    VVt_orig = torch.matmul(V_torch, V_torch.t()) #This is for the original V
+    s = regression_update.estimate_X(torch.ones([1, T], device=device).t(), V_torch, VVt_orig) #sV is the vector of 1's
+    
+    U_sparse_inner = torch.inverse(torch_sparse.matmul(U_sparse_torch.t(), U_sparse_torch).to_dense())
+    X_torch = torch.zeros(a_sparse.sparse_sizes()[1], V_torch.shape[0], device=device)
+    W_torch = ring_model(dims[0], dims[1], 1, device=device, empty=True)
+    
+    a_summand = torch.ones((dims[0]*dims[1], 1)).to(device)
+    for k in range(1):
+        
+        b_torch = regression_update.baseline_update(UV_mean.to(device), a_sparse, c_final)
+        c_final = regression_update.temporal_update_HALS(U_sparse_torch, V_torch, W_torch, X_torch, a_sparse, c_final, b_torch, s)
+
+
+        b_torch = regression_update.baseline_update(UV_mean.to(device), a_sparse, c_final)
+        X_torch = regression_update.estimate_X(c_final, V_torch, VVt_orig)       
+        a_sparse = regression_update.spatial_update_HALS(U_sparse_torch, V_torch,\
+                                                           W_torch, X_torch, a_sparse, c_final, b_torch, s, U_sparse_inner=U_sparse_inner)
+        
+
+    
+    
+
+    #Now return only the newly initialized components
+    col_index_tensor = torch.arange(start = K, end = K + len(comps), step = 1, device=device)
+    a_sparse = torch_sparse.index_select(a_sparse, 1, col_index_tensor)
+    c_final = torch.index_select(c_final, 1, col_index_tensor)
+    
+    return  c_final.cpu().numpy(), a_sparse.cpu().to_dense().numpy(),
 
 def delete_comp(a, c, corr_img_all_reg, corr_img_all, mask_a, num_list, temp, word, plot_en, fov_dims, order="C"):
     """
@@ -1400,8 +1424,8 @@ def superpixel_init(U_sparse, R, V, V_PMD, patch_size, num_plane, data_order, di
     
     print("find superpixels!")
     connect_mat_1, idx, comps, permute_col= find_superpixel_UV(dims, cut_off_point, length_cut, dim1_coordinates, dim2_coordinates, correlations, data_order)
-
-    c_ini, a_ini = spatial_temporal_ini_UV(U_sparse, V_PMD, dims, th, comps, idx, length_cut, a = a, c = c, device=device)
+    
+    c_ini, a_ini = spatial_temporal_ini_UV(U_sparse, V_PMD, dims, th, comps, idx, length_cut, a = a, c = c)
     start = time.time();
     
     print("find pure superpixels!")
