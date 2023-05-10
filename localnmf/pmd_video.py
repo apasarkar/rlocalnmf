@@ -31,6 +31,7 @@ from localnmf.ca_utils import add_1s_to_rowspan, denoise
 from localnmf.constrained_ring.cnmf_e import ring_model, ring_model_update, ring_model_update_sampling
 from localnmf import regression_update
 import time
+
 ### TODO: Create an actual API around this
 # from localnmf.video_objects import FunctionalVideo
 
@@ -1865,15 +1866,14 @@ class PMDVideo():
         mask_ab_corr = mask_a_rigid_scipy.multiply(self.residual_correlation_image)
         mask_ab_corr = np.array((mask_ab_corr > corr_th_del).sum(axis=0))
         mask_ab_corr = torch.from_numpy(mask_ab_corr).float().squeeze().to(self.device)
-        print("the shape of maskab_corr is {}".format(mask_ab_corr.shape))
         temp = (mask_ab_corr == 0)
         if torch.sum(temp):
             print("we are at the mask update delete step... corr img is {}".format(corr_th_del))
             self.a, self.c, self.standard_correlation_image, self.residual_correlation_image, self.mask_ab, self.num_list = delete_comp(self.a, self.c, self.standard_correlation_image, self.residual_correlation_image, self.mask_ab, self.num_list, temp, "zero mask!", plot_en, (self.d1,self.d2), order=self.data_order)
             
         ##Apply mask to existing 'a'
-        a_scipy = self.a.to_scipy().tocsr()
-        mask_ab_scipy = self.mask_ab.to_scipy().tocsr()
+        a_scipy = self.a.to_scipy(layout='csr')
+        mask_ab_scipy = self.mask_ab.to_scipy(layout='csr')
         a_scipy = a_scipy.multiply(mask_ab_scipy)
         self.a = torch_sparse.tensor.from_scipy(a_scipy).float().to(self.device)        
         
