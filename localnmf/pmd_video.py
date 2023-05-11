@@ -1519,13 +1519,13 @@ def merge_components(a,c,corr_img_all_r,num_list,patch_size,merge_corr_thr=0.6,m
             matrix of correlation images for the merged components (d x K')
     flag: merge or not
     """
-
     f = np.ones([c.shape[0],1]);
     ############ calculate overlap area ###########
     a = csc_matrix(a);
     a_corr = scipy.sparse.triu(a.T.dot(a),k=1);
     cor = csc_matrix((corr_img_all_r>merge_corr_thr)*1);
     temp = cor.sum(axis=0);
+    temp[temp == 0] = 1 #For avoiding divide by zero
     cor_corr = scipy.sparse.triu(cor.T.dot(cor),k=1);
     cri = np.asarray((cor_corr/(temp.T)) > merge_overlap_thr)*np.asarray((cor_corr/temp) > merge_overlap_thr)*((a_corr>0).toarray());
     a = a.toarray();
