@@ -204,7 +204,7 @@ class ring_model:
         Output: 
             W_plain: The ring matrix with the weights (and zero'd out columns) applied
         '''
-        W_plain = self.W_mat.to_scipy().tocsr()
+        W_plain = self.W_mat.to_scipy(layout='csr')
         W_plain = W_plain.multiply(self.weights.cpu().numpy())
         
         a_sum = (np.sum(a, axis = 1, keepdims=True) == 0).T
