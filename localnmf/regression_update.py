@@ -98,10 +98,6 @@ def spatial_update_HALS(U_sparse, V, W, X, a_sparse, c, b, s, U_sparse_inner=Non
         U_sparse_inner = torch.inverse(torch_sparse.matmul(U_sparse.t(), U_sparse).to_dense())
     
     #Init s such that bsV = static background
-    # s = torch.zeros([1, V.shape[0]], device=device)
-    # s[:, -1] = -1
-    
-    #Init s such that bsV = static background
     C_prime = torch.matmul(c.t(), c)
     C_prime_diag = torch.diag(C_prime)
     C_prime_diag[C_prime_diag == 0] = 1 # For division safety

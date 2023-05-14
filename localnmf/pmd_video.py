@@ -1488,87 +1488,194 @@ def superpixel_init(U_sparse, R, V, V_PMD, patch_size, num_plane, data_order, di
 
     return a,mask_a,c,b,superpixel_dict, superpixel_img
 
-
-
 def merge_components(a,c,corr_img_all_r,num_list,patch_size,merge_corr_thr=0.6,merge_overlap_thr=0.6,plot_en=False, data_order="C"):
     """ want to merge components whose correlation images are highly overlapped,
     and update a and c after merge with region constrain
     Parameters:
     -----------
-    a: np.ndarray
-         matrix of spatial components (d x K)
-    c: np.ndarray
-         matrix of temporal components (T x K)
-    corr_img_all_r: np.ndarray
+    a: torch_sparse.tensor
+         sparse matrix describing the spatial supports of all signals. Shape (d, K) where d is the number of pixels in the movie and K is the number of neural signals
+    c: torch.Tensor
+         torch Tensor describing the temporal profiles of all signals. Shape (T, K), where T is the number of frames in the movie
+    corr_img_all_r: np.ndarray (TODO: for now...) 
          corr image
-    U, V: low rank decomposition of Y
-    normalize_factor: std of Y
-    num_list: indices of components
-    patch_size: dimensions for data
-    merge_corr_thr:   scalar between 0 and 1
+    num_list: list. numbered list assigning an index value to each component (for tracking purposes)
+    patch_size: (list-like) dimensions for data
+    merge_corr_thr: scalar between 0 and 1
         temporal correlation threshold for truncating corr image (corr(Y,c)) (default 0.6)
     merge_overlap_thr: scalar between 0 and 1
         overlap ratio threshold for two corr images (default 0.6)
+    plot_en: Boolean. Whether or not to plot the results. This is useful for development, not production (TODO: Check what things need to be moved to CPU for this)
+    data_order: string. Either "C" or "F". 
     Returns:
     --------
-    a_pri:     np.ndarray
-            matrix of merged spatial components (d x K')
-    c_pri:     np.ndarray
-            matrix of merged temporal components (T x K')
-    corr_pri:   np.ndarray
-            matrix of correlation images for the merged components (d x K')
-    flag: merge or not
+    a_pri: torch_sparse.tensor. 
+        sparse matrix describing the spatial supports of all signals. Shape (d, K') where d is the number of pixels in the movie and K' 
+            is the number of neural signals after this merging procedure (entirely possible no merge happens and K' = K)
+    c_pri: torch.Tensor.
+        torch Tensor of merged temporal components, shape (T,K')
+    num_list: np.ndarray. numbered list assigning an index value to each component (for tracking purposes) 
+    flag: int. if merging occurred, return 1. Otherwise, returns 0
     """
-    f = np.ones([c.shape[0],1]);
+    device = c.device
+    f = torch.ones([c.shape[0], 1], device=device)
+    corr_img_all_r = torch.from_numpy(corr_img_all_r).to(device) #TODO: Enforce this in the function definition
     ############ calculate overlap area ###########
-    a = csc_matrix(a);
-    a_corr = scipy.sparse.triu(a.T.dot(a),k=1);
-    cor = csc_matrix((corr_img_all_r>merge_corr_thr)*1);
-    temp = cor.sum(axis=0);
-    temp[temp == 0] = 1 #For avoiding divide by zero
-    cor_corr = scipy.sparse.triu(cor.T.dot(cor),k=1);
-    cri = np.asarray((cor_corr/(temp.T)) > merge_overlap_thr)*np.asarray((cor_corr/temp) > merge_overlap_thr)*((a_corr>0).toarray());
-    a = a.toarray();
+   
+    a_corr = torch_sparse.matmul(a.t(), a).to_dense()
+    a_corr = torch.triu(a_corr, diagonal = 1)
+    cor = ((corr_img_all_r > merge_corr_thr) * 1).float()
+    temp = torch.sum(cor, dim=0)
+    temp[temp == 0] = 1
+    cor_corr = torch.matmul(cor.t(), cor)
+    cor_corr = torch.triu(cor_corr, diagonal=1)
+    cri = ((cor_corr / temp.t()) > merge_overlap_thr) * ((cor_corr/temp) > merge_overlap_thr) * (a_corr > 0)
 
-    connect_comps = np.where(cri > 0);
-    if len(connect_comps[0]) > 0:
-        flag = 1;
-        a_pri = a.copy();
-        c_pri = c.copy();
-        G = nx.Graph();
-        G.add_edges_from(list(zip(connect_comps[0], connect_comps[1])))
-        comps=list(nx.connected_components(G))
-        merge_idx = np.unique(np.concatenate([connect_comps[0], connect_comps[1]],axis=0));
-        a_pri = np.delete(a_pri, merge_idx, axis=1);
-        c_pri = np.delete(c_pri, merge_idx, axis=1);
-        num_pri = np.delete(num_list,merge_idx);
-        for comp in comps:
-            comp=list(comp);
-            print("merge" + str(num_list[comp]+1));
-            a_zero = np.zeros([a.shape[0],1]);
-            a_temp = a[:,comp];
-            if plot_en:
-                spatial_comp_plot(a_temp, corr_img_all_r[:,comp].reshape(patch_size[0],patch_size[1],-1,order=data_order),num_list[comp],ini=False);
-            mask_temp = np.where(a_temp.sum(axis=1,keepdims=True) > 0)[0];
-            
-            a_temp = a_temp[mask_temp,:];
-            y_temp = np.matmul(a_temp, c[:,comp].T);
-            a_temp = a_temp.mean(axis=1,keepdims=True);
-            c_temp = c[:,comp].mean(axis=1,keepdims=True);
-            model = NMF(n_components=1, init='custom')
-            a_temp = model.fit_transform(y_temp, W=a_temp, H = (c_temp.T));
-            a_zero[mask_temp] = a_temp;
-            c_temp = model.components_.T;
-            
-            a_pri = np.hstack((a_pri,a_zero));
-            c_pri = np.hstack((c_pri,c_temp));
-            num_pri = np.hstack((num_pri,num_list[comp[0]]));
-        return flag, a_pri, c_pri, num_pri
-    else:
-        flag = 0;
-        return flag
 
+
+    connect_comps = torch.argwhere(cri)
     
+    if torch.numel(connect_comps) > 0:
+        flag = 1
+        G = nx.Graph();
+        G.add_edges_from(list(zip(connect_comps[:, 0].cpu().numpy(), connect_comps[:, 1].cpu().numpy())))
+        comps = list(nx.connected_components(G))
+        remove_indices = torch.unique(torch.flatten(connect_comps))
+        all_indices = torch.ones([c.shape[1]], device=device)
+        all_indices[remove_indices] = 0
+        all_indices = all_indices.bool()
+        
+        indices_arange = torch.arange(a.sparse_sizes()[1], device=device)[all_indices]
+        
+        a_preserved = torch_sparse.index_select(a, 1, indices_arange)
+        c_preserved = torch.index_select(c, 1, indices_arange)
+        num_preserved = num_list[indices_arange.cpu().numpy()]
+        
+        c_append_list = [c_preserved]
+        num_append_list = [num_preserved]
+
+        row_indices = [a_preserved.storage.row()] 
+        col_indices = [a_preserved.storage.col()]
+        values_indices = [a_preserved.storage.value()]
+        num_preserved_comps = a_preserved.sparse_sizes()[1]
+        added_counter = 0
+        for comp in comps:
+            comp = list(comp)
+            print("merge" + str(num_list[comp]+1));
+            good_comps = torch.Tensor(comp).to(device).long()
+            
+            a_zero = torch.zeros([a.sparse_sizes()[0], 1], device=device)
+            a_merge = torch_sparse.index_select(a, 1, good_comps)
+            c_merge = torch.index_select(c, 1, good_comps)
+            
+            a_rank1, c_rank1 = rank_1_NMF_fit(a_merge, c_merge)
+        
+            if plot_en:
+                spatial_comp_plot(a_merge.cpu().to_dense().numpy(),\
+                                  corr_img_all_r[:,comp].cpu().numpy().reshape(patch_size[0],patch_size[1],-1,order=data_order),num_list[comp],ini=False);
+            
+            nonzero_indices = torch.nonzero(a_rank1)
+            row_temp = nonzero_indices[:, 0]
+            col_temp = nonzero_indices[:, 1]
+            
+            nonzero_values = a_rank1[row_temp, col_temp]
+            
+            row_indices.append(row_temp)
+            col_indices.append(col_temp + num_preserved_comps + added_counter)
+            added_counter += 1
+            values_indices.append(nonzero_values)
+
+            c_append_list.append(c_rank1)
+            num_append_list.append(num_list[comp[0]])
+            
+         
+        row_indices_net = torch.cat(row_indices, dim=0)
+        col_indices_net = torch.cat(col_indices, dim=0)
+        value_indices_net = torch.cat(values_indices, dim=0)     
+        c = torch.cat(c_append_list, dim=1)
+        num_list = np.hstack(num_append_list)
+        a = torch_sparse.tensor.SparseTensor(row=row_indices_net, col=col_indices_net, value=value_indices_net, \
+                                                    sparse_sizes = (a.storage.sparse_sizes()[0], c.shape[1])).coalesce()   
+    else:
+        flag = 0
+    
+    return a, c, num_list, flag
+
+
+def rank_1_NMF_fit(a_merge, c_merge):
+    '''
+    Fast HALS_based routine to perform a rank-1 NMF fit, constrained by the support of a_merge
+    Inputs:
+        a_merge: torch_sparse.Tensor. Shape (d, K), where d is the number of pixels and K is the number of neural signals to be merged
+        c_merge: torch.Tensor. Shape (T, K), where T is the number of frames in the movie
+        
+    Returns: 
+        spatial_component: torch.Tensor. Shape (d, 1)
+        temporal_component: Torch.Tensor. Shape (T, 1). These two tensors, when multiplied like so: 
+                    torch.matmul(spatial_component, temporal_component.t()), give the rank-1 constrained NMF approximation to the movie given by torch.matmul(a_merge, c_merge.t())
+    '''
+    device = c_merge.device
+    
+    #Step 1: Figure out how to initialize the first and second components of the rank-1 factorization. We init the first component to the mean:
+    summand = torch.ones([a_merge.sparse_sizes()[1], 1], device=device)
+    summand /= a_merge.sparse_sizes()[1]
+    spatial_component = torch_sparse.matmul(a_merge, summand)
+    mask = (spatial_component > 0)
+    
+    temporal_component = torch.zeros([c_merge.shape[0], 1], device=device)
+    
+    my_relu_obj = torch.nn.ReLU()
+    
+    num_iters = 5
+    
+    for k in range(num_iters):
+        temporal_component = my_relu_obj(_temporal_fit_routine(a_merge, c_merge, spatial_component))
+        spatial_component = my_relu_obj(_spatial_fit_routine(a_merge, c_merge, temporal_component, mask))
+        
+    
+    return spatial_component, temporal_component
+
+def _spatial_fit_routine(a_merge, c_merge, temporal_component, mask):
+    '''
+    Fits a spatial component in the rank-1 nonnegative merging fit via standard least squares
+    Inputs: 
+        a_merge: torch_sparse.tensor of shape (d, K) where K is the number of signals slated to be merged
+        c_merge: torch.Tensor of shape (T, K) where T is the number of frames
+        temporal_component: torch.Tensor of shape (T, 1)
+        mask: torch.Tensor of shape (d, 1). Has values 1 where the support is defined and 0 elsewhere
+    Output:
+        spatial_component: torch.Tensor of shape (d, 1)
+    '''
+    
+    temporal_dot_product = torch.matmul(temporal_component.t(), temporal_component)
+    temporal_dot_product[temporal_dot_product == 0] = 1 #Avoid division by zero issues
+    
+    merge_dots = torch.matmul(c_merge.t(), temporal_component) 
+    row_dots = torch_sparse.matmul(a_merge, merge_dots)
+    
+    least_squares_fits = row_dots / temporal_dot_product
+    return least_squares_fits * mask #Set other elts outside of support to 0 
+
+def _temporal_fit_routine(a_merge, c_merge, spatial_component):
+    '''
+    Fits a nonnegative temporal component in the rank-1 nonnegative merging fit
+    Inputs: 
+        a_merge: torch_sparse.tensor of shape (d, K) where K is the number of signals slated to be merged
+        c_merge: torch.Tensor of shape (T, K) where T is the number of frames
+        spatial_component: torch.Tensor of shape (d, 1)
+    Output:
+        temporal_component: torch.Tensor of shape (T, 1)
+    '''
+    
+    aA = torch_sparse.matmul(a_merge.t(),spatial_component).t()
+    aAC = torch.matmul(aA, c_merge.t())
+    
+    spatial_norm = torch.matmul(spatial_component.t(), spatial_component)
+    spatial_norm[spatial_norm == 0] = 1
+    
+    least_squares_fits = aAC / spatial_norm
+    
+    return least_squares_fits.T  
 
 def spatial_comp_plot(a, corr_img_all_r, num_list=None, ini=False, order="C"):
     print("DISPLAYING SOME OF THE COMPONENTS")
@@ -1831,25 +1938,12 @@ class PMDVideo():
         self.residual_correlation_image = vcorrcoef_resid(self.U_sparse, self.R, self.V, self.a, self.c, batch_size = self.batch_size, device=self.device)
         
     def merge_signals(self, merge_corr_thr, merge_overlap_thr, plot_en, data_order):
-        a = self.a.cpu().to_dense().numpy()
-        c = self.c.cpu().numpy()
-        rlt = merge_components(a,c,self.standard_correlation_image,self.num_list,\
+        rlt = merge_components(self.a,self.c,self.standard_correlation_image,self.num_list,\
                                self.shape,merge_corr_thr=merge_corr_thr,merge_overlap_thr=merge_overlap_thr,plot_en=plot_en, data_order=self.data_order);
 
-        flag = isinstance(rlt, int);
-
-
-        if ~np.array(flag):
-            a_scipy = scipy.sparse.csr_matrix(rlt[1]);
-            self.a = torch_sparse.tensor.from_scipy(a_scipy).float().to(self.device)
-            c = rlt[2];
-            self.c = torch.from_numpy(c).float().to(self.device)
-            self.num_list = rlt[3];
-        else:
-            a_scipy = scipy.sparse.csr_matrix(a);
-            self.a = torch_sparse.tensor.from_scipy(a_scipy).float().to(self.device)
-            self.c = torch.from_numpy(c).float().to(self.device)
-            print("no merge!");
+        self.a = rlt[0]
+        self.c = rlt[1]
+        self.num_list = rlt[2]
 
     def support_update_prune_elements_apply_mask(self, corr_th_fix, corr_th_del, plot_en):
         
