@@ -125,7 +125,6 @@ def spatial_update_HALS(U_sparse, V, W, X, a_sparse, c, b, s, U_sparse_inner=Non
     #Step 4: ctVtstbt(Proj)^t
     # where Proj = U(U^tU)^-1U^tW, the linear projection of W onto U
     Proj_Wb = project_U_HALS(U_sparse, U_sparse_inner, W, b, a_sparse).t()
-    # btWt = torch_sparse.matmul(W, b).t()
     ctVtst = torch.matmul(ctVt, s.t())
     ctVtstbtWt = torch.matmul(ctVtst, Proj_Wb)
     ctVtUt_net += ctVtstbtWt
@@ -134,19 +133,18 @@ def spatial_update_HALS(U_sparse, V, W, X, a_sparse, c, b, s, U_sparse_inner=Non
     ctVtstbt = torch.matmul(ctVtst, b.t())
     ctVtUt_net -= ctVtstbt
 
-    
-    index_select_tensor = torch.LongTensor([0]).to(device)
     for i in range(c.shape[1]):
               
-            
-        index_select_tensor[0] = i
+    
+        index_select_tensor = torch.arange(i, i+1, device=device)
         mask_ab_torchsparse_sub = torch_sparse.index_select(mask_ab, 0,\
                                                             index_select_tensor)
         ind_torch = mask_ab_torchsparse_sub.storage.col()
 
-        
-        cca = torch_sparse.matmul(a_sparse, C_prime[[i], :].t()).t()
-        final_vec = (ctVtUt_net[[i], :] - cca)/C_prime_diag[i]
+        C_prime_i = C_prime.index_select(0, index_select_tensor).t()
+        ctVtUt_net_i = ctVtUt_net.index_select(0, index_select_tensor)
+        cca = torch_sparse.matmul(a_sparse, C_prime_i).t()
+        final_vec = (ctVtUt_net_i - cca)/C_prime_diag[i]
 
         
         #Crop final_vec
@@ -179,13 +177,15 @@ def spatial_update_HALS(U_sparse, V, W, X, a_sparse, c, b, s, U_sparse_inner=Non
         
     return a_sparse   
  
+
     
-def left_project_U_HALS(a_sparse, U_sparse, U_sparse_inverse, W):
-    atU = torch_sparse.matmul(a_sparse.t(), U_sparse)
-    atU_Uinv = torch_sparse.matmul(atU, U_sparse_inverse)
+def left_project_U_HALS(a_sparse, a_dense, U_sparse, U_sparse_inverse, W):
+    atU = torch_sparse.matmul(U_sparse.t(), a_dense).t()
+    atU_Uinv = torch.matmul(atU, U_sparse_inverse)
     atU_UinvUt = torch_sparse.matmul(U_sparse, atU_Uinv.t()).t()
     final = W.apply_model_left(atU_UinvUt, a_sparse)
     return final
+    
     
     
 def temporal_update_HALS(U_sparse, V, W, X, a_sparse, c, b, s, U_sparse_inner=None):
@@ -214,19 +214,18 @@ def temporal_update_HALS(U_sparse, V, W, X, a_sparse, c, b, s, U_sparse_inner=No
 
     
     #Init s such that bsV = static background
-    # s = torch.zeros([1, V.shape[0]], device=device)
-    # s[:, -1] = -1
     
     
     ##Precompute quantities used throughout all iterations
     atU_net = torch.zeros((a_sparse.sparse_sizes()[1], V.shape[0]), device=device)
     
+    a_dense = a_sparse.to_dense()
     #Step 1: Add atU
-    atU_net += torch_sparse.matmul(a_sparse.t(), U_sparse).to_dense()
+    # atU_net += torch_sparse.matmul(a_sparse.t(), U_sparse).to_dense()
+    atU_net += torch_sparse.matmul(U_sparse.t(), a_dense).t()
     
     #Step 2: Subtract atWU
-    # atW = torch_sparse.matmul(a_sparse.t(), W).to_dense()
-    atW = left_project_U_HALS(a_sparse, U_sparse, U_sparse_inner, W) 
+    atW = left_project_U_HALS(a_sparse, a_dense, U_sparse, U_sparse_inner, W) 
     atWU = torch_sparse.matmul(U_sparse.t(), atW.t()).t()
     atU_net -= atWU
     
@@ -240,14 +239,16 @@ def temporal_update_HALS(U_sparse, V, W, X, a_sparse, c, b, s, U_sparse_inner=No
     atU_net += torch.matmul(atWb, s)
     
     #Step 5: Subtract atbs
-    atb = torch_sparse.matmul(a_sparse.t(), b)
+    # atb = torch_sparse.matmul(a_sparse.t(), b)
+    atb = torch.matmul(a_dense.t(), b)
     atbs = torch.matmul(atb, s)
     atU_net -= atbs
     
     atU_net_V = torch.matmul(atU_net, V)
     
     
-    ata = torch_sparse.matmul(a_sparse.t(), a_sparse).to_dense()
+    # ata = torch_sparse.matmul(a_sparse.t(), a_sparse).to_dense()
+    ata = torch.matmul(a_dense.t(), a_dense) #This is faster than a sparse-sparse matrix product (not well-parallelized as of May 2023 on GPU)
     
     ata_d = torch.diag(ata)
     ata_d[ata_d == 0] = 1 #For division-safety
