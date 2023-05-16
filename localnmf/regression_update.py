@@ -83,6 +83,8 @@ def spatial_update_HALS(U_sparse, R, s, V, W, a_sparse, c, b, mask_ab = None):
     if mask_ab is None: 
         mask_ab = a_sparse.bool().t()
         
+    mask_ab = mask_ab.to_dense()
+        
     Vc = torch.matmul(V, c) 
     a_dense = a_sparse.to_dense()
         
@@ -121,17 +123,16 @@ def spatial_update_HALS(U_sparse, R, s, V, W, a_sparse, c, b, mask_ab = None):
               
     
         index_select_tensor = torch.arange(i, i+1, device=device)
-        mask_ab_torchsparse_sub = torch_sparse.index_select(mask_ab, 0,\
-                                                            index_select_tensor)
-        ind_torch = mask_ab_torchsparse_sub.storage.col()
-        mask_apply = torch.zeros([U_sparse.sparse_sizes()[0]], device=device)
-        mask_apply[ind_torch] = 1
+        mask_apply = torch.squeeze(torch.index_select(mask_ab, 0, index_select_tensor))
+        # ind_torch = mask_ab_torchsparse_sub.storage.col()
+        # mask_apply = torch.zeros([U_sparse.sparse_sizes()[0]], device=device)
+        # mask_apply[ind_torch] = 1
 
         C_prime_i = C_prime.index_select(0, index_select_tensor).t()
         cumulator_i = cumulator.index_select(0, index_select_tensor)
         cca = torch.matmul(a_dense, C_prime_i).t()
         final_vec = (cumulator_i - cca)/C_prime_diag[i]
-        curr_frame = a_dense[:, i]
+        curr_frame = torch.squeeze(torch.index_select(a_dense, 1, index_select_tensor))
         curr_frame += torch.squeeze(final_vec)
         curr_frame *= mask_apply
         curr_frame = threshold_func(curr_frame)
