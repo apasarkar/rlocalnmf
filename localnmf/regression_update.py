@@ -4,7 +4,6 @@ import torch
 import torch_sparse
 import time
 
-
 def fast_matmul(a, b, device='cuda'):
     a_torch = torch.from_numpy(a).float().to(device)
     b_torch = torch.from_numpy(b).float().to(device)
@@ -70,7 +69,7 @@ def spatial_update_HALS(U_sparse, R, s, V, W, a_sparse, c, b, mask_ab = None):
         a_sparse: torch_sparse.tensor. dimensions d x k, where k represents the number of neural signals. 
         c: torch.Tensor. Dimensions T x k
         b: torch.Tensor. Dimensions d x 1. Represents static background
-        mask_ab: torch_sparse.tensor. Dimensions (k x d). For each neuron, indicates the allowed support of neuron
+        mask_ab: torch_sparse.tensor. Dimensions (d x k). For each neuron, indicates the allowed support of neuron
         
     Returns: 
         a_sparse: torch_sparse.tensor. Dimensions d x k, containing updated spatial matrix
@@ -81,7 +80,7 @@ def spatial_update_HALS(U_sparse, R, s, V, W, a_sparse, c, b, mask_ab = None):
     device = V.device
     
     if mask_ab is None: 
-        mask_ab = a_sparse.bool().t()
+        mask_ab = a_sparse.bool()
         
     mask_ab = mask_ab.to_dense()
         
@@ -123,10 +122,7 @@ def spatial_update_HALS(U_sparse, R, s, V, W, a_sparse, c, b, mask_ab = None):
               
     
         index_select_tensor = torch.arange(i, i+1, device=device)
-        mask_apply = torch.squeeze(torch.index_select(mask_ab, 0, index_select_tensor))
-        # ind_torch = mask_ab_torchsparse_sub.storage.col()
-        # mask_apply = torch.zeros([U_sparse.sparse_sizes()[0]], device=device)
-        # mask_apply[ind_torch] = 1
+        mask_apply = torch.squeeze(torch.index_select(mask_ab, 1, index_select_tensor))
 
         C_prime_i = C_prime.index_select(0, index_select_tensor).t()
         cumulator_i = cumulator.index_select(0, index_select_tensor)
@@ -148,17 +144,7 @@ def spatial_update_HALS(U_sparse, R, s, V, W, a_sparse, c, b, mask_ab = None):
                                                     sparse_sizes = a_sparse.storage.sparse_sizes()).coalesce()
         
         
-    return a_sparse   
- 
-
-    
-# def left_project_U_HALS(a_sparse, a_dense, U_sparse, U_sparse_inverse, W):
-#     atU = torch_sparse.matmul(U_sparse.t(), a_dense).t()
-#     atU_Uinv = torch.matmul(atU, U_sparse_inverse)
-#     atU_UinvUt = torch_sparse.matmul(U_sparse, atU_Uinv.t()).t()
-#     final = W.apply_model_left(atU_UinvUt, a_sparse)
-#     return final
-    
+    return a_sparse       
     
 ##Compute the projection matrix:
 def get_projection_matrix_temporal_HALS_routine(U_sparse, R, W, a_dense, a_sparse):

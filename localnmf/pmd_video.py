@@ -1925,8 +1925,7 @@ class PMDVideo():
             self.a, self.c, self.standard_correlation_image, self.residual_correlation_image, self.mask_ab, self.num_list = delete_comp(self.a, self.c, self.standard_correlation_image, self.residual_correlation_image, self.mask_ab, self.num_list, temp, "zero c!", plot_en, (self.d1, self.d2), order=self.data_order)
             
     def spatial_update(self, plot_en = False):
-              
-        self.a = regression_update.spatial_update_HALS(self.U_sparse,self.R, self.s, self.V, self.W, self.a, self.c, self.b, mask_ab=self.mask_ab.t())
+        self.a = regression_update.spatial_update_HALS(self.U_sparse,self.R, self.s, self.V, self.W, self.a, self.c, self.b, mask_ab=self.mask_ab)
         
         ## Delete Bad Components
         temp = torch_sparse.matmul(self.a.t(), self.a_summand).t() == 0 #Identify which columns of 'a' are all zeros

@@ -2756,36 +2756,19 @@ def update_AC_bg_l2_Y_ring_lowrank(pmd_video, maxiter,corr_th_fix, corr_th_fix_s
         start = time.time();
 
         ##TODO: Add back the plot corr image bit here if desired
-        
-        
         pmd_video.static_baseline_update()
-
-        
-        test_time = time.time()
         
         if iters >= skips:
             pmd_video.fluctuating_baseline_update()
         else:
             pass
-
-        test_time = time.time()
         
-        
-        
-        ###SPATIAL UPDATE
-        test_time = time.time()
-        
-        
-        #Approximate c as XV for some X:
         pmd_video.spatial_update(plot_en=plot_en)
         pmd_video.static_baseline_update()
     
-            
-        ###TEMPORAL UPDATE
         denoise_flag = denoise[iters]
         pmd_video.temporal_update(denoise=denoise_flag, plot_en=plot_en)
            
-
         if update_after and ((iters+1) % update_after == 0):
             
             ##First: Compute correlation images
@@ -2797,9 +2780,6 @@ def update_AC_bg_l2_Y_ring_lowrank(pmd_video, maxiter,corr_th_fix, corr_th_fix_s
             corr_image_all_reg = pmd_video.residual_correlation_image
             corr_img_all_reg_r = corr_img_all_reg.reshape(d1, d2, -1, order=data_order)
             
-            
-            
-
             print("mask, support, and deletion update")
             pmd_video.support_update_prune_elements_apply_mask(corr_th_fix, corr_th_del, plot_en)
             
