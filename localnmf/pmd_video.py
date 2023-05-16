@@ -116,24 +116,23 @@ def vcorrcoef_resid(U_sparse, R, V, a_sparse, c_orig, batch_size = 10000, tol = 
         diag_URRtUt += torch.sum(UR_crop * UR_crop, dim=1, keepdim=True)
         diag_AXXtAt += torch.sum(AX_crop * AX_crop, dim=1, keepdim=True)
         diag_AXUR += torch.sum(AX_crop * UR_crop, dim=1, keepdim=True)
-        
-    neuron_ind_torch = torch.arange(0, a_sparse.sparse_sizes()[1], step=1, device=device)
+       
+    ##Get mean of the movie: (UR - A_k * X_k)V
+    RV_mean = torch.matmul(R, V_mean)
+    m_UR = torch_sparse.matmul(U_sparse, RV_mean)
+    
+    # neuron_ind_torch = torch.arange(0, a_sparse.sparse_sizes()[1], step=1, device=device)
     threshold_func = torch.nn.ReLU()
     for k in range(c.shape[1]):
-        c_curr = c[:, [k]]
-        a_curr = torch_sparse.index_select(a_sparse, 1, neuron_ind_torch[[k]])
-        
-        keeps = torch.cat([neuron_ind_torch[:k], neuron_ind_torch[k+1:]])
-        A_k = torch_sparse.index_select(a_sparse, 1, keeps)
-        X_k = X[keeps, :]
+        current_ind = torch.arange(k, k+1, device=device)
+        c_curr = torch.index_select(c, 1, current_ind)
+        a_curr = torch.index_select(a_dense, 1, current_ind)
+        X_curr = torch.index_select(X, 0, current_ind)
 
-        ##Step 1: Get mean of the movie: (UR - A_k * X_k)V
-        RV_mean = torch.matmul(R, V_mean)
-        m_UR = torch_sparse.matmul(U_sparse, RV_mean)
-        
-        XkV_mean = torch.matmul(X_k, V_mean)
-        m_AX = torch_sparse.matmul(A_k, XkV_mean)
-        m = m_UR - m_AX
+        #Step 1: Update the mean 
+        m_AX = torch.matmul(a_dense, torch.matmul(X, V_mean))
+        m_AX_curr = torch.matmul(a_curr, torch.matmul(X_curr, V_mean))
+        m = m_UR - m_AX + m_AX_curr
 
         ##Step 2: Get square of norm of mean-subtracted movie. Let A_k denote k-th neuron of A and X_k denote k-th row of X
         ## We have: Y_res = (UR - AX + A_k * X_k - ms)V. 
@@ -153,17 +152,17 @@ def vcorrcoef_resid(U_sparse, R, V, a_sparse, c_orig, batch_size = 10000, tol = 
         final_diagonal -= 2*diag_AXUR
         
         ## Step 2.b. Add diag(A_k * X_k (UR)^t) + diag(UR(A_k * X_k)^t) = 2*diag(URX_k^t * A_k^t) to final_diagonal
-        RX_k = torch.matmul(R, X[[k], :].t())
+        RX_k = torch.matmul(R, X_curr.t())
         URX_k = torch_sparse.matmul(U_sparse, RX_k)
-        diag_URAkXk = a_curr.to_dense() * URX_k
+        diag_URAkXk = a_curr * URX_k
         final_diagonal += 2*diag_URAkXk
 
         
         
         ## Step 2.c. Subtract diag((AX)(A_k*X_k)^t) + diag((A_k*X_k)*(AX)^t) = 2*diag((A_k*X_k)*(AX)^t) from final diagonal
-        XX_k = torch.matmul(X, X[[k], :].t())
+        XX_k = torch.matmul(X, X_curr.t())
         AXX_k = torch_sparse.matmul(a_sparse, XX_k) 
-        diag_AXAkXk = a_curr.to_dense() * AXX_k
+        diag_AXAkXk = a_curr * AXX_k
         final_diagonal -= 2*diag_AXAkXk
 
         
@@ -183,8 +182,8 @@ def vcorrcoef_resid(U_sparse, R, V, a_sparse, c_orig, batch_size = 10000, tol = 
 
         
         ## 2.f. Subtract d((A_kX_k)(ms)^t) + d((ms)(A_kX_k)^t) = 2*d(A_kX_ks^tm^t)
-        Xkst = torch.matmul(X[[k], :], s.t())
-        diag_akXkms = Xkst * (a_curr.to_dense() * m)
+        Xkst = torch.matmul(X_curr, s.t())
+        diag_akXkms = Xkst * (a_curr * m)
         final_diagonal -= 2* diag_akXkms
 
         ## 2.g. Add d((ms)(ms)^2)
@@ -194,8 +193,8 @@ def vcorrcoef_resid(U_sparse, R, V, a_sparse, c_orig, batch_size = 10000, tol = 
         
         
         ## 2.h. Add d(((A_kX_k)(A_kX_k)^t)
-        XkXk = torch.matmul(X[[k], :], X[[k], :].t())
-        a_norm = a_curr.to_dense() * a_curr.to_dense()
+        XkXk = torch.matmul(X_curr, X_curr.t())
+        a_norm = a_curr * a_curr
         diag_axxa = (a_norm) * XkXk
         final_diagonal += diag_axxa
 
@@ -211,8 +210,12 @@ def vcorrcoef_resid(U_sparse, R, V, a_sparse, c_orig, batch_size = 10000, tol = 
         msVc = torch.matmul(m, sVc)
         corr_fin -= msVc
         
-        XVc = torch.matmul(X_k, Vc)
-        AXVc = torch_sparse.matmul(A_k, XVc)
+        X_currVc = torch.matmul(X_curr, Vc)
+        AX_currVc = torch.matmul(a_curr, X_currVc)
+        corr_fin += AX_currVc
+        
+        XVc = torch.matmul(X, Vc)
+        AXVc = torch.matmul(a_dense, XVc)
         corr_fin -= AXVc
         
         RVc = torch.matmul(R, Vc)
@@ -223,7 +226,7 @@ def vcorrcoef_resid(U_sparse, R, V, a_sparse, c_orig, batch_size = 10000, tol = 
         corr_fin = torch.nan_to_num(corr_fin, nan = 0, posinf = 0, neginf = 0)
         
         corr_img[:, [k]] = corr_fin
-        
+       
     return corr_img.cpu().numpy()
 
    
