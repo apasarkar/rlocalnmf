@@ -343,44 +343,114 @@ def vcorrcoef_UV_noise(U_sparse, R, V, c_orig, pseudo = 0, batch_size = 1000, to
 
 
 
-def get_mean_data(U_sparse, V, R=None):
+def get_mean_data(U_sparse, R, s, V):
+    '''
+    Routine for computing the mean of the dataset. 
+    Inputs: 
+        (U_sparse, R, s, V) the SVD-like representation of the PMD data. Each of these are torch.Tensors of torch_sparse.Tensors. 
+        U_sparse: torch_sparse.Tensor. shape (d, K)
+        R: torch.Tensor. Shape (K, K)
+        s: torch.Tensor. Shape (K)
+        V: torch.Tensor. Shape (K, T)
+    '''
     V_mean = torch.mean(V, dim=1, keepdim=True)
-    if R is not None: 
-        V_mean = torch.matmul(R, V_mean)
-    mean_img = torch_sparse.matmul(U_sparse, V_mean)
-    return mean_img
+    V_mean = V_mean * s[:, None] 
+    RsV_mean = torch.matmul(R, V_mean) 
+    URsV_mean = torch_sparse.matmul(U_sparse, RsV_mean) 
+    return URsV_mean
 
-def PMD_setup_routine(U_sparse, V, R, device):
+def get_new_orthonormal_vector(U_sparse, R, tol = 1e-6):
+    '''
+    Input: 
+        U_sparse: torch_sparse.Tensor of shape (d, K), where d is the number of pixels in the movie, K is the rank of the PMD decomposition
+        R: torch.Tensor of shape (K, K)
+    
+    Output: a torch.Tensor with shape (d, 1), and a flag indicating whether the search worked (1) or failed (0)
+    '''
+    device = R.device
+    RRt = torch.matmul(R, R.t())
+    
+    num_tries = min(U_sparse.sparse_sizes()[0], 500)
+    
+    indices_to_try = np.random.choice(U_sparse.sparse_sizes()[0], size = num_tries, replace=False)
+    indices_to_try[0] = 0
+    indices_to_try[-1] = U_sparse.sparse_sizes()[0] - 1
+
+    for k in indices_to_try:
+        curr_index = torch.arange(k, k+1, device=R.device)
+        current_vector = torch.zeros([U_sparse.sparse_sizes()[0], 1], device=device)
+        current_vector[k, 0] = 1
+        U_sparse_row = torch_sparse.index_select(U_sparse.t(), 1, curr_index)
+        
+        prod = torch_sparse.matmul(U_sparse_row.t(), RRt.t()).t()
+        output = current_vector - torch_sparse.matmul(U_sparse, prod) 
+        
+        
+        if not torch.all(torch.abs(output) < 1e-3):
+            output = output / torch.linalg.norm(output)
+            return output, 1
+            
+    
+    return torch.zeros([U_sparse.sparse_sizes()[0], 1], device=device), 0
+
+
+
+def PMD_setup_routine(U_sparse, R, s, V):
     '''
     Inputs: 
-        V: torch.Tensor of shape (R1, T) where R1 is the rank of the PMD decomposition
-        R: torch.Tensor of shape (R1, R1) where R1 is the rank of the PMD decomposition
-        plot_en: boolean. Indicates whether plotting functionality is going to be used in this pipeline
-        device: 'cpu' or 'cuda' depending on which device computation should be run 
+        U_sparse: torch_sparse.Tensor of shape (d, K), where d is the number of pixels in the movie, K is the rank of the PMD decomposition
+        R: torch.Tensor of shape (K, K)
+        s: torch.Tensor of shape (K). This describes a diagonal matrix (all other elts 0)
+        V: torch.Tensor of shape (K, T) where R1 is the rank of the PMD decomposition
+        
+        Key: Conceptually, U_sparse*R*s*V (here, we don't multiply by "s" per se, we multiply by the diagonal matrix which "s" represents) is the expanded PMD decomposition
+        
             
-    Outputs: 
-        R: torch.Tensor of shape (roughly) (R1, R2), where R1 is the rank of the PMD decomposition, and R2 is either equal to R1 or R1 + 1 depending on whether we decided to add another orthonormal basis vector to V
-        V: torch.Tensor of shape (R2,T)
-        V_PMD: torch.Tensor of shape 
-        U_used: None if plot_en is False, otherwise it is U_sparse multiplied by R
+    Outputs:
+        (U_sparse, R, s, V), potentially modified such that the rowspan of V contains the 1's vector. Here is what definitely stays the same --
+            - U_sparse * R is a matrix consisting of orthonormal columns (here we operate under the assumption that U_sparse has many more rows than columns)
+            - V has orthonormal rows
+            - s describes the diagonal of an otherwise empty matrix 
     '''
-    
+    device = V.device
     pad_flag, V = add_1s_to_rowspan(V)
     if pad_flag: 
-        R = torch.hstack([R, torch.zeros([R.shape[1], 1], device=R.device)])
         
-    #Placeholder code to make sure things work for now
-    V_PMD = torch.matmul(R, V)
-    
-    V_PMD = V_PMD.to(device)
-    V = V.to(device)
-    U_sparse = U_sparse.to(device)
-    R = R.to(device)
-        
-    return U_sparse, R, V, V_PMD
+        new_vec, attempt_flag = get_new_orthonormal_vector(U_sparse, R)
+        if not attempt_flag:
+            print("The V row space enhancement step did not find a suitable orthogonal vector")
+            pass
+        else:
+            nonzero_indices = torch.nonzero(new_vec)
+            values = new_vec[nonzero_indices[:, 0], nonzero_indices[:, 1]]
+
+            rows = nonzero_indices[:, 0]
+            cols = torch.zeros_like(rows) + U_sparse.sparse_sizes()[1]
 
 
-def process_custom_signals(a_init, U_sparse_torch, V_torch, device='cpu', order="C"):
+            #Add new_vec as a column to U_sparse (this should be easy)
+            original_values = U_sparse.storage.value()
+            original_rows = U_sparse.storage.row()
+            original_cols = U_sparse.storage.col()
+
+            new_values = torch.cat((original_values, values))
+            new_rows = torch.cat((original_rows, rows))
+            new_cols = torch.cat((original_cols, cols))
+
+            U_sparse = torch_sparse.tensor.SparseTensor(row=new_rows, col=new_cols, value=new_values, \
+                                                        sparse_sizes = (U_sparse.sparse_sizes()[0],U_sparse.sparse_sizes()[1]+1)).coalesce()
+
+            #Add the appropriate padding to R
+            R = torch.hstack([R, torch.zeros([R.shape[0], 1], device=device)])
+            appendage = torch.zeros([1, R.shape[1]], device=device)
+            appendage[0, -1] = 1
+            R = torch.vstack([R, appendage])
+            s = torch.cat([s, torch.zeros([1], device=device)])
+
+        
+    return U_sparse, R, s, V
+
+def process_custom_signals(a_init, U_sparse, R, s, V, order="C"):
     '''
     Custom initialization: Given a set of neuron spatial footprints ('a'), this provides initial estimates to the other component (temporal traces, baseline, fluctuating background)
     Terms:
@@ -398,39 +468,26 @@ def process_custom_signals(a_init, U_sparse_torch, V_torch, device='cpu', order=
     
     TODO: Eliminate awkward naming issues in 'process custom signals'
     '''
+    device = V.device
     dims = (a_init.shape[0], a_init.shape[1], V_torch.shape[1])
     
     a = a_init.reshape(dims[0]*dims[1],-1, order=order)
     a_mask = (a_init>0).reshape(dims[0]*dims[1],-1,order=order)
 
     c = np.zeros((dims[2], a_init.shape[2]))
-
-    X = np.zeros((a_init.shape[2], V_torch.shape[0]))
     b = np.zeros((dims[0]*dims[1], 1))
-    
-    ##MAKE THIS BETTER...
-    T = V_torch.shape[1]
-    VVt_orig = torch.matmul(V_torch, V_torch.t()) #This is for the original V
-    s = regression_update.estimate_X(torch.ones([1, T], device=device).t(), V_torch, VVt_orig) #sV is the vector of 1's
-    
-    
-    
+
     #Cast the data to torch tensors 
-    a_torch = torch_sparse.tensor.from_scipy(scipy.sparse.coo_matrix(a)).float().to(device)
-    if not U_sparse_torch.device == device:
-        U_sparse_torch = U_sparse_torch.to(device)
-    if not V_torch.device == device:
-        V_torch = V_torch.to(device)
-    c_torch = torch.from_numpy(c).float().to(device)
-    b_torch = torch.from_numpy(b).float().to(device)
-    W_torch = ring_model(dims[0], dims[1], 1, device=device, order=order, empty=True)
-    X_torch = torch.from_numpy(X).float().to(device)
+    a = torch_sparse.tensor.from_scipy(scipy.sparse.coo_matrix(a)).float().to(device)
+    c = torch.zeros([dims[2], a_init.shape[2]], device=device, dtype=torch.float)
+    b = torch.zeros([dims[0]*dims[1], 1], device=device, dtype=torch.float)
+    W = ring_model(dims[0], dims[1], 1, device=device, order=order, empty=True)
     
-    uv_mean = get_mean_data(U_sparse_torch, V_torch)
+    uv_mean = get_mean_data(U_sparse_torch, R, s, V)
 
     #Baseline update followed by 'c' update:
     b_torch = regression_update.baseline_update(uv_mean, a_torch, c_torch)
-    c_torch = regression_update.temporal_update_HALS(U_sparse_torch, V_torch, W_torch, X_torch, a_torch, c_torch, b_torch, s)
+    c_torch = regression_update.temporal_update_HALS(U_sparse, V, W, a, c, b)
     
     c_norm = torch.linalg.norm(c_torch, dim = 0)
     nonzero_dim1 = torch.nonzero(c_norm).squeeze()
@@ -438,7 +495,7 @@ def process_custom_signals(a_init, U_sparse_torch, V_torch, device='cpu', order=
     #Only keep the good indices, based on nonzero_dim1
     c_torch = torch.index_select(c_torch, 1, nonzero_dim1)
     a_torch = torch_sparse.index_select(a_torch, 1, nonzero_dim1)
-    a_mask= a_torch.bool()
+    a_mask = a_torch.bool()
     
     return a_torch, a_mask, c_torch, b_torch,
 
@@ -732,7 +789,9 @@ def find_superpixel_UV(dims, cut_off_point, length_cut, dim1_coordinates, dim2_c
     connect_mat_1 = connect_mat.reshape(dims[0],dims[1],order=order);
     return connect_mat_1, idx, comps, permute_col
   
-def spatial_temporal_ini_UV(U_sparse_torch, V_torch, dims, th, comps, idx, length_cut, a = None, c = None):
+    
+##TODO: (1) Use URsV representation
+def spatial_temporal_ini_UV(U_sparse, R, s, V, dims, th, comps, idx, length_cut, a = None, c = None):
     """
     Apply rank 1 NMF to find spatial and temporal initialization for each superpixel in Yt.
     Params:
@@ -749,9 +808,9 @@ def spatial_temporal_ini_UV(U_sparse_torch, V_torch, dims, th, comps, idx, lengt
         - a_init: np.ndarray. Shape (d1*d2, K) where K is the total number of neurons AFTER this round of initialization
         - c_init: np.ndarray. Shape (T, K). Describes temporal initializations
     """
-    device = V_torch.device
-    dims = (dims[0], dims[1], V_torch.shape[1])
-    T = V_torch.shape[1]
+    device = V.device
+    dims = (dims[0], dims[1], V.shape[1])
+    T = V.shape[1]
     
     pre_existing = a is not None and c is not None
     if pre_existing:
@@ -770,22 +829,19 @@ def spatial_temporal_ini_UV(U_sparse_torch, V_torch, dims, th, comps, idx, lengt
         index_val += 1
     comps = [comps[good_indices[i]] for i in range(len(good_indices))]
     
-    UV_mean = torch_sparse.matmul(U_sparse_torch, torch.mean(V_torch, dim=1, keepdim=True))
+    UV_mean = get_mean_data(U_sparse, R, s, V)
     if pre_existing: 
         c_orig = torch.from_numpy(c).to(device)
         c_final = torch.cat([c_orig, torch.zeros(T, len(comps), device=device)], dim=1)
         a_orig = torch_sparse.tensor.from_scipy(scipy.sparse.coo_matrix(a)).to(device)
         mean_ac = torch_sparse.matmul(a_orig, torch.mean(c_orig.t(), dim=1, keepdim=True))
         UV_mean = UV_mean - mean_ac 
-        # UV_mean[UV_mean < 0] = 1
     else:
         c_final = torch.zeros(T, len(comps), device=device)
-        
-    UV_mean = UV_mean.cpu()
     
     a_row_init = torch.zeros(total_length, dtype=torch.long)
     a_col_init = torch.zeros(total_length, dtype=torch.long)
-    a_value_init = torch.zeros(total_length, dtype=V_torch.dtype)
+    a_value_init = torch.zeros(total_length, dtype=V.dtype)
     
     ref_point = 0
     counter = 0
@@ -820,25 +876,18 @@ def spatial_temporal_ini_UV(U_sparse_torch, V_torch, dims, th, comps, idx, lengt
     a_sparse = torch_sparse.tensor.SparseTensor(row=final_rows, col=final_cols, value=final_values, \
                                                     sparse_sizes = (dims[0]*dims[1], K+len(comps))).coalesce().to(device)
     
-    T = V_torch.shape[1]
-    VVt_orig = torch.matmul(V_torch, V_torch.t()) #This is for the original V
-    s = regression_update.estimate_X(torch.ones([1, T], device=device).t(), V_torch, VVt_orig) #sV is the vector of 1's
-    
-    U_sparse_inner = torch.inverse(torch_sparse.matmul(U_sparse_torch.t(), U_sparse_torch).to_dense())
-    X_torch = torch.zeros(a_sparse.sparse_sizes()[1], V_torch.shape[0], device=device)
-    W_torch = ring_model(dims[0], dims[1], 1, device=device, empty=True)
+    T = V.shape[1]
+    W = ring_model(dims[0], dims[1], 1, device=device, empty=True)
     
     a_summand = torch.ones((dims[0]*dims[1], 1)).to(device)
     for k in range(1):
         
-        b_torch = regression_update.baseline_update(UV_mean.to(device), a_sparse, c_final)
-        c_final = regression_update.temporal_update_HALS(U_sparse_torch, V_torch, W_torch, X_torch, a_sparse, c_final, b_torch, s)
+        b_torch = regression_update.baseline_update(UV_mean, a_sparse, c_final)
+        c_final = regression_update.temporal_update_HALS(U_sparse, R, s, V, W,a_sparse, c_final, b_torch)
 
 
-        b_torch = regression_update.baseline_update(UV_mean.to(device), a_sparse, c_final)
-        X_torch = regression_update.estimate_X(c_final, V_torch, VVt_orig)       
-        a_sparse = regression_update.spatial_update_HALS(U_sparse_torch, V_torch,\
-                                                           W_torch, X_torch, a_sparse, c_final, b_torch, s, U_sparse_inner=U_sparse_inner)
+        b_torch = regression_update.baseline_update(UV_mean.to(device), a_sparse, c_final)      
+        a_sparse = regression_update.spatial_update_HALS(U_sparse, R, s, V, W, a_sparse, c_final, b_torch)
         
 
     
@@ -1376,7 +1425,7 @@ def fit_large_spatial_support(comp, c_init, U_sparse_torch, V_torch, th, a_spars
     return final_values
 
 
-def superpixel_init(U_sparse, R, V, V_PMD, patch_size, num_plane, data_order, dims, cut_off_point, residual_cut, length_cut, th, batch_size, pseudo, device, dim1_coordinates, dim2_coordinates, correlations, text =True, plot_en = False, a = None, c = None):
+def superpixel_init(U_sparse, R, s, V, patch_size, num_plane, data_order, dims, cut_off_point, residual_cut, length_cut, th, batch_size, pseudo, device, dim1_coordinates, dim2_coordinates, correlations, text =True, plot_en = False, a = None, c = None):
     '''
     API: 
         Inputs (define variables here)
@@ -1426,7 +1475,7 @@ def superpixel_init(U_sparse, R, V, V_PMD, patch_size, num_plane, data_order, di
     print("find superpixels!")
     connect_mat_1, idx, comps, permute_col= find_superpixel_UV(dims, cut_off_point, length_cut, dim1_coordinates, dim2_coordinates, correlations, data_order)
     
-    c_ini, a_ini = spatial_temporal_ini_UV(U_sparse, V_PMD, dims, th, comps, idx, length_cut, a = a, c = c)
+    c_ini, a_ini = spatial_temporal_ini_UV(U_sparse,R, s, V, dims, th, comps, idx, length_cut, a = a, c = c)
     start = time.time();
     
     print("find pure superpixels!")
@@ -1465,20 +1514,20 @@ def superpixel_init(U_sparse, R, V, V_PMD, patch_size, num_plane, data_order, di
         c = np.hstack((c, c_ini));
         a = torch_sparse.tensor.from_scipy(scipy.sparse.coo_matrix(a)).float().to(device)
         c = torch.from_numpy(c).float().to(device)
-        uv_mean = get_mean_data(U_sparse, V, R=R)
+        uv_mean = get_mean_data(U_sparse, R, s, V)
         b = regression_update.baseline_update(uv_mean, a, c)
     else:
         a, c, brightness_rank = prepare_iteration_UV((dims[0], dims[1], dims[2]), connect_mat_1, permute_col, pure_pix, a_ini, c_ini, more=True)
         a = torch_sparse.tensor.from_scipy(scipy.sparse.coo_matrix(a)).float().to(device)
         c = torch.from_numpy(c).float().to(device)
-        uv_mean = get_mean_data(U_sparse, V, R=R)
+        uv_mean = get_mean_data(U_sparse, R, s, V)
         b = regression_update.baseline_update(uv_mean, a, c)
 
     assert a.sparse_sizes()[1] > 0, 'Superpixels did not identify any components, re-run with different parameters before proceeding'
 
     #Plot superpixel correlation image
     if plot_en:
-        Cnt = local_correlation_mat(U_sparse, R, V, dims, pseudo, a=a, c=c, order=data_order)
+        Cnt = local_correlation_mat(U_sparse, R*s[None, :], V, dims, pseudo, a=a, c=c, order=data_order)
         _, superpixel_img = pure_superpixel_corr_compare_plot(connect_mat_1, unique_pix, pure_pix, brightness_rank_sup, brightness_rank, Cnt, text, order=data_order);
     else:
         superpixel_img = None
@@ -1572,7 +1621,7 @@ def merge_components(a,c,corr_img_all_r,num_list,patch_size,merge_corr_thr=0.6,m
         
             if plot_en:
                 spatial_comp_plot(a_merge.cpu().to_dense().numpy(),\
-                                  corr_img_all_r[:,comp].cpu().numpy().reshape(patch_size[0],patch_size[1],-1,order=data_order),num_list[comp],ini=False);
+                                  corr_img_all_r[:,comp].cpu().numpy().reshape(patch_size[0],patch_size[1],-1,order=data_order),num_list[comp],ini=False, order=data_order);
             
             nonzero_indices = torch.nonzero(a_rank1)
             row_temp = nonzero_indices[:, 0]
@@ -1712,12 +1761,12 @@ class PMDVideo():
     def __init__(self, U_sparse, R, s, V, dimensions, data_order="F", device='cpu'):
         '''
         Things to manage: 
-            - pmd_setup_routine should be executed at init time here, so that the data representation has the 1's vector in the rowspan of V from the beginning. 
             - 'a', 'c' and the like should be optional. If they are not None, it's implied custom init, and we should do the standard custom init pipeline
         
         '''
         self.device = device
-        self.R = torch.Tensor(R * s[None, :]).float().to(self.device)
+        self.R = torch.Tensor(R).float().to(self.device)
+        self.s = torch.from_numpy(s).float().to(self.device)
         self.U_sparse = torch_sparse.tensor.from_scipy(U_sparse).float().to(self.device)
         self.V = torch.Tensor(V).float().to(self.device)
         self.shape = dimensions
@@ -1729,7 +1778,7 @@ class PMDVideo():
         self.demixing_state = False
         self.precomputed = False 
         
-        self.U_sparse, self.R, self.V, self.V_orig = PMD_setup_routine(self.U_sparse, self.V, self.R, self.device) 
+        self.U_sparse, self.R, self.s, self.V = PMD_setup_routine(self.U_sparse, self.R, self.s, self.V) 
         self.batch_size = 1000 #Change this long term
         
         
@@ -1796,11 +1845,11 @@ class PMDVideo():
             if self.dim1_coordinates is None:
                 #This indicates that it is the first time we are running the superpixel init with this set of pre-existing self.a and self.c values, so we need to compute the local correlation data
                 start_time = time.time()
-                self.dim1_coordinates, self.dim2_coordinates, self.correlations = get_local_correlation_structure(self.U_sparse, self.V_orig, self.shape, th, order = self.data_order,batch_size = self.batch_size, pseudo=pseudo_2, a = self.a, c = self.c)
+                self.dim1_coordinates, self.dim2_coordinates, self.correlations = get_local_correlation_structure(self.U_sparse, torch.matmul(self.R*self.s[None, :], self.V), self.shape, th, order = self.data_order,batch_size = self.batch_size, pseudo=pseudo_2, a = self.a, c = self.c)
                 print("the time to run the one time only local corr data structure computation is {}".format(time.time() - start_time))
 
             start_time = time.time()
-            self.a_init, self.mask_a_init, self.c_init, self.b_init, output_dictionary, superpixel_image = superpixel_init(self.U_sparse,self.R,self.V, self.V_orig, patch_size, num_plane, self.data_order, self.shape, cut_off_point, residual_cut, length_cut, th, self.batch_size, pseudo_2, self.device, self.dim1_coordinates, self.dim2_coordinates, self.correlations, text = text, plot_en = plot_en, a = self.a, c = self.c)
+            self.a_init, self.mask_a_init, self.c_init, self.b_init, output_dictionary, superpixel_image = superpixel_init(self.U_sparse,self.R,self.s, self.V, patch_size, num_plane, self.data_order, self.shape, cut_off_point, residual_cut, length_cut, th, self.batch_size, pseudo_2, self.device, self.dim1_coordinates, self.dim2_coordinates, self.correlations, text = text, plot_en = plot_en, a = self.a, c = self.c)
             print("the time to run pure superpixelization is {}".format(time.time() - start_time))
 
             self.superpixel_rlt_recent = output_dictionary
@@ -1813,8 +1862,7 @@ class PMDVideo():
         
         assert custom_init['a'].shape[2] > 0, 'Must provide at least 1 spatial footprint'
         assert self.a is None and self.c is None, 'Custom init is only supported for the first initialization, not for subsequent initializations'
-        self.a_init, self.mask_a_init, self.c_init, self.b_init = process_custom_signals(custom_init['a'].copy(), self.U_sparse, self.V_orig, device=self.device, order=self.data_order)
-        # self.initialized = True
+        self.a_init, self.mask_a_init, self.c_init, self.b_init = process_custom_signals(custom_init['a'].copy(), self.U_sparse, self.R, self.s, self.V, order=self.data_order)
         
     def precompute_quantities(self, maxiter, ring_radius=15):
         '''
@@ -1826,7 +1874,7 @@ class PMDVideo():
         self.r = ring_radius
         self.K = self.c.shape[1]
         self.res = np.zeros(maxiter)
-        self.uv_mean = get_mean_data(self.U_sparse, self.V_orig)
+        self.uv_mean = get_mean_data(self.U_sparse, self.R, self.s, self.V)
         self.num_list = np.arange(self.K)
 
         if self.mask_a is None:
@@ -1836,11 +1884,6 @@ class PMDVideo():
         self.mask_ab = self.mask_a
 
         self.W = ring_model(self.d1, self.d2, self.r, device=self.device, order = self.data_order, empty=True)
-        self.VVt = torch.matmul(self.V, self.V.t())
-        self.VVt_orig = torch.matmul(self.V_orig, self.V_orig.t())
-        self.s = regression_update.estimate_X(torch.ones([1, self.T], device=self.device).t(), self.V_orig, self.VVt_orig) #sV is the vector of 1's
-        
-        self.U_sparse_inner = torch.inverse(torch_sparse.matmul(self.U_sparse.t(), self.U_sparse).to_dense())
         self.a_summand = torch.ones((self.d1*self.d2, 1)).to(self.device)
         
         #Initialize correlation image fields here
@@ -1860,10 +1903,6 @@ class PMDVideo():
         For now, this is a memory-saving technique: we delete the precomputed quantities which actually can occupy significant space on GPU 
         '''
         self.precomputed=False
-        del self.VVt
-        del self.VVt_orig
-        del self.s
-        del self.U_sparse_inner
         
     def halt_demixing(self):
         self._delete_precomputed()
@@ -1878,16 +1917,15 @@ class PMDVideo():
         self._assert_initialization()
         self._assert_ready_to_demix()
         
-        X_temp = regression_update.estimate_X(self.c, self.V, self.VVt) #Estimate using orthogonal V, not regular V
         if self.W.empty:
             #This means we need to create the actual W matrix (i.e. it can't just be empty)
             self.W = ring_model(self.d1, self.d2, self.r, empty=False, device=self.device, order=self.data_order)
-        ring_model_update(self.U_sparse, self.R, self.V, self.W, X_temp, self.b, self.a, self.d1, self.d2, device=self.device)
+        ring_model_update(self.U_sparse, self.R*self.s[None, :], self.V, self.W, self.c, self.b, self.a, self.d1, self.d2, device=self.device)
         
     def temporal_update(self, denoise=False, plot_en=False):
         self._assert_initialization()
         self._assert_ready_to_demix()
-        self.c = regression_update.temporal_update_HALS(self.U_sparse, self.V_orig, self.W, self.X, self.a, self.c, self.b, self.s, U_sparse_inner=self.U_sparse_inner)
+        self.c = regression_update.temporal_update_HALS(self.U_sparse, self.R, self.s, self.V, self.W, self.a, self.c, self.b)
         
         #Denoise 'c' components if desired
         if denoise:
@@ -1902,21 +1940,19 @@ class PMDVideo():
             self.a, self.c, self.standard_correlation_image, self.residual_correlation_image, self.mask_ab, self.num_list = delete_comp(self.a, self.c, self.standard_correlation_image, self.residual_correlation_image, self.mask_ab, self.num_list, temp, "zero c!", plot_en, (self.d1, self.d2), order=self.data_order)
             
     def spatial_update(self, plot_en = False):
-        
-        self.X = regression_update.estimate_X(self.c, self.V_orig, self.VVt_orig)       
-        self.a = regression_update.spatial_update_HALS(self.U_sparse, self.V_orig, self.W, self.X, self.a, self.c, self.b, self.s, U_sparse_inner=self.U_sparse_inner, mask_ab=self.mask_ab.t())
+              
+        self.a = regression_update.spatial_update_HALS(self.U_sparse,self.R, self.s, self.V, self.W, self.a, self.c, self.b, mask_ab=self.mask_ab.t())
         
         ## Delete Bad Components
         temp = torch_sparse.matmul(self.a.t(), self.a_summand).t() == 0 #Identify which columns of 'a' are all zeros
         if torch.sum(temp):
             self.a, self.c, self.standard_correlation_image, self.residual_correlation_image, self.mask_ab, self.num_list = delete_comp(self.a, self.c, self.standard_correlation_image, self.residual_correlation_image, self.mask_ab, self.num_list, temp, "zero a!", plot_en, (self.d1, self.d2), order=self.data_order);
-            self.X = regression_update.estimate_X(self.c, self.V_orig, self.VVt_orig)
             
     def compute_local_correlation_image(self, pseudo):
         ##Long term: the currently initialized "a" and "c" should just be on the same device as U_sparse,R,V
         a_device = torch_sparse.tensor.from_scipy(scipy.sparse.coo_matrix(self.a)).float().to(self.device)
         c_device = torch.from_numpy(self.c).float().to(self.device)
-        return local_correlation_mat(self.U_sparse, self.R, self.V, self.shape, pseudo, a=a_device, c=c_device, order=self.data_order, batch_size=self.batch_size)
+        return local_correlation_mat(self.U_sparse, self.R*self.s[None, :], self.V, self.shape, pseudo, a=a_device, c=c_device, order=self.data_order, batch_size=self.batch_size)
     
     def compute_single_pixel_correlation_image(self, row_index, residual=True):
         '''
@@ -1928,14 +1964,14 @@ class PMDVideo():
         else:
             a_device = None
             c_device = None
-        return single_pixel_correlation_image(row_index, self.U_sparse, self.R, self.V, a=a_device, c=c_device, batch_size=self.batch_size)
+        return single_pixel_correlation_image(row_index, self.U_sparse, self.R*self.s[None, :], self.V, a=a_device, c=c_device, batch_size=self.batch_size)
             
     def compute_standard_correlation_image(self):
-        self.standard_correlation_image = vcorrcoef_UV_noise(self.U_sparse, self.R, self.V, self.c, batch_size = self.batch_size,  device=self.device)
+        self.standard_correlation_image = vcorrcoef_UV_noise(self.U_sparse, self.R*self.s[None, :], self.V, self.c, batch_size = self.batch_size,  device=self.device)
         
     #TODO: Profile this to see if you can precompute some quantities ahead of time
     def compute_residual_correlation_image(self):
-        self.residual_correlation_image = vcorrcoef_resid(self.U_sparse, self.R, self.V, self.a, self.c, batch_size = self.batch_size, device=self.device)
+        self.residual_correlation_image = vcorrcoef_resid(self.U_sparse, self.R*self.s[None, :], self.V, self.a, self.c, batch_size = self.batch_size, device=self.device)
         
     def merge_signals(self, merge_corr_thr, merge_overlap_thr, plot_en, data_order):
         rlt = merge_components(self.a,self.c,self.standard_correlation_image,self.num_list,\
@@ -1977,16 +2013,17 @@ class PMDVideo():
         '''
         assert 0 <= row_index and row_index < self.U_sparse.sparse_sizes()[0], "Row Index is out of range"
         
-        row_index_tensor = torch.Tensor([row_index]).to(self.device).long()
+        row_index_tensor = torch.arange(row_index, row_index+1, device=self.device)
         my_row = torch_sparse.index_select(self.U_sparse, 0, row_index_tensor)
         my_row_R = torch_sparse.matmul(my_row, self.R)
+        my_row_R = my_row_R * self.s[None,:]
         my_row_RV = torch.matmul(my_row_R, self.V)
         
         return my_row_RV
         
     
     def get_background_row(self, row_index):
-        return self.W.compute_fluctuating_background_row(self.U_sparse, self.R, self.V, self.a, self.b, row_index)
+        return self.W.compute_fluctuating_background_row(self.U_sparse, self.R, self.s, self.V, self.a, self.b, row_index)
     
     
     def reset(self):
@@ -2016,7 +2053,6 @@ class PMDVideo():
         self.a = self.a.cpu().to_dense().numpy()
         self.c = self.c.cpu().numpy()
         self.b = self.b.cpu().numpy()
-        self.X = self.X.cpu().numpy()
 
         temp = np.sqrt((self.a**2).sum(axis=0,keepdims=True));
         c = self.c*temp;
@@ -2039,29 +2075,4 @@ class PMDVideo():
         self.dim2_coordinates = None
         self.correlations = None
         
-        return self.a, self.c, self.b, self.X, self.W, self.res, corr_img_all_r, self.num_list
-
-        
-        
-        
-        
-        
-        
-
-
-
-        
-    
-        
-            
-        
-  
-        
-            
- 
-        
-    
-        
-        
-        
-        
+        return self.a, self.c, self.b, self.W, self.res, corr_img_all_r, self.num_list

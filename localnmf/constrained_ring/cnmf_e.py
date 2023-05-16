@@ -150,37 +150,37 @@ class ring_model:
         else:
             return product.t()
         
-    def compute_fluctuating_background_row(self, U_sparse, R, V, a, b, row_index):
+    def compute_fluctuating_background_row(self, U_sparse, R, s, V, a_sparse, b, row_index):
         '''
-        Computes a specific row of W(URV - ac - b), which is the fluctuating background. 
-        Recall  we enforce that column i of W contains all zeros whenever row 'i' of a contains nonzero entries. So Wa will always be zero, and the above expression becomes: 
+        Computes a specific row of W(URsV - ac - b), which is the fluctuating background. 
+        Recall  we enforce that column i of W contains all zeros whenever row 'i' of a contains nonzero entries. So W*a will always be zero, and the above expression becomes: 
         W(URV - b)
         Parameters: 
-            U_sparse. torch_sparse Tensor. Dimensions (d1*d2, d1*d2)
-            R: torch.Tensor. Dimensions (r x r)
-            V: torch.Tensor. Dimensions (r x T) 
-            a_sparse: numpy.ndarray. Dimensions (d1*d2, K) where K is the number of neural shapes
-            b: numpy.ndarray. Dimensions (d1*d2, 1)
-            
-        TODO: Splitting between torch and numpy here is bad design, long term fix this
+            U_sparse. torch_sparse Tensor. Dimensions (d, K)
+            R: torch.Tensor. Dimensions (K x K)
+            s: torch.Tensor of shape (K)
+            V: torch.Tensor. Dimensions (K x T) 
+            a_sparse: torch_sparse.Tensor of shape (d, N), where N is the number of neural shapes
+            b: torch.Tensor. Dimensions (d1*d2,1)
         '''
         device = R.device
         b_torch = torch.Tensor(b).float().to(device)
         
-        a_support = np.sum(a, axis = 1) == 0
-        row_index_tensor = torch.Tensor([row_index]).to(device).long()
-        W_selected = torch_sparse.index_select(self.W_mat, 0, row_index_tensor).float()
+        a_sum_vec = torch.ones((a_sparse.sparse_sizes()[1], 1), device=device)
+        a_sum = (torch_sparse.matmul(a_sparse, a_sum_vec) == 0).float()
+
+        
+        row_index_tensor = torch.arange(row_index, row_index+1, device=device)
+        W_selected = torch_sparse.index_select(self.W_mat, 0, row_index_tensor).to_dense().float()
+        
+        W_selected = W_selected * a_sum.t() 
         
         #Apply unweighted ring model to W(URV - b)
-        sparsity_selector_matrix = scipy.sparse.diags(a_support.astype("float32"), shape = (U_sparse.sparse_sizes()[0], U_sparse.sparse_sizes()[0]))
-        sparsity_selector_matrix = torch_sparse.tensor.from_scipy(sparsity_selector_matrix).to(device)
-        sparser_U = torch_sparse.matmul(sparsity_selector_matrix, U_sparse)
-        sparse_WU = torch_sparse.matmul(W_selected, sparser_U)
-        sparse_WUR = torch_sparse.matmul(sparse_WU, R)
-        WURV = torch.matmul(sparse_WUR, V)
-        
-        sparser_b = torch_sparse.matmul(sparsity_selector_matrix, b_torch)
-        Wb = torch_sparse.matmul(W_selected, sparser_b)
+        WU = torch_sparse.matmul(U_sparse.t(), W_selected.t()).t()
+        WUR = torch.matmul(WU, R)
+        WURs = WUR * s[None, :]
+        WURsV = torch.matmul(WURs, V)
+        Wb = torch.matmul(W_selected, b)
         
         difference = WURV - Wb
         
@@ -248,13 +248,15 @@ def ring_model_update_sampling(U_sparse, V, W, c, b, a, d1, d2, num_samples=1000
     W.set_weights(values[:, None])
    
 
-def ring_model_update(U_sparse, R, V, W, X, b, a, d1, d2, num_samples=1000, device='cuda'):
+def ring_model_update(U_sparse, R, V, W, c, b, a, d1, d2, num_samples=1000, device='cuda'):
     
+    device = V.device
     batches = math.ceil(R.shape[1] / num_samples)
     denominator = 0
     numerator = 0
     W.reset_weights()
     
+    X = torch.matmul(c.t(), V.t())
     sV = torch.ones([1, V.shape[1]], device=device)
     s = torch.matmul(sV, V.t())
     
@@ -262,9 +264,10 @@ def ring_model_update(U_sparse, R, V, W, X, b, a, d1, d2, num_samples=1000, devi
 
         start = num_samples * k
         end = min(R.shape[1], start + num_samples)
-        R_crop = R[:, start:end]
-        X_crop = X[:, start:end]
-        s_crop = s[:, start:end]
+        indices = torch.arange(start, end, device=device)
+        R_crop = torch.index_select(R, 1, indices)
+        X_crop = torch.index_select(X, 1, indices)
+        s_crop = torch.index_select(s, 1, indices)
 
 
         resid_V_basis = torch_sparse.matmul(U_sparse, R_crop) - torch_sparse.matmul(a, X_crop) - torch.matmul(b, s_crop)

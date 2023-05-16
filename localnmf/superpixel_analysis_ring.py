@@ -848,7 +848,7 @@ def merge_components(a,c,corr_img_all_r,num_list,patch_size,merge_corr_thr=0.6,m
             a_zero = np.zeros([a.shape[0],1]);
             a_temp = a[:,comp];
             if plot_en:
-                spatial_comp_plot(a_temp, corr_img_all_r[:,comp].reshape(patch_size[0],patch_size[1],-1,order=data_order),num_list[comp],ini=False);
+                spatial_comp_plot(a_temp, corr_img_all_r[:,comp].reshape(patch_size[0],patch_size[1],-1,order=data_order),num_list[comp],ini=False, order=data_order);
             mask_temp = np.where(a_temp.sum(axis=1,keepdims=True) > 0)[0];
             
             a_temp = a_temp[mask_temp,:];
@@ -1852,138 +1852,6 @@ def vcorrcoef_UV_noise(U_sparse, R, V, c_orig, pseudo = 0, batch_size = 1000, to
     fin_corr = torch.nan_to_num(fin_corr, nan = 0, posinf = 0, neginf = 0)
     return fin_corr.cpu().numpy()    
 
-##TODO: REMOVE THIS
-def merge_components_priors(a,c,corr_img_all_r,num_list,patch_size,merge_corr_thr=0.6,merge_overlap_thr=0.6,plot_en=False, dims = (64,64,3600), \
-                           frame_len = 25, confidence = 0.99, spatial_thres = [0.8,0.8], allowed_overlap = 30, model = None, plot_mnmf = True):
-    """ want to merge components whose correlation images are highly overlapped,
-    and update a and c after merge with region constrain
-    Parameters:
-    -----------
-    a: np.ndarray
-         matrix of spatial components (d x K)
-    c: np.ndarray
-         matrix of temporal components (T x K)
-    corr_img_all_r: np.ndarray
-         corr image
-    U, V: low rank decomposition of Y
-    normalize_factor: std of Y
-    num_list: indices of components
-    patch_size: dimensions for data
-    merge_corr_thr:   scalar between 0 and 1
-        temporal correlation threshold for truncating corr image (corr(Y,c)) (default 0.6)
-    merge_overlap_thr: scalar between 0 and 1
-        overlap ratio threshold for two corr images (default 0.6)
-    Returns:
-    --------
-    a_pri:     np.ndarray
-            matrix of merged spatial components (d x K')
-    c_pri:     np.ndarray
-            matrix of merged temporal components (T x K')
-    corr_pri:   np.ndarray
-            matrix of correlation images for the merged components (d x K')
-    flag: merge or not
-    Model: Neural network we use to analyze the summary image..
-    """
-
-    f = np.ones([c.shape[0],1]);
-    ############ calculate overlap area ###########
-    a = csc_matrix(a);
-    a_corr = scipy.sparse.triu(a.T.dot(a),k=1);
-    cor = csc_matrix((corr_img_all_r>merge_corr_thr)*1);
-    temp = cor.sum(axis=0);
-    cor_corr = scipy.sparse.triu(cor.T.dot(cor),k=1);
-    cri = np.asarray((cor_corr/(temp.T)) > merge_overlap_thr)*np.asarray((cor_corr/temp) > merge_overlap_thr)*((a_corr>0).toarray());
-    a = a.toarray();
-
-    connect_comps = np.where(cri > 0);
-    if len(connect_comps[0]) > 0:
-        flag = 1;
-        a_pri = a.copy();
-        c_pri = c.copy();
-        G = nx.Graph();
-        G.add_edges_from(list(zip(connect_comps[0], connect_comps[1])))
-        comps=list(nx.connected_components(G))
-        merge_idx = np.unique(np.concatenate([connect_comps[0], connect_comps[1]],axis=0));
-        a_pri = np.delete(a_pri, merge_idx, axis=1);
-        c_pri = np.delete(c_pri, merge_idx, axis=1);
-        num_pri = np.delete(num_list,merge_idx);
-        print("num_list is {}".format(num_list))
-        
-        ##Load MASK_RCNN network only if we need to do merges
-        model_nn = mnmf.load_MASKRCNN(model)
-        
-        for comp in comps: 
-            print(comp)
-        for comp in comps:
-            comp=list(comp);
-            print("merge" + str(num_list[comp]+1));
-            a_zero = np.zeros([a.shape[0],1]);
-            a_temp = a[:,comp];
-            if plot_en or True:
-                spatial_comp_plot(a_temp, corr_img_all_r[:,comp].reshape(patch_size[0],patch_size[1],-1,order="F"),num_list[comp],ini=False);
-            mask_temp = np.where(a_temp.sum(axis=1,keepdims=True) > 0)[0];
-            a_temp = a_temp[mask_temp,:];
-            y_temp = np.matmul(a_temp, c[:,comp].T);
-            
-            #Here we do the visualization we need to diagnose things:
-            debug = False
-            if debug: 
-                y_temp_avg = np.mean(y_temp, axis = 1)
-                y_temp_avg_img = np.zeros((dims[0]*dims[1],))
-                y_temp_avg_img[mask_temp] = y_temp_avg
-                y_temp_avg_img = y_temp_avg_img.reshape((dims[0],dims[1]), order="F")
-                plt.figure()
-                plt.imshow(y_temp_avg_img)
-                plt.show()
-
-                for k in range(len(comp)):
-                    plt.figure()
-                    plt.plot(c[:, comp[k]])
-                    plt.show()
-                print("THAT WAS THE MEAN MERGE IMAGE! and the traces") 
-            
-            
-                a_debug = a[:, comp]
-                c_debug = c[:, comp]
-                print("HERE ARE THE NEURONS IN QUESTION BEFORE MRCNN")
-                for index in range(len(comp)):
-                    fig, ax = plt.subplots(1,2)
-                    ax[0].imshow(a_debug[:, index].reshape((dims[0],dims[1]), order="F"))
-                    ax[1].plot(c_debug[:, index])
-                    plt.show()
-            
-            
-            a_temp, c_temp = mnmf.maskNMF_merge(a[:, comp], c[:, comp], frame_len,confidence, spatial_thres, model_nn, plot_mnmf, allowed_overlap = allowed_overlap, max_comps = len(comp),\
-                                                 dims = dims)
-
-            #In this case all components were discarded
-            if a_temp is None or c_temp is None:
-                continue
-                
-                
-            print("THE NUMBER OF COMPONENTS DEMIXED HERE IS {}".format(a_temp.shape[1]))
-            print("THE SIZE OF COMPS WAS {}".format(len(comps)))
-            
-            print("HERE IS HOW THINGS LOOK AFTER THE BESSEL INIT")
-            for index in range(a_temp.shape[1]):
-                fig, ax = plt.subplots(1,2)
-                ax[0].imshow(a_temp[:, index].reshape((dims[0],dims[1]), order="F"))
-                ax[1].plot(c_temp[:, index])
-                plt.show()
-
-#             corr_temp = vcorrcoef(U/normalize_factor, V.T, c_temp);
-
-            a_pri = np.hstack((a_pri,a_temp));
-            c_pri = np.hstack((c_pri,c_temp));
-            for num_add in range(a_temp.shape[1]):
-                num_pri = np.hstack((num_pri,num_list[comp[num_add]]));
-        del model_nn
-        torch.cuda.empty_cache()
-#         num_pri = c_pri.shape[1] #Re-order relevant components
-        return flag, a_pri, c_pri, num_pri
-    else:
-        flag = 0;
-        return flag
 
     
 def dilate_mask(mask_a, dilation_size):
@@ -2802,14 +2670,14 @@ def demix_whole_data_robust_ring_lowrank(pmd_video, cut_off_point=[0.95,0.9], le
 
         with torch.no_grad():
             
-            a, c, b, X, W, res, corr_img_all_r, num_list = update_AC_bg_l2_Y_ring_lowrank(pmd_video, maxiter, corr_th_fix, corr_th_fix_sec, corr_th_del, switch_point, skips, merge_corr_thr, merge_overlap_thr, ring_radius, denoise=denoise, plot_en=plot_en, plot_debug=plot_debug, update_after=update_after);
+            a, c, b, W, res, corr_img_all_r, num_list = update_AC_bg_l2_Y_ring_lowrank(pmd_video, maxiter, corr_th_fix, corr_th_fix_sec, corr_th_del, switch_point, skips, merge_corr_thr, merge_overlap_thr, ring_radius, denoise=denoise, plot_en=plot_en, plot_debug=plot_debug, update_after=update_after);
             torch.cuda.empty_cache() #Test this as placeholder for now to avoid GPU memory getting clogged
             
         
         #If multi-pass, save results from first pass
         if pass_num > 1 and ii == 0:
             W_final = W.create_complete_ring_matrix(a)
-            rlt = {'a':a, 'c':c, 'b':b, "X":X, "W":W_final, 'res':res, 'corr_img_all_r':corr_img_all_r, 'num_list':num_list, 'data_order': order, 'data_shape':(d1, d2, T)};
+            rlt = {'a':a, 'c':c, 'b':b, "W":W_final, 'res':res, 'corr_img_all_r':corr_img_all_r, 'num_list':num_list, 'data_order': order, 'data_shape':(d1, d2, T)};
             a0 = a.copy();
         ii = ii+1;
 
@@ -2832,7 +2700,7 @@ def demix_whole_data_robust_ring_lowrank(pmd_video, cut_off_point=[0.95,0.9], le
         plt.show();
     
     W_final = W.create_complete_ring_matrix(a)
-    fin_rlt = {'U_sparse': pmd_video.U_sparse.cpu().to_scipy(layout='csr'), 'R': pmd_video.R.cpu().numpy(), 'V': pmd_video.V.cpu().numpy(), 'a':a, 'c':c, 'b':b, "X":X, "W":W_final, 'res':res, 'corr_img_all_r':corr_img_all_r, 'num_list':num_list, 'data_order': order, 'data_shape':(d1, d2, T)};
+    fin_rlt = {'U_sparse': pmd_video.U_sparse.cpu().to_scipy(layout='csr'), 'R': pmd_video.R.cpu().numpy(), 'V': pmd_video.V.cpu().numpy(), 'a':a, 'c':c, 'b':b, "W":W_final, 'res':res, 'corr_img_all_r':corr_img_all_r, 'num_list':num_list, 'data_order': order, 'data_shape':(d1, d2, T)};
     
     
     if pass_num > 1:
@@ -2943,9 +2811,9 @@ def update_AC_bg_l2_Y_ring_lowrank(pmd_video, maxiter,corr_th_fix, corr_th_fix_s
         print("time: " + str(time.time()-start));
 
     pmd_video.delete_precomputed()
-    a, c, b, X, W, res, corr_img_all_r, num_list = pmd_video.brightness_order_and_return_state()
+    a, c, b, W, res, corr_img_all_r, num_list = pmd_video.brightness_order_and_return_state()
     
-    return a, c, b, X, W, res, corr_img_all_r, num_list
+    return a, c, b, W, res, corr_img_all_r, num_list
     '''
     Long Term: eliminate the following variables: 
     - res (it's never used)

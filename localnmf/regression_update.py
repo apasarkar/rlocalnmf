@@ -32,59 +32,48 @@ def baseline_update(uv_mean, a, c, to_torch=False):
         return b.numpy()
     else:
         return b         
-
-def estimate_X(c, V, VVt):
-    '''
-    Function for finding an approximate solution to c^t = XV
-    Params:
-        c: torch.Tensor, dimensions (T, k)
-        V: torch.Tensor, dimensions (R, T)
-        VVt: torch.Tensor, dimensions (R, R)
-    Returns:
-        X: torch.Tensor, dimensions (k x R)
-    '''
-    cV_T = torch.matmul(V, c)
-    output = torch.linalg.lstsq(VVt, cV_T).solution
     
-    return output.t()
-
-
-    
-def project_U_HALS(U_sparse, U_sparse_inverse, W, vector, a_sparse):
+def project_U_HALS(U_sparse, R, W, vector, a_sparse):
     '''
-    Commonly used routine to project background term (W) onto W basis in HALS calculations
+    Commonly used routine to project background term (W) onto U basis in HALS calculations. 
+    We exploit the fact that the product UR has orthonormal columns
     Note that we multiple W by v first (before doing any other matmul) because that collapses to a single vector. Then 
     all subsequent matmuls are very fast
     Inputs: 
         U_sparse: torch_sparse.SparseTensor object. Dimensions d x r where d is number of pixels, r is rank
-        U_sparse_inverse: torch.Tensor object. Equal to finding the inverse of U_sparse^t times U_sparse (precomputed)
+        R: torch.Tensor object. Shape r x r' (where r may be equal to r'). UR is the orthonormal left basis term for the SVD of the PMD movie (recall the SVD decomposition is URsV where UR 
+            is the left set of orthonormal col vectors, is the diagonal matrix, and V contains the right orthonormal row vectors. 
         W: ring model object. Represents a (d, d)-shaped sparse tensor
-        vector: torch.Tensor. Dimensions (d, k) for some value k.
+        vector: torch.Tensor. Dimensions (d, k) for some value k
+        a_sparse. torch_sparse.Tensor object, with shape (d, k)
     '''
     Wv = W.apply_model_right(vector, a_sparse)
     UtWv = torch_sparse.matmul(U_sparse.t(), Wv)
-    U_invUtWv = torch.matmul(U_sparse_inverse, UtWv)
-    UU_invUtWv = torch_sparse.matmul(U_sparse, U_invUtWv)
+    RRt = torch.matmul(R, R.t())
+    RRtUtWv = torch.matmul(RRt, UtWv)
+    final_projection = torch_sparse.matmul(U_sparse, RRtUtWv)
     
-    return UU_invUtWv
+    return final_projection
     
-def spatial_update_HALS(U_sparse, V, W, X, a_sparse, c, b, s, U_sparse_inner=None, mask_ab = None):
+def spatial_update_HALS(U_sparse, R, s, V, W, a_sparse, c, b, mask_ab = None):
     '''
     Computes a spatial HALS updates: 
     Params: 
+        
+        Note: The first four parameters are the "PMD" representation of the data: it is given in a traditional SVD form: URsV, where UR is the left orthogonal basis, 's' represents the diagonal matrix, and V is the right orthogonal basis. 
         U_sparse: torch_sparse.tensor. Sparse matrix, with dimensions (d x R)
-        V: torch.Tensor. Dimensions R x T. Dimensions R x T
-            V has as its last row a vector of all -1's
+        R: torch.Tensor. Dimensions (R, R') where R' is roughly equal to R (it may be equal to R+1)
+        s: torch.Tensor. This is the diagonal of a R' x R' matrix (so it is represented by a R' shaped tensor) 
+        V: torch.Tensor. Dimensions R' x T. Dimensions R' x T, where T is the number of frames, where all rows are orthonormal. 
+            Note:  V must contain the 1 x T vector of all 1's in its rowspan. 
         W: ring_model object. Describes a sparse matrix with dimensions (d x d)
-        X: torch.Tensor. Dimensions (k x R), with k neurons in a and c. Approximate solution to c^t = XV
-        a_sparse: torch_sparse.tensor. dimensions d x k
+        a_sparse: torch_sparse.tensor. dimensions d x k, where k represents the number of neural signals. 
         c: torch.Tensor. Dimensions T x k
         b: torch.Tensor. Dimensions d x 1. Represents static background
-        U_sparse_inner: A pre-computed R x R matrix. It is the inverse of U_sparse^T times U_sparse. Used for linear subspace projection
         mask_ab: torch_sparse.tensor. Dimensions (k x d). For each neuron, indicates the allowed support of neuron
         
     Returns: 
-        a_sparse: torch_sparse.tensor. Dimensions d x k, containing updated a_i elements
+        a_sparse: torch_sparse.tensor. Dimensions d x k, containing updated spatial matrix
         
     TODO: Make 'a' input a sparse matrix
     '''
@@ -94,45 +83,40 @@ def spatial_update_HALS(U_sparse, V, W, X, a_sparse, c, b, s, U_sparse_inner=Non
     if mask_ab is None: 
         mask_ab = a_sparse.bool().t()
         
-    if U_sparse_inner is None:
-        U_sparse_inner = torch.inverse(torch_sparse.matmul(U_sparse.t(), U_sparse).to_dense())
+    Vc = torch.matmul(V, c) 
+    a_dense = a_sparse.to_dense()
+        
+    #Find the tensor, e, (a 1 x R' shaped tensor) such that eV gives a 1 x T tensor consisting of all 1's
+    e = torch.matmul(torch.ones([1, V.shape[1]], device=device), V.t())
     
-    #Init s such that bsV = static background
+    #Find the tensor, X (a N x K shaped tensor) such that XV closely approximates c.T
+    X = Vc.t() #This is just a linear subspace projection of c.T onto the rowspace of V; can reuse above computation for this
+    
     C_prime = torch.matmul(c.t(), c)
     C_prime_diag = torch.diag(C_prime)
     C_prime_diag[C_prime_diag == 0] = 1 # For division safety
     
-    ctVt = torch.matmul(V, c).t()
-    
     ctVtUt_net = torch.zeros((c.shape[1], U_sparse.sparse_sizes()[0]), device=device)
     
-    #Step 1: Compute ctVtU_PMD^t
-    ctVtU_PMDt = torch_sparse.matmul(U_sparse, ctVt.t()).t()
-    ctVtUt_net = ctVtUt_net + ctVtU_PMDt
+    '''
+    We will now compute the TRANSPOSE of the following expression: 
     
-    #Step 2: Compute ctVtU_PMD^t(Proj)^t
-    # where Proj = U(U^tU)^-1U^tW, the linear projection of W onto U
-    ctVtU_PMD_tWt = project_U_HALS(U_sparse, U_sparse_inner, W, ctVtU_PMDt.t(), a_sparse).t()
-    ctVtUt_net -= ctVtU_PMD_tWt
+    [URs - be - Proj(W)(URS -be - aX)]Vc
     
-    #Step 3: Compute ctVtXtat(Proj)^t
-    # where Proj = U(U^tU)^-1U^tW, the linear projection of W onto U
-    ctVtXt = torch.matmul(ctVt, X.t())
-    ctVtXtat = torch_sparse.matmul(a_sparse, ctVtXt.t()).t()
-    ctVtXtatWt = project_U_HALS(U_sparse, U_sparse_inner, W, ctVtXtat.t(), a_sparse).t()
-    ctVtUt_net += ctVtXtatWt
+    The result (after the transpose) is a N x d sized matrix, where N is the number of neural signals
+    '''
+    cumulator = torch.zeros([U_sparse.sparse_sizes()[0], c.shape[1]], device=device)
     
-    #Step 4: ctVtstbt(Proj)^t
-    # where Proj = U(U^tU)^-1U^tW, the linear projection of W onto U
-    Proj_Wb = project_U_HALS(U_sparse, U_sparse_inner, W, b, a_sparse).t()
-    ctVtst = torch.matmul(ctVt, s.t())
-    ctVtstbtWt = torch.matmul(ctVtst, Proj_Wb)
-    ctVtUt_net += ctVtstbtWt
+    URsVc = torch_sparse.matmul(U_sparse, torch.matmul(R, s[:, None] * Vc))
+    beVc = torch.matmul(b, torch.matmul(e, Vc))
+    aXVc = torch.matmul(a_dense, torch.matmul(X, Vc))
     
-    #Step 5: ctVtstbt
-    ctVtstbt = torch.matmul(ctVtst, b.t())
-    ctVtUt_net -= ctVtstbt
+    ring_term = project_U_HALS(U_sparse, R, W, URsVc - beVc - aXVc, a_sparse)
+    cumulator = URsVc - beVc - ring_term
+    
+    cumulator = cumulator.t()
 
+    threshold_func = torch.nn.ReLU(0)
     for i in range(c.shape[1]):
               
     
@@ -140,114 +124,106 @@ def spatial_update_HALS(U_sparse, V, W, X, a_sparse, c, b, s, U_sparse_inner=Non
         mask_ab_torchsparse_sub = torch_sparse.index_select(mask_ab, 0,\
                                                             index_select_tensor)
         ind_torch = mask_ab_torchsparse_sub.storage.col()
+        mask_apply = torch.zeros([U_sparse.sparse_sizes()[0]], device=device)
+        mask_apply[ind_torch] = 1
 
         C_prime_i = C_prime.index_select(0, index_select_tensor).t()
-        ctVtUt_net_i = ctVtUt_net.index_select(0, index_select_tensor)
-        cca = torch_sparse.matmul(a_sparse, C_prime_i).t()
-        final_vec = (ctVtUt_net_i - cca)/C_prime_diag[i]
+        cumulator_i = cumulator.index_select(0, index_select_tensor)
+        cca = torch.matmul(a_dense, C_prime_i).t()
+        final_vec = (cumulator_i - cca)/C_prime_diag[i]
+        curr_frame = a_dense[:, i]
+        curr_frame += torch.squeeze(final_vec)
+        curr_frame *= mask_apply
+        curr_frame = threshold_func(curr_frame)
+        a_dense[:, i] = curr_frame
 
         
-        #Crop final_vec
-        final_vec = torch.squeeze(final_vec.t())
-        final_vec = final_vec[ind_torch]
-
-        
-        values = final_vec # final_vec[ind]
-        rows = ind_torch
-        col = torch.ones_like(rows)*i
-        
-        original_values = a_sparse.storage.value()
-        original_rows = a_sparse.storage.row()
-        original_cols = a_sparse.storage.col()
-        
-        
-        new_values = torch.cat((original_values, values))
-        
-        threshold_func = torch.nn.ReLU(0)
-        new_values = threshold_func(new_values)
-        
-        new_rows = torch.cat((original_rows, rows))
-        new_cols = torch.cat((original_cols, col))
-        
-        a_sparse = torch_sparse.tensor.SparseTensor(row=new_rows, col=new_cols, value=new_values, \
+    nonzero_indices = torch.nonzero(a_dense)
+    rows = nonzero_indices[:, 0]
+    cols = nonzero_indices[:, 1]
+    values = a_dense[rows,cols]
+    
+    a_sparse = torch_sparse.tensor.SparseTensor(row=rows, col=cols, value=values, \
                                                     sparse_sizes = a_sparse.storage.sparse_sizes()).coalesce()
-        
-        
         
         
     return a_sparse   
  
 
     
-def left_project_U_HALS(a_sparse, a_dense, U_sparse, U_sparse_inverse, W):
-    atU = torch_sparse.matmul(U_sparse.t(), a_dense).t()
-    atU_Uinv = torch.matmul(atU, U_sparse_inverse)
-    atU_UinvUt = torch_sparse.matmul(U_sparse, atU_Uinv.t()).t()
-    final = W.apply_model_left(atU_UinvUt, a_sparse)
-    return final
+# def left_project_U_HALS(a_sparse, a_dense, U_sparse, U_sparse_inverse, W):
+#     atU = torch_sparse.matmul(U_sparse.t(), a_dense).t()
+#     atU_Uinv = torch.matmul(atU, U_sparse_inverse)
+#     atU_UinvUt = torch_sparse.matmul(U_sparse, atU_Uinv.t()).t()
+#     final = W.apply_model_left(atU_UinvUt, a_sparse)
+#     return final
     
     
+##Compute the projection matrix:
+def get_projection_matrix_temporal_HALS_routine(U_sparse, R, W, a_dense, a_sparse):
+    aU = torch_sparse.matmul(U_sparse.t(), a_dense).t()
+    aUR = torch.matmul(aU, R)
+    aURRt = torch.matmul(aUR, R.t())
+    aURRtUt = torch_sparse.matmul(U_sparse, aURRt.t()).t() #Shape here is N x d
+    projector = W.apply_model_left(aURRtUt, a_sparse)
     
-def temporal_update_HALS(U_sparse, V, W, X, a_sparse, c, b, s, U_sparse_inner=None):
+    return projector
+    
+    
+def temporal_update_HALS(U_sparse, R, s, V,  W, a_sparse, c, b):
     '''
     Inputs: 
-        U_sparse: (d1*d2, R)-shaped torch_sparse.tensor
-        V: (R, T)-shaped torch.Tensor
+         Note: The first four parameters are the "PMD" representation of the data: it is given in a traditional SVD form: URsV, where UR is the left orthogonal basis, 's' represents the diagonal matrix, and V is the right orthogonal basis. 
+        U_sparse: torch_sparse.tensor. Sparse matrix, with dimensions (d x R)
+        R: torch.Tensor. Dimensions (R, R') where R' is roughly equal to R (it may be equal to R+1)
+        s: torch.Tensor. This is the diagonal of a R' x R' matrix (so it is represented by a R' shaped tensor) 
+        V: torch.Tensor. Dimensions R' x T. Dimensions R' x T, where T is the number of frames, where all rows are orthonormal. 
+            Note:  V must contain the 1 x T vector of all 1's in its rowspan. 
         W: (d1*d2, d1*d2)-shaped ring model object
-        X: (k, R)-shaped torch.Tensor
         a: (d1*d2, k)-shaped torch_sparse.tensor
         c: (T, k)-shaped torch.Tensor
         b: (d1*d2, 1)-shaped torch.Tensor
-        s: (1, R)-shaped torch.Tensor. Has the property that sV is the 1 x T vector of all 1's
-        U_sparse_inner: (R, R)-shaped torch.Tensor
-        
         
     Returns: 
         c: (T, k)-shaped np.ndarray. Updated temporal components
-        
-        KEY ASSUMPTION: V has, as its last row, a vector where each component has value -1
     '''
     device = V.device
-    
-    if U_sparse_inner is None:
-        U_sparse_inner = torch.inverse(torch_sparse.matmul(U_sparse.t(), U_sparse).to_dense())
-
-    
-    #Init s such that bsV = static background
     
     
     ##Precompute quantities used throughout all iterations
     atU_net = torch.zeros((a_sparse.sparse_sizes()[1], V.shape[0]), device=device)
-    
     a_dense = a_sparse.to_dense()
-    #Step 1: Add atU
-    # atU_net += torch_sparse.matmul(a_sparse.t(), U_sparse).to_dense()
-    atU_net += torch_sparse.matmul(U_sparse.t(), a_dense).t()
     
-    #Step 2: Subtract atWU
-    atW = left_project_U_HALS(a_sparse, a_dense, U_sparse, U_sparse_inner, W) 
-    atWU = torch_sparse.matmul(U_sparse.t(), atW.t()).t()
-    atU_net -= atWU
+    #Find the tensor, e, (a 1 x R' shaped tensor) such that eV gives a 1 x T tensor consisting of all 1's
+    e = torch.matmul(torch.ones([1, V.shape[1]], device=device), V.t())
     
-    #Step 3: Add atWaX
-    aX = torch_sparse.matmul(a_sparse, X)
-    atWaX = torch.matmul(atW, aX)
-    atU_net += atWaX
+    #Find the tensor, X (a N x K shaped tensor) such that XV closely approximates c.T
+    X = torch.matmul(V, c).t() #This is just a linear subspace projection of c.T onto the rowspace of V; can reuse above computation for this
     
-    #Step 4: Add atWbs
-    atWb = torch.matmul(atW, b)
-    atU_net += torch.matmul(atWb, s)
+    #Step 1: Get aTURs
+    aTU = torch_sparse.matmul(U_sparse.t(), a_dense).t()
+    aTUR = torch.matmul(aTU, R)
+    aTURs = aTUR * s[None, :]
     
-    #Step 5: Subtract atbs
-    # atb = torch_sparse.matmul(a_sparse.t(), b)
-    atb = torch.matmul(a_dense.t(), b)
-    atbs = torch.matmul(atb, s)
-    atU_net -= atbs
+    #Step 2: Get aTbe
+    aTb = torch.matmul(a_dense.t(), b)
+    aTbe = torch.matmul(aTb, e)
     
-    atU_net_V = torch.matmul(atU_net, V)
+    #Step 3:
+    projector = get_projection_matrix_temporal_HALS_routine(U_sparse, R, W, a_dense, a_sparse)
+    PU = torch_sparse.matmul(U_sparse.t(), projector.t()).t()
+    PUR = torch.matmul(PU, R)
+    PURs = PUR * s[None, :]
     
+    PA = torch.matmul(projector, a_dense)
+    PAX = torch.matmul(PA, X)
     
-    # ata = torch_sparse.matmul(a_sparse.t(), a_sparse).to_dense()
+    Pb = torch.matmul(projector, b)
+    Pbe = torch.matmul(Pb, e)
+    
+    cumulator = aTURs - aTbe - (PURs - PAX - Pbe)
+    cumulator = torch.matmul(cumulator, V)
+    
     ata = torch.matmul(a_dense.t(), a_dense) #This is faster than a sparse-sparse matrix product (not well-parallelized as of May 2023 on GPU)
     
     ata_d = torch.diag(ata)
@@ -255,11 +231,13 @@ def temporal_update_HALS(U_sparse, V, W, X, a_sparse, c, b, s, U_sparse_inner=No
     
     threshold_function = torch.nn.ReLU()
     for i in range(c.shape[1]):
-        a_ia = ata[[i], :]
+        curr_index = torch.arange(i, i+1, device=device)
+        a_ia = torch.index_select(ata, 0, curr_index)
         a_iaC = torch.matmul(a_ia, c.t())
         
-        c[:, [i]] += ((atU_net_V[[i], :] - a_iaC)/ata_d[i]).t()
-        
-        c[:, [i]] = threshold_function(c[:, [i]])
+        curr_trace = torch.index_select(c, 1, curr_index)
+        curr_trace += ((torch.index_select(cumulator, 0, curr_index) - a_iaC)/ata_d[i]).t()
+        curr_trace = threshold_function(curr_trace)
+        c[:, [i]] = curr_trace
         
     return c
