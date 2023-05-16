@@ -32,6 +32,8 @@ from localnmf.constrained_ring.cnmf_e import ring_model, ring_model_update, ring
 from localnmf import regression_update
 import time
 
+import pdb
+
 ### TODO: Create an actual API around this
 # from localnmf.video_objects import FunctionalVideo
 
@@ -60,19 +62,21 @@ def make_mask_dynamic(corr_img_all_r, corr_percent, mask_a, data_order = "C"):
     return mask_a.reshape((-1, mask_a.shape[2]), order = data_order)
 
 
-def vcorrcoef_resid(U_sparse, R, V, a_sparse, c_orig, batch_size = 10000, device='cpu', tol = 0.000001):
+def vcorrcoef_resid(U_sparse, R, V, a_sparse, c_orig, batch_size = 10000, tol = 0.000001):
     '''
     Residual correlation image calculation. Expectation is that there are at least two neurons (otherwise residual corr image is not meaningful)
     Params:
-        U_sparse: scipy.sparse.coo_matrix. Dimensions (d x d)
-        R: numpy.ndarray. Dimensions (r x r)
-        V: numpy.ndarray. Dimensions (r x T). V is orthogonal; i.e. V.dot(V.T) is identity
+        U_sparse: torch_sparse.Tensor. Dimensions (d x K)
+        R: torch.Tensor. Dimensions (K x K)
+        V: numpy.ndarray. Dimensions (K x T). V has orthonormal rows; i.e. V.dot(V.T) is identity
             The row of 1's must belong in the row space of V
-        a: numpy.ndarray. Dimensions (d x k)
+        a_sparse: torch_sparse.Tensor. Dimensions (d, N) (N = number of neurons)
         c_orig: numpy.ndaray. Dimensions (T x k)
         batch_size: number of pixels to process at once. Limits matrix sizes to O((batch_size+T)*r)
     '''
     assert c_orig.shape[1] > 1, "Need at least 2 components to meaningfully calculate residual corr image"
+    
+    device=R.device
     T = V.shape[1]
     d = U_sparse.sparse_sizes()[0]
     
@@ -84,6 +88,8 @@ def vcorrcoef_resid(U_sparse, R, V, a_sparse, c_orig, batch_size = 10000, device
     c_norm = torch.sqrt(torch.sum(c*c, dim=0, keepdim=True))
     c /= c_norm
     
+    a_dense = a_sparse.to_dense()
+    
     #Define number of iterations so we only process batch_size pixels at a time
     batch_iters = math.ceil(d / batch_size)
 
@@ -94,46 +100,22 @@ def vcorrcoef_resid(U_sparse, R, V, a_sparse, c_orig, batch_size = 10000, device
     
 
     diag_URRtUt = torch.zeros([U_sparse.sparse_sizes()[0], 1], device=device)
-
-    batch_iters = math.ceil(d / batch_size)
-    for k in range(batch_iters):
-        start = batch_size * k
-        end = min(batch_size * (k+1), U_sparse.sparse_sizes()[0])
-        ind_torch = torch.arange(start, end, step=1, device=device)
-        U_crop = torch_sparse.index_select(U_sparse, 0, ind_torch)
-        UR_crop = torch_sparse.matmul(U_crop, R)
-        UR_crop = UR_crop * UR_crop
-        UR_crop = torch.sum(UR_crop, dim=1)
-        diag_URRtUt[start:end, 0] =UR_crop  
-
-        
-
-    #Precompute diag((AX)(AX)^t)
     diag_AXXtAt = torch.zeros((d, 1), device=device)
-    for k in range(batch_iters):
-        start = batch_size * k
-        end = min(batch_size * (k+1), U_sparse.sparse_sizes()[0])
-        ind_torch = torch.arange(start, end, step=1, device=device)
-        A_crop = torch_sparse.index_select(a_sparse, 0, ind_torch)
-        AX_crop = torch_sparse.matmul(A_crop, X)
-        AX_crop = AX_crop * AX_crop
-        AX_crop = torch.sum(AX_crop, dim=1)
-        diag_AXXtAt[start:end, 0] = AX_crop
-        
-    #Precompute diag((AX)(UR)^t) and diag(UR(AX)^t) (they are the same thing)
     diag_AXUR = torch.zeros((d,1), device=device)
+    
+    batch_iters = math.ceil(R.shape[1] / batch_size)
     for k in range(batch_iters):
         start = batch_size * k
-        end = min(batch_size * (k+1), U_sparse.sparse_sizes()[0])
-        ind_torch = torch.arange(start, end, step=1, device=device)
-        U_crop = torch_sparse.index_select(U_sparse, 0, ind_torch)
-        UR_crop = torch_sparse.matmul(U_crop, R)
-        A_crop = torch_sparse.index_select(a_sparse, 0, ind_torch)
-        AX_crop = torch_sparse.matmul(A_crop, X)
-        URAX_elt_prod = UR_crop * AX_crop
-        URAX_elt_prod = torch.sum(URAX_elt_prod, dim=1)
-        diag_AXUR[start:end, 0] = URAX_elt_prod
+        end = min(batch_size * (k+1), R.shape[1])
+        indices = torch.arange(start, end, device=device)
+        R_crop = torch.index_select(R, 1, indices)
+        X_crop = torch.index_select(X, 1, indices)
+        UR_crop = torch_sparse.matmul(U_sparse, R_crop)
+        AX_crop = torch.matmul(a_dense, X_crop)
         
+        diag_URRtUt += torch.sum(UR_crop * UR_crop, dim=1, keepdim=True)
+        diag_AXXtAt += torch.sum(AX_crop * AX_crop, dim=1, keepdim=True)
+        diag_AXUR += torch.sum(AX_crop * UR_crop, dim=1, keepdim=True)
         
     neuron_ind_torch = torch.arange(0, a_sparse.sparse_sizes()[1], step=1, device=device)
     threshold_func = torch.nn.ReLU()
@@ -1971,7 +1953,7 @@ class PMDVideo():
         
     #TODO: Profile this to see if you can precompute some quantities ahead of time
     def compute_residual_correlation_image(self):
-        self.residual_correlation_image = vcorrcoef_resid(self.U_sparse, self.R*self.s[None, :], self.V, self.a, self.c, batch_size = self.batch_size, device=self.device)
+        self.residual_correlation_image = vcorrcoef_resid(self.U_sparse, self.R*self.s[None, :], self.V, self.a, self.c, batch_size = self.batch_size)
         
     def merge_signals(self, merge_corr_thr, merge_overlap_thr, plot_en, data_order):
         rlt = merge_components(self.a,self.c,self.standard_correlation_image,self.num_list,\
