@@ -32,8 +32,6 @@ from localnmf.constrained_ring.cnmf_e import ring_model, ring_model_update, ring
 from localnmf import regression_update
 import time
 
-import pdb
-
 ### TODO: Create an actual API around this
 # from localnmf.video_objects import FunctionalVideo
 
