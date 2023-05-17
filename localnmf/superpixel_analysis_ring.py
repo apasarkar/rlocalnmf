@@ -24,34 +24,7 @@ def show_img(ax, img,vmin=None,vmax=None):
     else:
         format_tile ='%5d'
     plt.colorbar(im, cax=cax,orientation='vertical',spacing='uniform')
-
-def spatial_comp_plot(a, corr_img_all_r, num_list=None, ini=False, order="C"):
-    print("DISPLAYING SOME OF THE COMPONENTS")
-    num = min(3, a.shape[1]);
-    patch_size = corr_img_all_r.shape[:2];
-    scale = np.maximum(1, (corr_img_all_r.shape[1]/corr_img_all_r.shape[0]));
-    fig = plt.figure(figsize=(8*scale,4*num));
-    if num_list is None:
-        num_list = np.arange(num);
-    for ii in range(num):
-        plt.subplot(num,2,2*ii+1);
-        plt.imshow(a[:,ii].reshape(patch_size,order=order),cmap='nipy_spectral_r');
-        plt.ylabel(str(num_list[ii]+1),fontsize=15,fontweight="bold");
-        if ii==0:
-            if ini:
-                plt.title("Spatial components ini",fontweight="bold",fontsize=15);
-            else:
-                plt.title("Spatial components",fontweight="bold",fontsize=15);
-        ax1 = plt.subplot(num,2,2*(ii+1));
-        show_img(ax1, corr_img_all_r[:,:,ii]);
-        if ii==0:
-            ax1.set(title="corr image")
-            ax1.title.set_fontsize(15)
-            ax1.title.set_fontweight("bold")
-    plt.tight_layout()
-    plt.show()
-    return fig
-
+    
 
 def spatial_sum_plot(a, a_fin, patch_size, order="C", num_list_fin=None, text=False):
     scale = np.maximum(1, (patch_size[1]/patch_size[0]));
