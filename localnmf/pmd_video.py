@@ -2003,6 +2003,23 @@ class PMDVideo():
         
         return my_row_RV
         
+    def get_PMD_frame(self, frame):
+        '''
+        Returns the index of a frame of the movie (this is pythonic indexing, so to generate the first frame, you should use frame = 0)
+        '''
+        assert 0 <= frame and frame < self.V.shape[1], "Requested frame is out of bounds"
+        
+        curr_index = torch.arange(frame, frame+1, device=self.device)
+        curr_sV = self.s[:, None] *torch.index_select(self.V, 1, curr_index)
+        RsV = torch.matmul(self.R, curr_sV)
+        URsV = torch.squeeze(torch_sparse.matmul(self.U_sparse, RsV))
+        
+        if self.data_order == "C":
+            return reshape_c(URsV, self.shape[:2])
+        elif self.data_order == "F":
+            return reshape_fortran(URsV, self.shape[:2])
+        else:
+            raise ValueError("Invalid order")
     
     def get_background_row(self, row_index):
         return self.W.compute_fluctuating_background_row(self.U_sparse, self.R, self.s, self.V, self.a, self.b, row_index)
