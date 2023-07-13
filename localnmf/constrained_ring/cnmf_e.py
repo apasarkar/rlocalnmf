@@ -150,7 +150,7 @@ class ring_model:
         else:
             return product.t()
         
-    def compute_fluctuating_background_row(self, U_sparse, R, s, V, a_sparse, b, row_index):
+    def compute_fluctuating_background_row(self, U_sparse, R, s, V, active_weights, b, row_index):
         '''
         Computes a specific row of W(URsV - ac - b), which is the fluctuating background. 
         Recall  we enforce that column i of W contains all zeros whenever row 'i' of a contains nonzero entries. So W*a will always be zero, and the above expression becomes: 
@@ -160,20 +160,20 @@ class ring_model:
             R: torch.Tensor. Dimensions (K x K)
             s: torch.Tensor of shape (K)
             V: torch.Tensor. Dimensions (K x T) 
-            a_sparse: torch_sparse.Tensor of shape (d, N), where N is the number of neural shapes
-            b: torch.Tensor. Dimensions (d1*d2,1)
+            active_weights: np.ndarray of shape (d, 1). Describes, for each pixel, whether its ring weight should be active or not.
+            b: np.ndarray. Dimensions (d,1). Describes, for each pixel, its static background estimate. 
+            
+        TODO: When the entire demixing procedure manages all objects directly on the device, we can avoid the awkward convention where some inputs are on "device" and others are definitely on cpu. 
         '''
         device = R.device
-        b_torch = torch.Tensor(b).float().to(device)
-        
-        a_sum_vec = torch.ones((a_sparse.sparse_sizes()[1], 1), device=device)
-        a_sum = (torch_sparse.matmul(a_sparse, a_sum_vec) == 0).float()
+        b = torch.Tensor(b).float().to(device)
+        active_weights = torch.Tensor(active_weights).float().to(device)
 
         
         row_index_tensor = torch.arange(row_index, row_index+1, device=device)
         W_selected = torch_sparse.index_select(self.W_mat, 0, row_index_tensor).to_dense().float()
         
-        W_selected = W_selected * a_sum.t() 
+        W_selected = W_selected * active_weights.t() 
         
         #Apply unweighted ring model to W(URV - b)
         WU = torch_sparse.matmul(U_sparse.t(), W_selected.t()).t()
@@ -182,7 +182,7 @@ class ring_model:
         WURsV = torch.matmul(WURs, V)
         Wb = torch.matmul(W_selected, b)
         
-        difference = WURV - Wb
+        difference = WURsV - Wb
         
         #Apply weight at end
         weighted_row = self.weights[row_index_tensor] * difference

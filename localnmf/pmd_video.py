@@ -1757,6 +1757,7 @@ class PMDVideo():
         self.d2 = dimensions[1]
         self.T = dimensions[2]
         self.data_order = data_order
+        self.active_weights = None
        
         self.demixing_state = False
         self.precomputed = False 
@@ -1775,9 +1776,6 @@ class PMDVideo():
         self.c_init = None
         self.b_init = None
         self.num_passes_run = 0
-        
-        
-        # self.initialized = False
         
         self.superpixel_rlt_recent = None
         self.superpixel_rlt = []
@@ -2022,7 +2020,10 @@ class PMDVideo():
             raise ValueError("Invalid order")
     
     def get_background_row(self, row_index):
-        return self.W.compute_fluctuating_background_row(self.U_sparse, self.R, self.s, self.V, self.a, self.b, row_index)
+        #Add assert statement to make sure there even is "a"
+        assert self.a is not None, "There are no signals, so the background estimate will not be valid"
+        assert self.demixing_state is False, "This function is currently meant to be run after demixing, not during it" 
+        return self.W.compute_fluctuating_background_row(self.U_sparse, self.R, self.s, self.V, self.active_weights, self.b, row_index)
     
     
     def reset(self):
@@ -2037,6 +2038,7 @@ class PMDVideo():
         self.c_init = None
         self.mask_a_init = None
         self.b_init = None
+        self.active_weights = None
         
         self.superpixel_rlt_recent = None
         self.superpixel_rlt = []
@@ -2046,9 +2048,12 @@ class PMDVideo():
 
     def brightness_order_and_return_state(self):
         '''
-        This is a compatibility function. Long term the api for this should change
+        This is a compatibility function. Long term the api for this should change. 
+        Assumption here is that before running this function, the data is on the "device" in "demixing" state. After, it will not be.
         '''
-        
+        a_sum_vec = torch.ones((self.a.sparse_sizes()[1], 1), device=self.device)
+        self.active_weights = (torch_sparse.matmul(self.a, a_sum_vec) == 0).float().cpu().numpy()
+
         self.a = self.a.cpu().to_dense().numpy()
         self.c = self.c.cpu().numpy()
         self.b = self.b.cpu().numpy()
