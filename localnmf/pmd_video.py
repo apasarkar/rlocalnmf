@@ -1,6 +1,5 @@
 import torch
 import torch_sparse
-import torchnmf
 import numpy as np
 import math
 import networkx as nx
