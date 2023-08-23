@@ -441,9 +441,11 @@ def process_custom_signals(a_init, U_sparse, R, s, V, order="C"):
         R: rank of the PMD decomposition
     
     Params:
-        a_init: np.ndarray, dimensions (d1, d2, K)
-        U_sparse_torch: torch_sparse.Tensor, shape (d1*d2, R)
-        V_torch: torch.Tensor, shape (R, T)
+        a_init: np.ndarray, dimensions (d1, d2, N)
+        U_sparse: torch_sparse.Tensor, shape (d1*d2, K )
+        R: torch.Tensor. Shape roughly (K, K/4)
+        s: torch.Tensor. Shape min(K/4)
+        V: torch.Tensor, shape (K/4, T)
         device: string; either 'cpu' or 'cuda'
         order: order in which 3d data is reshaped to 2d
     
@@ -451,7 +453,7 @@ def process_custom_signals(a_init, U_sparse, R, s, V, order="C"):
     TODO: Eliminate awkward naming issues in 'process custom signals'
     '''
     device = V.device
-    dims = (a_init.shape[0], a_init.shape[1], V_torch.shape[1])
+    dims = (a_init.shape[0], a_init.shape[1], V.shape[1])
     
     a = a_init.reshape(dims[0]*dims[1],-1, order=order)
     a_mask = (a_init>0).reshape(dims[0]*dims[1],-1,order=order)
@@ -465,21 +467,21 @@ def process_custom_signals(a_init, U_sparse, R, s, V, order="C"):
     b = torch.zeros([dims[0]*dims[1], 1], device=device, dtype=torch.float)
     W = ring_model(dims[0], dims[1], 1, device=device, order=order, empty=True)
     
-    uv_mean = get_mean_data(U_sparse_torch, R, s, V)
+    uv_mean = get_mean_data(U_sparse, R, s, V)
 
     #Baseline update followed by 'c' update:
-    b_torch = regression_update.baseline_update(uv_mean, a_torch, c_torch)
-    c_torch = regression_update.temporal_update_HALS(U_sparse, V, W, a, c, b)
+    b = regression_update.baseline_update(uv_mean, a, c)
+    c = regression_update.temporal_update_HALS(U_sparse, R, s, V, W, a, c, b)
     
-    c_norm = torch.linalg.norm(c_torch, dim = 0)
+    c_norm = torch.linalg.norm(c, dim = 0)
     nonzero_dim1 = torch.nonzero(c_norm).squeeze()
     
     #Only keep the good indices, based on nonzero_dim1
-    c_torch = torch.index_select(c_torch, 1, nonzero_dim1)
-    a_torch = torch_sparse.index_select(a_torch, 1, nonzero_dim1)
+    c_torch = torch.index_select(c, 1, nonzero_dim1)
+    a_torch = torch_sparse.index_select(a, 1, nonzero_dim1)
     a_mask = a_torch.bool()
     
-    return a_torch, a_mask, c_torch, b_torch,
+    return a_torch, a_mask, c_torch, b
 
 
 
