@@ -1740,22 +1740,29 @@ def spatial_comp_plot(a, corr_img_all_r, num_list=None, ini=False, order="C"):
 class PMDVideo():
     
     
-    def __init__(self, U_sparse, R, s, V, dimensions, data_order="F", device='cpu'):
+    def __init__(self, U_sparse, R, s, V, dimensions, mean, var, data_order="F", device='cpu'):
         '''
         Things to manage: 
             - 'a', 'c' and the like should be optional. If they are not None, it's implied custom init, and we should do the standard custom init pipeline
         
         '''
         self.device = device
+        self.data_order = data_order
+        self.shape = dimensions
         self.R = torch.Tensor(R).float().to(self.device)
         self.s = torch.from_numpy(s).float().to(self.device)
         self.U_sparse = torch_sparse.tensor.from_scipy(U_sparse).float().to(self.device)
         self.V = torch.Tensor(V).float().to(self.device)
-        self.shape = dimensions
+        self.mean_img = torch.Tensor(mean).float().to(self.device)
+        self.noise_var_img = torch.Tensor(var).float().to(self.device)
+        self.mean_img_flat = torch.Tensor(mean.reshape((self.shape[0]*self.shape[1],), order=self.data_order)).float().to(self.device)
+        self.noise_var_img_flat = torch.Tensor(var.reshape((self.shape[0]*self.shape[1],), order=self.data_order)).float().to(self.device)
+        
+        
         self.d1 = dimensions[0]
         self.d2 = dimensions[1]
         self.T = dimensions[2]
-        self.data_order = data_order
+       
         self.active_weights = None
        
         self.demixing_state = False
@@ -1986,9 +1993,13 @@ class PMDVideo():
         a_scipy = a_scipy.multiply(mask_ab_scipy)
         self.a = torch_sparse.tensor.from_scipy(a_scipy).float().to(self.device)        
         
-    def get_PMD_row(self, row_index):
+    def get_PMD_row(self, row_index, rescale=False):
         '''
         Utility function for accessing a single row of the PMD denoised data
+        Inputs: 
+            row_index. int. The pixel of the movie to load. Note that we flatten the 2D FOV into a 1D vector and this indexing refers to indexing into this 1D vector.
+            rescale: boolean. PMD normalizes the data; for display purposes we may want to undo this normalization. Setting rescale = True accomplishes that. 
+
         '''
         assert 0 <= row_index and row_index < self.U_sparse.sparse_sizes()[0], "Row Index is out of range"
         
@@ -1998,11 +2009,17 @@ class PMDVideo():
         my_row_R = my_row_R * self.s[None,:]
         my_row_RV = torch.matmul(my_row_R, self.V)
         
+        if rescale:
+            my_row_RV = my_row_RV*self.noise_var_img_flat[row_index] + self.mean_img_flat[row_index]
+        
         return my_row_RV
         
-    def get_PMD_frame(self, frame):
+    def get_PMD_frame(self, frame, rescale=False):
         '''
         Returns the index of a frame of the movie (this is pythonic indexing, so to generate the first frame, you should use frame = 0)
+        Inputs: 
+            frame: int. The frame of the movie to load
+            rescale: boolean. PMD normalizes the data; for display purposes we may want to undo this normalization. Setting rescale = True accomplishes that. 
         '''
         assert 0 <= frame and frame < self.V.shape[1], "Requested frame is out of bounds"
         
@@ -2012,11 +2029,17 @@ class PMDVideo():
         URsV = torch.squeeze(torch_sparse.matmul(self.U_sparse, RsV))
         
         if self.data_order == "C":
-            return reshape_c(URsV, self.shape[:2])
+            output = reshape_c(URsV, self.shape[:2])
+            return mov
         elif self.data_order == "F":
-            return reshape_fortran(URsV, self.shape[:2])
+            output = reshape_fortran(URsV, self.shape[:2])
         else:
             raise ValueError("Invalid order")
+            
+        if rescale:
+            output = output * self.noise_var_img + self.mean_img
+        
+        return output
     
     def get_background_row(self, row_index):
         #Add assert statement to make sure there even is "a"
