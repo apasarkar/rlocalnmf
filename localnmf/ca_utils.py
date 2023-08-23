@@ -16,6 +16,60 @@ import math
 
 import scipy.sparse
 
+import matplotlib.pyplot as plt
+from mpl_toolkits.axes_grid1 import make_axes_locatable
+
+
+
+def show_img(ax, img,vmin=None,vmax=None):
+    # Visualize local correlation, adapt from kelly's code
+    im = ax.imshow(img,cmap='jet')
+    divider = make_axes_locatable(ax)
+    cax = divider.append_axes("right", size="5%", pad=0.1)
+    if np.abs(img.min())< 1:
+        format_tile ='%.2f'
+    else:
+        format_tile ='%5d'
+    plt.colorbar(im, cax=cax,orientation='vertical',spacing='uniform')
+    
+
+def spatial_sum_plot(a, a_fin, patch_size, order="C", num_list_fin=None, text=False):
+    scale = np.maximum(1, (patch_size[1]/patch_size[0]));
+    fig = plt.figure(figsize=(16*scale,8));
+    ax = plt.subplot(1,2,1);
+    ax.imshow(a_fin.sum(axis=1).reshape(patch_size,order=order),cmap="jet");
+
+    if num_list_fin is None:
+        num_list_fin = np.arange(a_fin.shape[1]);
+    if text:
+        for ii in range(a_fin.shape[1]):
+            temp = a_fin[:,ii].reshape(patch_size,order=order);
+            pos0 = np.where(temp == temp.max())[0][0];
+            pos1 = np.where(temp == temp.max())[1][0];
+            ax.text(pos1, pos0, f"{num_list_fin[ii]+1}", verticalalignment='bottom', horizontalalignment='right',color='white', fontsize=15, fontweight="bold")
+
+    ax.set(title="more passes spatial components")
+    ax.title.set_fontsize(15)
+    ax.title.set_fontweight("bold")
+
+    ax1 = plt.subplot(1,2,2);
+    ax1.imshow(a.sum(axis=1).reshape(patch_size,order=order),cmap="jet");
+
+    if text:
+        for ii in range(a.shape[1]):
+            temp = a[:,ii].reshape(patch_size,order=order);
+            pos0 = np.where(temp == temp.max())[0][0];
+            pos1 = np.where(temp == temp.max())[1][0];
+            ax1.text(pos1, pos0, f"{ii+1}", verticalalignment='bottom', horizontalalignment='right',color='white', fontsize=15, fontweight="bold")
+
+    ax1.set(title="1 pass spatial components")
+    ax1.title.set_fontsize(15)
+    ax1.title.set_fontweight("bold")
+    plt.tight_layout();
+    plt.show()
+    return fig
+
+
 
 def cosine_similarity(img1, img2):
     '''
@@ -185,6 +239,54 @@ def construct_sparse(U):
     cols = nonzeros[1]
     U_sparse = scipy.sparse.coo_matrix((val, (rows, cols)), shape=(U.shape[0],U.shape[1]))
     return U_sparse
+
+
+## Functionality for expanding the rowspan of the V matrix
+
+def check_1s_span(V):
+    ones = torch.ones((V.shape[1], 1), device=V.device)
+    
+    output = torch.matmul(V,ones)
+    
+    if torch.allclose(torch.matmul(V.T,output), ones):
+        return True
+    
+    else:
+        return False
+
+def get_distance_from_V(V):
+    '''
+    V is a R x T matrix with orthonormal rows. We want to project the 1's vector (dimensions 1 x T) onto the rows of V, which is equivalent to
+    projecting the 1's vector (dimensions 1 x T - transposed) onto the columns of V^T
+    '''
+    
+    ones_vec = torch.ones((V.shape[1], 1), device=V.device)
+    
+    projection = torch.matmul(V.T, torch.matmul(V, ones_vec)) #V.T.dot(V.dot(ones_vec))
+    
+    perpendicular_comp = ones_vec - projection
+    
+    return perpendicular_comp.T
+
+def normalize(v):
+    norm = torch.linalg.norm(v, dim = 1)
+    if norm == 0: 
+        return v
+    return v / norm
+
+def add_1s_to_rowspan(V):
+    
+    if check_1s_span(V):
+        return (False, V)
+    
+    else: 
+        perp_comp = get_distance_from_V(V)
+        perp_comp = normalize(perp_comp)
+        
+    return_val = torch.vstack([V, perp_comp])
+    
+    return (True, return_val)
+
 
 
 

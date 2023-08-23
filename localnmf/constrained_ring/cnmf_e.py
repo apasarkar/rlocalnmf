@@ -26,11 +26,13 @@ class ring_model:
             value = torch.Tensor([]).to(device).bool()
             self.W_mat = torch_sparse.tensor.SparseTensor(row = row, col = col, value=value, sparse_sizes=(d1*d2, d1*d2))
             self.weights = torch.zeros((d1*d2, 1), device=device)
+            self.empty=True
         else:
             row_coordinates, column_coordinates, values = self._construct_init_values(d1, d2, r, device=device, order=order)
             torch.cuda.empty_cache()
             self.W_mat = torch_sparse.tensor.SparseTensor(row=row_coordinates, col=column_coordinates, value=values, sparse_sizes = (d1*d2, d1*d2))
             self.weights = torch.ones((d1*d2, 1), device=device)
+            self.empty=False
 
     
 
@@ -148,6 +150,45 @@ class ring_model:
         else:
             return product.t()
         
+    def compute_fluctuating_background_row(self, U_sparse, R, s, V, active_weights, b, row_index):
+        '''
+        Computes a specific row of W(URsV - ac - b), which is the fluctuating background. 
+        Recall  we enforce that column i of W contains all zeros whenever row 'i' of a contains nonzero entries. So W*a will always be zero, and the above expression becomes: 
+        W(URV - b)
+        Parameters: 
+            U_sparse. torch_sparse Tensor. Dimensions (d, K)
+            R: torch.Tensor. Dimensions (K x K)
+            s: torch.Tensor of shape (K)
+            V: torch.Tensor. Dimensions (K x T) 
+            active_weights: np.ndarray of shape (d, 1). Describes, for each pixel, whether its ring weight should be active or not.
+            b: np.ndarray. Dimensions (d,1). Describes, for each pixel, its static background estimate. 
+            
+        TODO: When the entire demixing procedure manages all objects directly on the device, we can avoid the awkward convention where some inputs are on "device" and others are definitely on cpu. 
+        '''
+        device = R.device
+        b = torch.Tensor(b).float().to(device)
+        active_weights = torch.Tensor(active_weights).float().to(device)
+
+        
+        row_index_tensor = torch.arange(row_index, row_index+1, device=device)
+        W_selected = torch_sparse.index_select(self.W_mat, 0, row_index_tensor).to_dense().float()
+        
+        W_selected = W_selected * active_weights.t() 
+        
+        #Apply unweighted ring model to W(URV - b)
+        WU = torch_sparse.matmul(U_sparse.t(), W_selected.t()).t()
+        WUR = torch.matmul(WU, R)
+        WURs = WUR * s[None, :]
+        WURsV = torch.matmul(WURs, V)
+        Wb = torch.matmul(W_selected, b)
+        
+        difference = WURsV - Wb
+        
+        #Apply weight at end
+        weighted_row = self.weights[row_index_tensor] * difference
+        return weighted_row
+        
+        
     
     def zero_weights(self):
         self.weights = self.weights * 0
@@ -163,7 +204,7 @@ class ring_model:
         Output: 
             W_plain: The ring matrix with the weights (and zero'd out columns) applied
         '''
-        W_plain = self.W_mat.to_scipy().tocsr()
+        W_plain = self.W_mat.to_scipy(layout='csr')
         W_plain = W_plain.multiply(self.weights.cpu().numpy())
         
         a_sum = (np.sum(a, axis = 1, keepdims=True) == 0).T
@@ -207,13 +248,15 @@ def ring_model_update_sampling(U_sparse, V, W, c, b, a, d1, d2, num_samples=1000
     W.set_weights(values[:, None])
    
 
-def ring_model_update(U_sparse, R, V, W, X, b, a, d1, d2, num_samples=1000, device='cuda'):
+def ring_model_update(U_sparse, R, V, W, c, b, a, d1, d2, num_samples=1000, device='cuda'):
     
+    device = V.device
     batches = math.ceil(R.shape[1] / num_samples)
     denominator = 0
     numerator = 0
     W.reset_weights()
     
+    X = torch.matmul(c.t(), V.t())
     sV = torch.ones([1, V.shape[1]], device=device)
     s = torch.matmul(sV, V.t())
     
@@ -221,9 +264,10 @@ def ring_model_update(U_sparse, R, V, W, X, b, a, d1, d2, num_samples=1000, devi
 
         start = num_samples * k
         end = min(R.shape[1], start + num_samples)
-        R_crop = R[:, start:end]
-        X_crop = X[:, start:end]
-        s_crop = s[:, start:end]
+        indices = torch.arange(start, end, device=device)
+        R_crop = torch.index_select(R, 1, indices)
+        X_crop = torch.index_select(X, 1, indices)
+        s_crop = torch.index_select(s, 1, indices)
 
 
         resid_V_basis = torch_sparse.matmul(U_sparse, R_crop) - torch_sparse.matmul(a, X_crop) - torch.matmul(b, s_crop)
@@ -237,6 +281,4 @@ def ring_model_update(U_sparse, R, V, W, X, b, a, d1, d2, num_samples=1000, devi
     values = torch.nan_to_num(numerator/denominator, nan=0.0, posinf=0.0, neginf=0.0)
     threshold_function = torch.nn.ReLU()
     values = threshold_function(values)
-    
     W.set_weights(values[:, None])
-   

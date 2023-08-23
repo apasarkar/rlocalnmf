@@ -8,6 +8,7 @@ import matplotlib.pyplot as plt
 import numpy as np
 import random
 from math import ceil
+import scipy
 from scipy.sparse import lil_matrix
 import subprocess
 import shutil
@@ -60,7 +61,7 @@ def runpar(f, X, nprocesses=None, **kwargs):
     print("the CPU affinity BEFORE runpar is {}".format(val))
 
     if nprocesses is None:
-        nprocesses = int(multiprocessing.cpu_count()) 
+        nprocesses = int(multiprocessing.cpu_count())
         print("the number of processes is {}".format(nprocesses))
 #         val = len(os.sched_getaffinity(os.getpid()))
 #         print('the number of usable cpu cores is {}'.format(val))
@@ -1346,304 +1347,59 @@ def generate_color_movie(a_use, c_use, dims, random_values, seed=999):
     return final_movie.squeeze()
 
 
-def standard_demix_vid(a, c, b, denoised_mov, fluctuating_bg_terms, filename, raw_mov = None, deviation_img = None, order = "C", fr=30, \
-              titles=None, movie_scales=None, scale=1, titlesize=20, ticksize=14, colorticksize=12, a_real = None, c_real = None, \
-                      rgbrange = [80, 255], channels = 3, mean_sub_res = False, min_sub_signals = True, width_const = 3.5,\
-                      random_values = None, start = 0, end = 1000, dim1_range=None, dim2_range=None, PMD_match=True):
-    '''
-    Generates a 'standard' triptych demixing video based on ring localNMF. Provided for quick visualization of ring localNMF results
-    args:
-        a: np.ndarray. Dimensions (d1, d2, K) -- d1 and d2 are dimensions of FOV and K is the number of neurons
-        c: np.ndarray. Dimensions (K, T) -- K is number of neurons T is number of frames
-        raw_mov: np.ndarray. Raw movie. Dimensions (d1, d2, T). Movie has field of view consisting of d1 * d2 pixels and T frames
-        denoised_mov: 3D ndarray. Motion corrected and denoised movie. 
-        
-        fluctuating_bg_terms: tuple of two ndarrays. First element multiplied by second element gives fluctuating background for entire movie, a (d1*d2, T) array. To reshape to (d1, d2, T) array, use the field "order" (described below). 
-        filename: desired filename of mp4 demixing video
-        order: "C" or "F". The order in which the (d1*d2, T)-shape ndarrays in this function can be reshaped into (d1, d2, T)-shape full movies. (Use this in the numpy reshape function)
-        fr: int. Frame-rate of mp4 video
-        titles: list of strings. List describing the title of each video of the triptych. 
-        scale: int. Number of frames to skip. So scale = 1 generates a video showing each frame, scale = 2 shows every second frame, etc. 
-        titlesize: int. Size of title in figures
-        ticksize: int. Size of ticks of panels
-        colorticksize: int. Size of color ticks of panel colorbars
-        
-        a_real: np.ndarray. Dimensions (d1, d2, K). Ground truth neurons, if applicable. 
-        c_real: np.ndarray. Dimensions (K, T). Ground truth neuron temporal traces, if applicable. 
-        rgbrange: list of ints (length 2). List, [a, b], where [a, b] describes the interval of RGB values (in the range 0-255) from which we sample. 
-        channels: int. Indicates number of channels in color image (typically 3)
-        mean_sub_res: boolean. Indicates whether or not we should subtract the mean of each pixel of the residual movie in the finald display. 
-        min_sub_signals: boolean. Indicates whether we min-subtract the signals 'c' 
-        width_const: nonnegative number. Width constant used to scale the width of each displayed image in the mp4 file. 
-        random_values: dimensions (K, channels). The i-th descibes the RGB color assigned to neuron 'i' in the color video.
-        start: int. First frame to include in video
-        end: int. Last frame to include in video
-        '''
-    
-    if movie_scales is None: 
-        movie_scales = [1 for i in range(len(tiles))]
-    if dim1_range is None: 
-        dim1_range = [0, denoised_mov.shape[0]]
-    if dim2_range is None: 
-        dim2_range = [0, denoised_mov.shape[1]]
-    x, y = denoised_mov.shape[0], denoised_mov.shape[1], 
-    titles = []
-    img_types =[]
-    mov_list = []
-            
-    if PMD_match:
-        max_val_PMD = np.amax(denoised_mov[dim1_range[0]:dim1_range[1], dim2_range[0]:dim2_range[1],:])
-        if raw_mov is not None:
-            max_raw = np.amax(raw_mov[dim1_range[0]:dim1_range[1], dim2_range[0]:dim2_range[1],:])
-            raw_mov *= max_val_PMD/max_raw
-    
-    # Add raw movie: 
-    if raw_mov is not None:
-        titles.append("Motion Corrected Data")
-        img_types.append(1)
-        mov_list.append(raw_mov[dim1_range[0]:dim1_range[1], dim2_range[0]:dim2_range[1],:])
-    elif deviation_img is not None:
-        titles.append("Deviation Image of PMD Data")
-        img_types.append(1)
-        mov_list.append(deviation_img[dim1_range[0]:dim1_range[1], dim2_range[0]:dim2_range[1], :])
-    else:
-        raise ValueError("Must include either raw image or deviation image")
-    
-    #Add denoised movie:
-    titles.append("Denoised Data")
-    img_types.append(1)
-    denoised_max = np.amax(denoised_mov)
-    mov_list.append(denoised_mov[dim1_range[0]:dim1_range[1], dim2_range[0]:dim2_range[1], :])
-    
-    
-    
-    #Add colored A*C video
-    if random_values is None: 
-        random_values = np.array([random.randint(rgbrange[0],rgbrange[1]) for i in range(channels*a.shape[2])]).reshape((a.shape[2], channels))
-    
-    
-    #Testing out min subtraction...
-    if min_sub_signals:
-        c_minsub = c - np.amin(c, axis = 1, keepdims = True)
-        AC_color_image = generate_color_movie(a, c_minsub, [x,y,end-start], random_values)
-        titles.append("Estimates Colored")
-    else:
-        AC_color_image = generate_color_movie(a, c, [x,y,end-start], random_values)
-        titles.append("Estimates Colored")
-    img_types.append(2)
-    mov_list.append(AC_color_image[dim1_range[0]:dim1_range[1], dim2_range[0]:dim2_range[1], :, :])
-    
-    
-    #Add grayscale A*C video:
-    AC = np.tensordot(a, c, axes=(2,0))
-    
-    if PMD_match:
-        AC_displayed = AC * max_val_PMD/np.amax(AC[dim1_range[0]:dim1_range[1], dim2_range[0]:dim2_range[1],:])
-    else:
-        AC_displayed = AC
-    
-    #Perform min subtraction of the AC panel...
-    if min_sub_signals:
-        raise ValueError("no longer supported")
-        c_minsub = c - np.amin(c, axis = 1, keepdims = True)
-        AC_minsub = np.tensordot(a, c_minsub, axes=(2,0))
-        img_types.append(1)
-        mov_list.append(AC_minsub[dim1_range[0]:dim1_range[1], dim2_range[0]:dim2_range[1], :])
-#         min_AC = np.amin(AC, axis = 2, keepdims = True)
-#         AC = AC - min_AC
-        titles.append("Signal Estimates")
-    else:
-        titles.append("Signal Estimates")
-        img_types.append(1)
-        mov_list.append(AC_displayed[dim1_range[0]:dim1_range[1], dim2_range[0]:dim2_range[1], :])
-    
-    
-    
-    
-    #If there is ground truth, add it to the triptych
-    if a_real is not None and c_real is not None:
-        random_values = np.array([random.randint(rgbrange[0],rgbrange[1]) for i in range(channels*a_real.shape[1])]).reshape((a_real.shape[1], channels))
-        AC_real_color_image = generate_movie(a_real, c_real, [x,y,end-start], random_values)
-        titles.append("Ground Truth Colored")
-        img_types.append(2)
-        mov_list.append(AC_real_color_image[dim1_range[0]:dim1_range[1], dim2_range[0]:dim2_range[1], :, :])
-        
-       
-    #Add net background: 
-    
-    #Load relevant ringlocalNMF outputs
-    fluctuating_bg = fluctuating_bg_terms[0].dot(fluctuating_bg_terms[1]).reshape((x, y, -1), order="F")
-    net_bg = fluctuating_bg + b
-    titles.append("Centered Net Background")
-    img_types.append(1)
-    mov_to_show_bg = net_bg[dim1_range[0]:dim1_range[1], dim2_range[0]:dim2_range[1], :]
-    mov_to_show_bg = mov_to_show_bg - np.mean(mov_to_show_bg, axis = 2, keepdims=True)
-    mov_list.append(mov_to_show_bg)
-    
-    #Add residual:
-    res = denoised_mov - AC - net_bg
-    if mean_sub_res == False:
-        titles.append("Residual")
-    else:
-        res = res - np.mean(res, axis = 2, keepdims = True)
-        titles.append("Residual")
-    titles.append("Residual")
-    img_types.append(1)
-    mov_list.append(res[dim1_range[0]:dim1_range[1], dim2_range[0]:dim2_range[1], :])
-    
-    
-    #Generate Demixing Video
-    write_mpl_no_compress_comparisons(mov_list, filename, img_types,  movie_scales, titles = titles, fr=fr, \
-            scale=scale, titlesize=titlesize, ticksize=ticksize, colorticksize=colorticksize, width_const = width_const, offset=start) 
-       
 
+def reshape_movie_list(my_list, shape,  dim1_range, dim2_range,order, min_value = 0):
     
-def standard_demix_vid_old(rlt, mov_raw, mov_denoised, filename, fr=30, \
-              titles=None, threshold = [], scale=1, titlesize=20, ticksize=14, colorticksize=12, a_real = None, c_real = None, \
-                      rgbrange = [80, 255], channels = 3, mean_sub_res = False, min_sub_signals = False, width_const = 3.5,\
-                      random_values = None, maxproj = False):
-    '''
-    Generates a 'standard' triptych demixing video based on ring localNMF. Provided for quick visualization of ring localNMF results
-    args:
-        rlt: dictionary. Contains outputs of ringlocalNMF demixing algorithm
-        mov_raw: 3D ndarray. Raw movie. Dimensions (d1, d2, T). Movie has field of view consisting of d1 * d2 pixels and T frames
-        mov_denoised: 3D ndarray. Motion corrected and denoised movie. 
-        filename: desired filename of triptych file
-        img_types: list of integers. For each movie, this list describes its image type (RGB, grayscale, etc.)
-            value of 1 indicates grayscale, 2 indicates RGB
-        fr: frame rate (used for FFMPEG video generation)
-        titles: list, strings. List of titles for each movie
-        scale: integer. This function generates all frames which are a multiple of scale. Scale = 1 means all frames included in triptych.
-        titlesize: integer. Font size of title
-        ticksize: integer. Size of tick marks for each image
-        colorticksize: integer. Size of tick marks for each image
-        a_real: ndarray, dimensions (d1 * d2, K). Ground truth neurons, if applicable.
-        c_real: ndarray, dimensions (d1*d2, K). Ground truth neurons, if applicable. 
-        rgbrange: tuple of integers, length 2. Indicates the range of rgb values used to generate colorful demixing videos. 
-            Chosen to guarantee all signals are bright enough to see. 
-        channels: integer, value = 3. Indicates number of channels in colorful videos..
-    Returns: 
-        No return values
+    new_list = []
+    for k in my_list:
+        print(type(k))
+        current_array = k.reshape(shape, order=order) - min_value
+        current_array = current_array[dim1_range[0]:dim1_range[1], dim2_range[0]:dim2_range[1], :]
+        new_list.append(current_array)
+    return new_list
+
+def get_min_value(my_list):
+    curr_best_min = 0
+
+    for k in my_list:
+        curr_min = np.amin(k)
+        if curr_best_min > curr_min:
+            curr_best_min = curr_min
+    return curr_best_min
+
+
+def standard_demix_vid_m(fin_rlt, start_frame, end_frame, dim1_range, dim2_range, filename=None):
     
-    Demixing Triptych Video includes:
-        - Raw video
-        - Denoised Video
-        - Video of source extractions (A * C)
-        - RGB-color video of algorithm estimates
-        - RGB-color video of ground-truth (if applicable)
-        - Static Background Estimates
-        - Fluctuating Background Estimates
-        - Residual
-    '''
+    U_sparse = fin_rlt['U_sparse']
+    R = fin_rlt['R']
+    V = fin_rlt['V']
+    data_order = fin_rlt['data_order']
+    data_shape = fin_rlt['data_shape']
     
-    x, y, T = mov_raw.shape
-    titles = []
-    img_types =[]
-    mov_list = []
+    b = fin_rlt['b']
+    a = scipy.sparse.csr_matrix(fin_rlt['a'])
+    c = fin_rlt['c']
+    print(c.shape)
+    W = fin_rlt['W']
     
-    #Load relevant ringlocalNMF outputs
-    c = rlt['c']
-    a = rlt['a']
-    W = rlt['W']
-    W = W.astype("float")
-    b = rlt['b']
+    PMD_movie = U_sparse.dot((R.dot(V[:, start_frame:end_frame])))
+    AC_movie = a.dot(c.T[:, start_frame:end_frame])
     
+    fluctuating_bg = W.dot(PMD_movie - AC_movie - b)
+    net_bg = fluctuating_bg + b
     
-    #Define range of frames included in videos:
-    start = 0
-    end = mov_denoised.shape[2] 
+    residual = PMD_movie - AC_movie - fluctuating_bg - b
     
-    # Add raw movie: 
-    titles.append("Raw Data")
-    img_types.append(1)
-    mov_list.append(mov_raw)
+    my_movie_list = [PMD_movie, AC_movie, net_bg, residual]
+    # min_value_incl = get_min_value(my_movie_list)
+    reshaped_mov_list = reshape_movie_list(my_movie_list, (data_shape[0], data_shape[1], -1), dim1_range, dim2_range,data_order)
     
-    #Add denoised movie:
-    titles.append("Denoised Data")
-    img_types.append(1)
-    mov_list.append(mov_denoised)
+    titles = ["PMD Data", "Signals", "Net Background", "Residual"]
+    img_types = [1,1,1,1]
+    movie_scales = movie_scales = [100 for i in range(len(titles))]
+    if filename is None:
+        filename = "4panel_demix_video"
+    fr = 30
+    write_mpl_no_compress_comparisons(reshaped_mov_list, filename, img_types,  movie_scales, titles = titles, fr=fr) 
     
-    #Add grayscale A*C video:
-    AC_pre = a.dot(c.T)
-    AC = AC_pre.reshape(mov_denoised.shape, \
-                       order="F")
-    
-    #Perform min subtraction of the AC panel...
-    if min_sub_signals:
-        min_AC = np.amin(AC, axis = 2, keepdims = True)
-        AC = AC - min_AC
-        titles.append("Signal Estimates")
-    else:
-        titles.append("Signal Estimates")
-    img_types.append(1)
-    mov_list.append(AC)
-    
-    
-    #Add colored A*C video
-    frames = [i for i in range(start,end)]
-    if random_values is None: 
-        random_values = np.array([random.randint(rgbrange[0],rgbrange[1]) for i in range(channels*a.shape[1])]).reshape((a.shape[1], channels))
-    
-    
-    #Testing out min subtraction...
-    if min_sub_signals:
-        c_minsub = c - np.amin(c, axis = 0, keepdims = True)
-        if maxproj:
-             AC_color_image = generate_movie_maxproj(a, c_minsub[start:end,:], [x,y,end-start], random_values, slice_val=frames)
-        else:
-            AC_color_image = generate_movie(a, c_minsub[start:end,:], [x,y,end-start], random_values, slice_val=frames)
-        titles.append("Estimates Colored")
-    else:
-        if maxproj:
-             AC_color_image = generate_movie_maxproj(a, c_minsub[start:end,:], [x,y,end-start], random_values, slice_val=frames)
-        else:
-            AC_color_image = generate_movie(a, c[start:end,:], [x,y,end-start], random_values, slice_val=frames)
-        titles.append("Estimates Colored")
-    img_types.append(2)
-    mov_list.append(AC_color_image)
-    
-    #If there is ground truth, add it to the triptych
-    if a_real is not None and c_real is not None:
-        random_values = np.array([random.randint(rgbrange[0],rgbrange[1]) for i in range(channels*a_real.shape[1])]).reshape((a_real.shape[1], channels))
-        AC_real_color_image = generate_movie(a_real, c_real[start:end, :], [x,y,end-start], random_values, slice_val=frames, order=1)
-        titles.append("Ground Truth Colored")
-        img_types.append(2)
-        mov_list.append(AC_real_color_image)
-        
-    
-    
-    #Add static background estimate:
-    add_vector = np.zeros((x,y, T)) 
-    b_used = b.reshape((x,y,1), order="F")
-    b_mov = b_used + add_vector
-    if min_sub_signals:
-        b_mov += min_AC
-    titles.append("Static Background")
-    img_types.append(1)
-    mov_list.append(b_mov)
-    
-    #Add fluctuating background: 
-    mov_den_r = mov_denoised.reshape(x*y, -1, order="F")
-    bkgd_f = W.dot(mov_den_r - AC_pre - b)
-    bkgd_f = bkgd_f.reshape((mov_denoised.shape), order="F")
-    titles.append("Fluctuating Background")
-    img_types.append(1)
-    mov_list.append(bkgd_f.astype("float"))
-    
-    #Add residual:
-    res = mov_denoised - AC_pre.reshape(mov_denoised.shape, \
-                       order="F") - b_used - bkgd_f
-    if mean_sub_res == False:
-        titles.append("Residual")
-    else:
-        print("the shape of res is {}".format(res.shape))
-        res = res - np.mean(res, axis = 2, keepdims = True)
-        titles.append("Residual")
-    titles.append("Residual")
-    img_types.append(1)
-    mov_list.append(res)
-    
-    #Generate Demixing Video
-    write_mpl_no_compress_comparisons(mov_list, filename, img_types, titles = titles, fr=fr, \
-            scale=scale, titlesize=titlesize, ticksize=ticksize, colorticksize=colorticksize, width_const = width_const)
     
