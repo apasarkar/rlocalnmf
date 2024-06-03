@@ -278,7 +278,6 @@ def add_1s_to_rowspan(V):
     return (True, return_val)
 
 
-####Multiprocessing Functions
 def parinit():
     import os
     os.environ['MKL_NUM_THREADS'] = "1"
@@ -301,9 +300,6 @@ def runpar(f, X, nprocesses=None, **kwargs):
 
     if nprocesses is None:
         nprocesses = int(multiprocessing.cpu_count())
-        # print("the number of processes is {}".format(nprocesses))
-    #         val = len(os.sched_getaffinity(os.getpid()))
-    #         print('the number of usable cpu cores is {}'.format(val))
 
     with multiprocessing.Pool(initializer=parinit, processes=nprocesses) as pool:
         res = pool.map(functools.partial(f, **kwargs), X)

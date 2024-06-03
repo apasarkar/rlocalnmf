@@ -185,39 +185,21 @@ def demix_whole_data_robust_ring_lowrank(pmd_video, cut_off_point=[0.95,0.9], le
         return {'fin_rlt':fin_rlt, "superpixel_rlt":pmd_video.superpixel_rlt}
 
 
-def update_AC_bg_l2_Y_ring_lowrank(pmd_video, maxiter,corr_th_fix, corr_th_fix_sec, corr_th_del, switch_point, skips,merge_corr_thr, merge_overlap_thr, ring_radius, denoise=None, plot_en=False, plot_debug=False, update_after=4):
-    
-    '''
-    U_sparse, R, V, V_orig,r,dims, a, c, b, patch_size, corr_th_fix, corr_th_fix_sec = 0.4, corr_th_del = 0.2, switch_point = 10,
-            maxiter=50, tol=1e-8, update_after=None,merge_corr_thr=0.5,
-            merge_overlap_thr=0.7, num_plane=1, plot_en=False,
-            max_allow_neuron_size=0.2, skips=2, update_type="Constant",\
-                                mask_a=None, sb=True, pseudo_corr = 0, batch_size = 10000, plot_debug = False, denoise = None, data_order = "C"
-    
-    '''
-    
-    '''
+def update_AC_bg_l2_Y_ring_lowrank(pmd_video, maxiter,corr_th_fix, corr_th_fix_sec, corr_th_del, switch_point, skips,
+                                   merge_corr_thr, merge_overlap_thr, ring_radius, denoise=None, plot_en=False,
+                                   update_after=4):
+    """
     Function for computing background, spatial and temporal components of neurons. Uses HALS updates to iteratively
-    refine spatial and temporal estimates. 
-    
-    See 'demix_whole_data_robust_ring_lowrank' for all documentation (parameters are identical)
-    
-    TODO: 
-    The use of V and V_orig is (a) not memory efficient and (b) confusing. Some functions rely on the orthonormal V, others use V_orig. Long term let's just use the orthogonal V (saves an R x T matrix on GPU) to do everything. 
-    '''
+    refine spatial and temporal estimates.
+    """
 
     data_order = pmd_video.data_order
-    d1, d2, T = pmd_video.shape
-    
     
     pmd_video.precompute_quantities(maxiter, ring_radius)
     pmd_video.compute_standard_correlation_image()
     pmd_video.compute_residual_correlation_image()
 
-    corr_img_all = pmd_video.standard_correlation_image
-    corr_img_all_r = corr_img_all.reshape(d1, d2, -1, order=data_order)
-    corr_img_all_reg = pmd_video.residual_correlation_image
-    corr_img_all_reg_r = corr_img_all_reg.reshape(d1, d2, -1, order=data_order)
+
 
     
     if denoise is None: 
@@ -250,11 +232,6 @@ def update_AC_bg_l2_Y_ring_lowrank(pmd_video, maxiter,corr_th_fix, corr_th_fix_s
             ##First: Compute correlation images
             pmd_video.compute_standard_correlation_image()
             pmd_video.compute_residual_correlation_image()
-
-            corr_img_all = pmd_video.standard_correlation_image
-            corr_img_all_r = corr_img_all.reshape(d1, d2, -1, order=data_order)
-            corr_image_all_reg = pmd_video.residual_correlation_image
-            corr_img_all_reg_r = corr_img_all_reg.reshape(d1, d2, -1, order=data_order)
             
             print("mask, support, and deletion update")
             pmd_video.support_update_prune_elements_apply_mask(corr_th_fix, corr_th_del, plot_en)
@@ -267,11 +244,7 @@ def update_AC_bg_l2_Y_ring_lowrank(pmd_video, maxiter,corr_th_fix, corr_th_fix_s
         print("time: " + str(time.time()-start));
 
     pmd_video.delete_precomputed()
-    a, c, b, W, res, corr_img_all_r, num_list = pmd_video.brightness_order_and_return_state()
+    a, c, b, w, res, corr_img_all_r, num_list = pmd_video.brightness_order_and_return_state()
     
-    return a, c, b, W, res, corr_img_all_r, num_list
-    '''
-    Long Term: eliminate the following variables: 
-    - res (it's never used)
-    - num_list (figure out what it's used for...)
-    '''
+    return a, c, b, w, res, corr_img_all_r, num_list
+    #TODO: Look into "res" and "num_list"
