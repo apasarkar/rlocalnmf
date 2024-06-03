@@ -1,13 +1,6 @@
-import os
-import sys
 import time
-import math
 import torch
-import torch_sparse
 import numpy as np
-import scipy
-import scipy.sparse
-from scipy.sparse import csc_matrix
 from localnmf.ca_utils import show_img, spatial_sum_plot
 
 
