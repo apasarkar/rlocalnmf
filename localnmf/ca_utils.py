@@ -1,21 +1,21 @@
-######
-##
-## Utility Functions used in ringlocalNMF
-##
-######
-import torch
 import numpy as np
-from oasis.functions import gen_data, gen_sinusoidal_data, deconvolve, estimate_parameters
+from oasis.functions import deconvolve
 
 import functools
 import multiprocessing
 import math
-
 import scipy.sparse
 
 import matplotlib.pyplot as plt
 from mpl_toolkits.axes_grid1 import make_axes_locatable
+import torch
 
+
+def torch_sparse_to_scipy_coo(a):
+    data = a.values().cpu().detach().numpy()
+    row = a.indices().cpu().detach().numpy()[0, :]
+    col = a.indices().cpu().detach().numpy()[1, :]
+    return scipy.sparse.coo_matrix((data, (row, col)), a.shape)
 
 def show_img(ax, img):
     # Visualize local correlation, adapt from kelly's code

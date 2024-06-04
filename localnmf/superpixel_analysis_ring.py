@@ -4,9 +4,12 @@ import numpy as np
 from localnmf.ca_utils import show_img, spatial_sum_plot
 
 
-def demix_whole_data_robust_ring_lowrank(pmd_video, cut_off_point=[0.95,0.9], length_cut=[15,10], th=[2,1], pass_num=1, residual_cut = [0.6,0.6],
-                    corr_th_fix=0.31, corr_th_fix_sec = 0.4, corr_th_del = 0.2, switch_point=10, ring_radius=15, merge_corr_thr=0.6, merge_overlap_thr=0.6, num_plane=1,
-                    plot_en=False, text=True, maxiter=35, update_after=4, pseudo_2=[0.1, 0.1], skips=2, custom_init = {}, init=['lnmf', 'lnmf'], plot_debug = False, denoise = False):
+def demix_whole_data_robust_ring_lowrank(pmd_video, cut_off_point=[0.95,0.9], length_cut=[15,10], th=[2,1], pass_num=1,
+                                         residual_cut = [0.6,0.6], corr_th_fix=0.31, corr_th_fix_sec = 0.4,
+                                         corr_th_del = 0.2, switch_point=10, ring_radius=15, merge_corr_thr=0.6,
+                                         merge_overlap_thr=0.6, num_plane=1, plot_en=False, text=True, maxiter=35,
+                                         update_after=4, pseudo_2=[0.1, 0.1], skips=2, custom_init = {},
+                                         init=['lnmf', 'lnmf'], denoise = False):
     '''
     This function is a low-rank pipeline with robust correlation measures and a ring background model. The low-rank implementation is in the HALS updates.
     Args:
@@ -149,7 +152,13 @@ def demix_whole_data_robust_ring_lowrank(pmd_video, cut_off_point=[0.95,0.9], le
 
         with torch.no_grad():
             
-            a, c, b, W, res, corr_img_all_r, num_list = update_AC_bg_l2_Y_ring_lowrank(pmd_video, maxiter, corr_th_fix, corr_th_fix_sec, corr_th_del, switch_point, skips, merge_corr_thr, merge_overlap_thr, ring_radius, denoise=denoise, plot_en=plot_en, plot_debug=plot_debug, update_after=update_after);
+            a, c, b, W, res, corr_img_all_r, num_list = update_AC_bg_l2_Y_ring_lowrank(pmd_video, maxiter, corr_th_fix,
+                                                                                       corr_th_fix_sec, corr_th_del,
+                                                                                       switch_point, skips,
+                                                                                       merge_corr_thr, merge_overlap_thr,
+                                                                                       ring_radius, denoise=denoise,
+                                                                                       plot_en=plot_en,
+                                                                                       update_after=update_after)
             torch.cuda.empty_cache() #Test this as placeholder for now to avoid GPU memory getting clogged
             
         
