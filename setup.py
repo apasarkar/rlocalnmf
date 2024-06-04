@@ -8,8 +8,8 @@ setuptools.setup(
     version="0.0.4",
     description="New implementation of localnmf with advanced background models and initialization options",
     packages=setuptools.find_packages(),
-    install_requires=["torch", "torchvision", "torchaudio", "numpy", "scipy", "cvxpy", "Cython",
-                      "networkx",
+    install_requires=["torch>=2.0.0", "torchvision", "torchaudio", "numpy", "scipy", "cvxpy", "Cython",
+                      "networkx", "jupyterlab",
                       "scikit-learn", "matplotlib",
                       "opencv-python", "scikit-image"],
     classifiers=(

@@ -1,8 +1,6 @@
 import scipy.sparse
-import numpy as np
 import torch
 import torch_sparse
-import time
 
 def fast_matmul(a, b, device='cuda'):
     a_torch = torch.from_numpy(a).float().to(device)
@@ -55,27 +53,27 @@ def project_U_HALS(U_sparse, R, W, vector, a_sparse):
     return final_projection
     
 def spatial_update_HALS(U_sparse, R, s, V, W, a_sparse, c, b, mask_ab = None):
-    '''
-    Computes a spatial HALS updates: 
-    Params: 
-        
-        Note: The first four parameters are the "PMD" representation of the data: it is given in a traditional SVD form: URsV, where UR is the left orthogonal basis, 's' represents the diagonal matrix, and V is the right orthogonal basis. 
+    """
+    Computes a spatial HALS updates:
+    Params:
+
+        Note: The first four parameters are the "PMD" representation of the data: it is given in a traditional SVD form: URsV, where UR is the left orthogonal basis, 's' represents the diagonal matrix, and V is the right orthogonal basis.
         U_sparse: torch_sparse.tensor. Sparse matrix, with dimensions (d x R)
         R: torch.Tensor. Dimensions (R, R') where R' is roughly equal to R (it may be equal to R+1)
-        s: torch.Tensor. This is the diagonal of a R' x R' matrix (so it is represented by a R' shaped tensor) 
-        V: torch.Tensor. Dimensions R' x T. Dimensions R' x T, where T is the number of frames, where all rows are orthonormal. 
-            Note:  V must contain the 1 x T vector of all 1's in its rowspan. 
+        s: torch.Tensor. This is the diagonal of a R' x R' matrix (so it is represented by a R' shaped tensor)
+        V: torch.Tensor. Dimensions R' x T. Dimensions R' x T, where T is the number of frames, where all rows are orthonormal.
+            Note:  V must contain the 1 x T vector of all 1's in its rowspan.
         W: ring_model object. Describes a sparse matrix with dimensions (d x d)
-        a_sparse: torch_sparse.tensor. dimensions d x k, where k represents the number of neural signals. 
+        a_sparse: torch_sparse.tensor. dimensions d x k, where k represents the number of neural signals.
         c: torch.Tensor. Dimensions T x k
         b: torch.Tensor. Dimensions d x 1. Represents static background
         mask_ab: torch_sparse.tensor. Dimensions (d x k). For each neuron, indicates the allowed support of neuron
-        
-    Returns: 
+
+    Returns:
         a_sparse: torch_sparse.tensor. Dimensions d x k, containing updated spatial matrix
-        
+
     TODO: Make 'a' input a sparse matrix
-    '''
+    """
     #Load all values onto device in torch
     device = V.device
     
