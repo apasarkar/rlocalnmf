@@ -9,14 +9,14 @@ import scipy.ndimage
 import scipy.signal
 import scipy.sparse
 import scipy
+import logging
 
 from mpl_toolkits.axes_grid1 import make_axes_locatable
 
 from localnmf import ca_utils
 from localnmf.ca_utils import add_1s_to_rowspan, denoise
 from localnmf import regression_update
-
-from localnmf.constrained_ring.cnmf_e import ring_model, ring_model_update, ring_model_update_sampling
+from localnmf.constrained_ring.cnmf_e import ring_model, ring_model_update
 
 
 def make_mask_dynamic(corr_img_all_r, corr_percent, mask_a, data_order="C"):
@@ -25,7 +25,6 @@ def make_mask_dynamic(corr_img_all_r, corr_percent, mask_a, data_order="C"):
     """
     s = np.ones([3, 3]);
     mask_a = (mask_a.reshape(corr_img_all_r.shape, order=data_order)).copy()
-    print("entering thresholding..")
     for ii in range(mask_a.shape[2]):
         max_corr_val = np.amax(mask_a[:, :, ii] * corr_img_all_r[:, :, ii])
         corr_thres = corr_percent * max_corr_val
@@ -1546,7 +1545,7 @@ def merge_components(a, c, corr_img_all_r, num_list, patch_size, merge_corr_thr=
         added_counter = 0
         for comp in comps:
             comp = list(comp)
-            print("merge" + str(num_list[comp] + 1));
+            logging.debug("merge" + str(num_list[comp] + 1));
             good_comps = torch.Tensor(comp).to(device).long()
 
             a_merge = torch.index_select(a, 1, good_comps).coalesce()
@@ -1876,8 +1875,8 @@ class PMDVideo():
         if self.W.empty:
             # This means we need to create the actual W matrix (i.e. it can't just be empty)
             self.W = ring_model(self.d1, self.d2, self.r, empty=False, device=self.device, order=self.data_order)
-        ring_model_update(self.U_sparse, self.R * self.s[None, :], self.V, self.W, self.c, self.b, self.a, self.d1,
-                          self.d2, device=self.device)
+        ring_model_update(self.U_sparse, self.R * self.s[None, :], self.V, self.W, self.c, self.b,
+                          self.a)
 
     def temporal_update(self, denoise=False, plot_en=False):
         self._assert_initialization()
@@ -1957,7 +1956,6 @@ class PMDVideo():
     def support_update_prune_elements_apply_mask(self, corr_th_fix, corr_th_del, plot_en):
 
         # Currently using rigid mask
-        print("making dynamic support updates")
         self.mask_ab = self.a.bool()
         corr_img_all_r = self.residual_correlation_image.reshape(self.d1, self.d2, -1, order=self.data_order)
         mask_a_rigid = make_mask_dynamic(corr_img_all_r, corr_th_fix,

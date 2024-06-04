@@ -1,19 +1,16 @@
 import math
-import scipy
 import torch
 import numpy as np
 from localnmf import ca_utils
-
+import logging
 
 class ring_model:
 
     def __init__(self, d1, d2, r, empty=False, device='cpu', order="F"):
-        # If empty, construct an empty W matrix
         if empty:
             row = torch.Tensor([]).to(device).long()
             col = torch.Tensor([]).to(device).long()
             value = torch.Tensor([]).to(device).float()
-            # self.W_mat = torch_sparse.tensor.SparseTensor(row = row, col = col, value=value, sparse_sizes=(d1*d2, d1*d2))
             self.W_mat = torch.sparse_coo_tensor(torch.stack([row, col]), value, (d1 * d2, d1 * d2)).coalesce()
             self.weights = torch.zeros((d1 * d2, 1), device=device)
             self.empty = True
@@ -21,7 +18,6 @@ class ring_model:
             row_coordinates, column_coordinates, values = self._construct_init_values(d1, d2, r, device=device,
                                                                                       order=order)
             torch.cuda.empty_cache()
-            # self.W_mat = torch_sparse.tensor.SparseTensor(row=row_coordinates, col=column_coordinates, value=values, sparse_sizes = (d1*d2, d1*d2))
             self.W_mat = torch.sparse_coo_tensor(torch.stack([row_coordinates,
                                                   column_coordinates]), values, (d1 * d2, d1 * d2)).coalesce()
             self.weights = torch.ones((d1 * d2, 1), device=device)
@@ -35,7 +31,7 @@ class ring_model:
         spr1, spr2 = torch.meshgrid((dim1_spread, dim2_spread), indexing='ij')
         norms = torch.sqrt(spr1 * spr1 + spr2 * spr2)
         outputs = torch.argwhere(torch.logical_and(norms >= r, norms < r + 1)).to(device)
-        print("number of elts in ring is {}".format(outputs.shape[0]))
+        logging.debug("number of elts in ring is {}".format(outputs.shape[0]))
 
         ring_dim1 = dim1_spread[outputs[:, 0]].to(device)
         ring_dim2 = dim2_spread[outputs[:, 1]].to(device)
@@ -48,7 +44,7 @@ class ring_model:
         good_components = torch.logical_and(dim1_full >= 0, dim1_full < d1)
         good_components = torch.logical_and(good_components, dim2_full >= 0)
         good_components = torch.logical_and(good_components, dim2_full < d2)
-        print("the max of good components is {}".format(good_components.max()))
+        logging.debug("the max of good components is {}".format(good_components.max()))
 
         dim1_full *= good_components
         dim2_full *= good_components
@@ -123,8 +119,8 @@ class ring_model:
         Multiplies weighted_ring_matrix by tensor. Note that tensor must have (d1*d2) rows (since ring_matrix is (d1*d2, d1*d2)
         Inputs:
             tensor. torch.Tensor. Shape (d1*d2, X) for some X
-            good_indices. torch.Tensor, dtype bool. Shape (d1*d2, 1). Describes which columns of the ring matrix must be zero'd out.
-
+            good_indices. torch.Tensor, dtype bool. Shape (d1*d2, 1). Describes which columns
+             of the ring matrix must be zero'd out.
         """
         if good_indices is not None:
             tensor = good_indices * tensor
@@ -191,10 +187,6 @@ class ring_model:
             W_plain: The ring matrix with the weights (and zero'd out columns) applied
         """
         W_plain = ca_utils.torch_sparse_to_scipy_coo(self.W_mat).tocsr()
-        # data = self.W_mat.values().cpu().detach().numpy()
-        # row = self.W_mat.indices().cpu().detach().numpy()[0, :]
-        # col = self.W_mat.indices().cpu().detach().numpy()[1, :]
-        # W_plain = scipy.sparse.coo_matrix((data, (row, col)), self.W_mat.shape).tocsr()
         W_plain = W_plain.multiply(self.weights.cpu().numpy())
 
         a_sum = (np.sum(a, axis=1, keepdims=True) == 0).T
@@ -208,31 +200,10 @@ def get_sampled_indices(num_frames, num_samples, device='cuda'):
     tensor_to_sample = torch.arange(num_frames, device=device)
     weights = torch.ones_like(tensor_to_sample, device=device) * (1 / num_frames)
     new_values = tensor_to_sample[torch.multinomial(weights, num_samples=num_samples, replacement=False)]
-
     return new_values
 
 
-def ring_model_update_sampling(U_sparse, V, W, c, b, a, d1, d2, num_samples=1000, device='cuda'):
-    sampled_indices = get_sampled_indices(V.shape[1], num_samples, device=device)
-    V_crop = torch.index_select(V, 1, sampled_indices)
-    c_crop = torch.index_select(c, 0, sampled_indices).t()
-
-    residual = torch.sparse.mm(U_sparse, V_crop) - torch.sparse.mm(a, c_crop) - b
-
-    W.reset_weights()
-    W_residual = W.apply_model_right(residual, a)
-
-    denominator = torch.sum(W_residual * W_residual, dim=1)
-    numerator = torch.sum(W_residual * residual, dim=1)
-
-    values = torch.nan_to_num(numerator / denominator, nan=0.0, posinf=0.0, neginf=0.0)
-    threshold_function = torch.nn.ReLU()
-    values = threshold_function(values)
-
-    W.set_weights(values[:, None])
-
-
-def ring_model_update(U_sparse, R, V, W, c, b, a, d1, d2, num_samples=1000, device='cuda'):
+def ring_model_update(U_sparse, R, V, W, c, b, a, num_samples=1000):
     device = V.device
     batches = math.ceil(R.shape[1] / num_samples)
     denominator = 0

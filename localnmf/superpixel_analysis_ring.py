@@ -1,8 +1,7 @@
-import time
 import torch
 import numpy as np
 from localnmf.ca_utils import show_img, spatial_sum_plot
-
+from tqdm import tqdm
 
 def demix_whole_data_robust_ring_lowrank(pmd_video, cut_off_point=[0.95,0.9], length_cut=[15,10], th=[2,1], pass_num=1,
                                          residual_cut = [0.6,0.6], corr_th_fix=0.31, corr_th_fix_sec = 0.4,
@@ -217,10 +216,9 @@ def update_AC_bg_l2_Y_ring_lowrank(pmd_video, maxiter,corr_th_fix, corr_th_fix_s
         print("Length of denoise list is not consistent, setting all denoise values to false for this pass of NMF")
         denoise = [False for i in range(maxiter)]
            
-    for iters in range(maxiter):
+    for iters in tqdm(range(maxiter)):
         if iters >= maxiter - switch_point:
             corr_th_fix = corr_th_fix_sec 
-        start = time.time();
 
         ##TODO: Add back the plot corr image bit here if desired
         pmd_video.static_baseline_update()
@@ -242,15 +240,12 @@ def update_AC_bg_l2_Y_ring_lowrank(pmd_video, maxiter,corr_th_fix, corr_th_fix_s
             pmd_video.compute_standard_correlation_image()
             pmd_video.compute_residual_correlation_image()
             
-            print("mask, support, and deletion update")
             pmd_video.support_update_prune_elements_apply_mask(corr_th_fix, corr_th_del, plot_en)
             
-            print("merging components")
             #TODO: Eliminate the need for moving a and c off GPU
             pmd_video.merge_signals(merge_corr_thr, merge_overlap_thr, plot_en, data_order)
 
             
-        print("time: " + str(time.time()-start));
 
     pmd_video.delete_precomputed()
     a, c, b, w, res, corr_img_all_r, num_list = pmd_video.brightness_order_and_return_state()
