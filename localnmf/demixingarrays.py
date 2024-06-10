@@ -1,7 +1,7 @@
 from typing import *
 import numpy as np
 import scipy.sparse
-from localnmf.FactorizedVideo import FactorizedVideo
+from localnmf.factorized_video import FactorizedVideo
 
 
 class ACVideo(FactorizedVideo):
