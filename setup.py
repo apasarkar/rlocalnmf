@@ -11,7 +11,7 @@ setuptools.setup(
     install_requires=["torch>=2.0.0", "torchvision", "torchaudio", "numpy", "scipy", "cvxpy", "Cython",
                       "networkx", "jupyterlab",
                       "scikit-learn", "matplotlib",
-                      "opencv-python", "scikit-image", "tqdm"],
+                      "opencv-python", "scikit-image", "tqdm", "oasis-deconv"],
     classifiers=(
         "Programming Language :: Python :: 3",
     ),
