@@ -422,7 +422,7 @@ def process_custom_signals(a_init, U_sparse, R, s, V, order="C"):
 
     # Cast the data to torch tensors
     a_sp = scipy.sparse.csr_matrix(a)
-    a = torch.sparse_coo_tensor(a_sp.nonzero(), a_sp.data, a_sp.shape).coalesce().float().to(device)
+    a = torch.sparse_coo_tensor(np.array(a_sp.nonzero()), a_sp.data, a_sp.shape).coalesce().float().to(device)
     c = torch.zeros([dims[2], a_init.shape[2]], device=device, dtype=torch.float)
     W = ring_model(dims[0], dims[1], 1, device=device, order=order, empty=True)
 

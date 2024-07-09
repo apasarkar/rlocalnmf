@@ -295,14 +295,14 @@ class FluctuatingBGVideo(FactorizedVideo):
             wurs_crop = wur_crop * self.s[None, :]
             wursv_crop = wurs_crop.dot(v_crop)
             b_term = w_crop.dot(self.b)
-            product = wursv_crop - b_term + b_crop
+            product = wursv_crop - b_term
         else:
             vs_crop = self.s[:, None] * v_crop
             rvs_crop = self.r.dot(vs_crop)
             urvs_crop = self.u.dot(rvs_crop)
             wurvs_crop = w_crop.dot(urvs_crop)
             b_term = w_crop.dot(self.b)
-            product = wurvs_crop - b_term + b_crop
+            product = wurvs_crop - b_term
 
         product = product.reshape(implied_fov + (-1,), order=self.order)
 
