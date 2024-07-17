@@ -542,7 +542,7 @@ def get_local_correlation_structure(U_sparse, V, dims, th, order="C", batch_size
     if resid_flag:
         c = torch.Tensor(c).t().to(device)
         a_sp = scipy.sparse.csr_matrix(a)
-        a_sparse = torch.sparse_coo_tensor(a_sp.nonzero(), a_sp.data, a_sp.shape).coalesce().to(device)
+        a_sparse = torch.sparse_coo_tensor(np.array(a_sp.nonzero()), a_sp.data, a_sp.shape).coalesce().to(device)
 
     dims = (dims[0], dims[1], V.shape[1])
     T = V.shape[1]
@@ -754,6 +754,8 @@ def spatial_temporal_ini_UV(U_sparse, R, s, V, dims, th, comps, idx, length_cut,
     total_length = 0
     good_indices = []
     index_val = 0
+
+    # Identify which connected compnents are large enough to be considered superpixels
     for comp in comps:
         curr_length = len(list(comp))
         if curr_length > length_cut:
@@ -762,14 +764,13 @@ def spatial_temporal_ini_UV(U_sparse, R, s, V, dims, th, comps, idx, length_cut,
         index_val += 1
     comps = [comps[good_indices[i]] for i in range(len(good_indices))]
 
-    UV_mean = get_mean_data(U_sparse, R, s, V)
     if pre_existing:
         c_orig = torch.from_numpy(c).to(device)
         c_final = torch.cat([c_orig, torch.zeros(T, len(comps), device=device)], dim=1)
         a_sp = scipy.sparse.csr_matrix(a)
-        a_orig = torch.sparse_coo_tensor(a_sp.nonzero(), a_sp.data, a_sp.shape).coalesce().to(device)
-        mean_ac = torch.sparse.mm(a_orig, torch.mean(c_orig.t(), dim=1, keepdim=True))
-        UV_mean = UV_mean - mean_ac
+        a_orig_row, a_orig_col = [torch.from_numpy(elt).to(device) for elt in a_sp.nonzero()]
+        a_orig_values = torch.from_numpy(a_sp.data).to(device)
+        # a_orig = torch.sparse_coo_tensor(a_sp.nonzero(), a_sp.data, a_sp.shape).coalesce().to(device)
     else:
         c_final = torch.zeros(T, len(comps), device=device)
 
@@ -794,10 +795,6 @@ def spatial_temporal_ini_UV(U_sparse, R, s, V, dims, th, comps, idx, length_cut,
     a_value_init = a_value_init.to(device)
 
     if pre_existing:
-        a_orig_row = a_orig.storage.row()
-        a_orig_col = a_orig.storage.col()
-        a_orig_values = a_orig.storage.value()
-
         final_rows = torch.cat([a_row_init, a_orig_row], dim=0)
         final_cols = torch.cat([a_col_init, a_orig_col], dim=0)
         final_values = torch.cat([a_value_init, a_orig_values], dim=0)
@@ -806,9 +803,12 @@ def spatial_temporal_ini_UV(U_sparse, R, s, V, dims, th, comps, idx, length_cut,
         final_cols = a_col_init
         final_values = a_value_init
 
+    ## Define a_sparse and compute terms for running 1 set of HALS updates
     a_sparse = torch.sparse_coo_tensor(torch.stack([final_rows, final_cols]), final_values,
                                        (dims[0] * dims[1], K + len(comps))).coalesce().to(device)
-
+    UV_mean = get_mean_data(U_sparse, R, s, V)
+    mean_ac = torch.sparse.mm(a_sparse, torch.mean(c_final.t(), dim=1, keepdim=True))
+    UV_mean -= mean_ac
     W = ring_model(dims[0], dims[1], 1, device=device, empty=True)
 
     for k in range(1):
@@ -1579,8 +1579,6 @@ def merge_components(a, c, corr_img_all_r, num_list, patch_size, merge_corr_thr=
         num_list = np.hstack(num_append_list)
         a = torch.sparse_coo_tensor(torch.stack([row_indices_net, col_indices_net]),
                                     value_indices_net, (a.shape[0], c.shape[1])).coalesce()
-        # a = torch_sparse.tensor.SparseTensor(row=row_indices_net, col=col_indices_net, value=value_indices_net, \
-        #                                      sparse_sizes=(a.storage.sparse_sizes()[0], c.shape[1])).coalesce()
     else:
         flag = 0
 
