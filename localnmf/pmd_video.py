@@ -395,7 +395,7 @@ def PMD_setup_routine(U_sparse, R, s, V):
     return U_sparse, R, s, V
 
 
-def process_custom_signals(a_init, U_sparse, R, s, V, order="C"):
+def process_custom_signals(a_init, U_sparse, R, s, V, order="C", c_nonneg=True):
     """
     Custom initialization: Given a set of neuron spatial footprints ('a'), this provides initial estimates to the other component (temporal traces, baseline, fluctuating background)
     Terms:
@@ -430,7 +430,7 @@ def process_custom_signals(a_init, U_sparse, R, s, V, order="C"):
 
     # Baseline update followed by 'c' update:
     b = regression_update.baseline_update(uv_mean, a, c)
-    c = regression_update.temporal_update_HALS(U_sparse, R, s, V, W, a, c, b)
+    c = regression_update.temporal_update_HALS(U_sparse, R, s, V, W, a, c, b, c_nonneg=c_nonneg)
 
     c_norm = torch.linalg.norm(c, dim=0)
     nonzero_dim1 = torch.nonzero(c_norm).squeeze()
@@ -606,9 +606,9 @@ def get_local_correlation_structure(U_sparse, V, dims, th, order="C", batch_size
             divisor = torch.std(Yd, dim=0, unbiased=False, keepdim=True)
             final_divisor = torch.sqrt(divisor * divisor + pseudo ** 2)
 
-            # If divisor is 0, that implies that the std of a 0-mean pixel is 0, whcih means the
+            # If divisor is 0, that implies that the std of a 0-mean pixel is 0, which means the
             # pixel is 0 everywhere. In this case, set divisor to 1, so Yd/divisor = 0, as expected
-            final_divisor[divisor < tol] = 1  # Temporarily set all small values to 1..
+            final_divisor[divisor < tol] = 1  # Temporarily set all small values to 1.
             torch.reciprocal(final_divisor, out=final_divisor)
             final_divisor[divisor < tol] = 0  ##Now set these small values to 0
 
@@ -624,7 +624,7 @@ def get_local_correlation_structure(U_sparse, V, dims, th, order="C", batch_size
             correlation_values[progress_index:progress_index + point1_curr.shape[0]] = rho_curr
             progress_index = progress_index + point1_curr.shape[0]
 
-            # Horizonal pixel correlations
+            # Horizontal pixel correlations
             rho = torch.mean(Yd[:, :, :-1] * Yd[:, :, 1:], dim=0)
             point1_curr = indices_curr_2d[:, :-1].flatten()
             point2_curr = indices_curr_2d[:, 1:].flatten()
@@ -724,7 +724,6 @@ def find_superpixel_UV(dims, cut_off_point, length_cut, dim1_coordinates, dim2_c
     return connect_mat_1, idx, comps, permute_col
 
 
-##TODO: (1) Use URsV representation
 def spatial_temporal_ini_UV(U_sparse, R, s, V, dims, th, comps, idx, length_cut, a=None, c=None):
     """
     Apply rank 1 NMF to find spatial and temporal initialization for each superpixel in Yt.
@@ -768,7 +767,7 @@ def spatial_temporal_ini_UV(U_sparse, R, s, V, dims, th, comps, idx, length_cut,
         c_orig = torch.from_numpy(c).to(device)
         c_final = torch.cat([c_orig, torch.zeros(T, len(comps), device=device)], dim=1)
         a_sp = scipy.sparse.csr_matrix(a)
-        a_orig = torch.sparse_coo_tensor(a_sp.nonzero(), a.data, a.shape).coalesce().to(device)
+        a_orig = torch.sparse_coo_tensor(a_sp.nonzero(), a_sp.data, a_sp.shape).coalesce().to(device)
         mean_ac = torch.sparse.mm(a_orig, torch.mean(c_orig.t(), dim=1, keepdim=True))
         UV_mean = UV_mean - mean_ac
     else:
@@ -1878,11 +1877,11 @@ class PMDVideo():
         ring_model_update(self.U_sparse, self.R * self.s[None, :], self.V, self.W, self.c, self.b,
                           self.a)
 
-    def temporal_update(self, denoise=False, plot_en=False):
+    def temporal_update(self, denoise=False, plot_en=False, c_nonneg=True):
         self._assert_initialization()
         self._assert_ready_to_demix()
         self.c = regression_update.temporal_update_HALS(self.U_sparse, self.R, self.s, self.V, self.W, self.a, self.c,
-                                                        self.b)
+                                                        self.b, c_nonneg=c_nonneg)
 
         # Denoise 'c' components if desired
         if denoise:

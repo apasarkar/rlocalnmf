@@ -8,7 +8,7 @@ def demix_whole_data_robust_ring_lowrank(pmd_video, cut_off_point=[0.95,0.9], le
                                          corr_th_del = 0.2, switch_point=10, ring_radius=15, merge_corr_thr=0.6,
                                          merge_overlap_thr=0.6, num_plane=1, plot_en=False, text=True, maxiter=35,
                                          update_after=4, pseudo_2=[0.1, 0.1], skips=2, custom_init = {},
-                                         init=['lnmf', 'lnmf'], denoise = False):
+                                         init=['lnmf', 'lnmf'], denoise = False, c_nonneg=True):
     '''
     This function is a low-rank pipeline with robust correlation measures and a ring background model. The low-rank implementation is in the HALS updates.
     Args:
@@ -117,7 +117,6 @@ def demix_whole_data_robust_ring_lowrank(pmd_video, cut_off_point=[0.95,0.9], le
             with GPUs of various memory constraints)
         plot_debug: boolean. Indicates whether intermediate-step visualizations should be generated during demixing. Used for purposes
             of visualization.
-        
     '''
     
     dims = pmd_video.shape
@@ -157,7 +156,7 @@ def demix_whole_data_robust_ring_lowrank(pmd_video, cut_off_point=[0.95,0.9], le
                                                                                        merge_corr_thr, merge_overlap_thr,
                                                                                        ring_radius, denoise=denoise,
                                                                                        plot_en=plot_en,
-                                                                                       update_after=update_after)
+                                                                                       update_after=update_after, c_nonneg=c_nonneg)
             torch.cuda.empty_cache() #Test this as placeholder for now to avoid GPU memory getting clogged
             
         
@@ -195,7 +194,7 @@ def demix_whole_data_robust_ring_lowrank(pmd_video, cut_off_point=[0.95,0.9], le
 
 def update_AC_bg_l2_Y_ring_lowrank(pmd_video, maxiter,corr_th_fix, corr_th_fix_sec, corr_th_del, switch_point, skips,
                                    merge_corr_thr, merge_overlap_thr, ring_radius, denoise=None, plot_en=False,
-                                   update_after=4):
+                                   update_after=4, c_nonneg=True):
     """
     Function for computing background, spatial and temporal components of neurons. Uses HALS updates to iteratively
     refine spatial and temporal estimates.
@@ -232,7 +231,7 @@ def update_AC_bg_l2_Y_ring_lowrank(pmd_video, maxiter,corr_th_fix, corr_th_fix_s
         pmd_video.static_baseline_update()
     
         denoise_flag = denoise[iters]
-        pmd_video.temporal_update(denoise=denoise_flag, plot_en=plot_en)
+        pmd_video.temporal_update(denoise=denoise_flag, plot_en=plot_en, c_nonneg=c_nonneg)
            
         if update_after and ((iters+1) % update_after == 0):
             

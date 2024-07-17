@@ -148,7 +148,7 @@ def get_projection_matrix_temporal_HALS_routine(U_sparse, R, W, a_dense, a_spars
     return projector
 
 
-def temporal_update_HALS(U_sparse, R, s, V, W, a_sparse, c, b):
+def temporal_update_HALS(U_sparse, R, s, V, W, a_sparse, c, b, c_nonneg=True):
     """
     Inputs:
          Note: The first four parameters are the "PMD" representation of the data: it is given in a traditional SVD form: URsV, where UR is the left orthogonal basis, 's' represents the diagonal matrix, and V is the right orthogonal basis.
@@ -161,6 +161,7 @@ def temporal_update_HALS(U_sparse, R, s, V, W, a_sparse, c, b):
         a: (d1*d2, k)-shaped torch.sparse_coo_tensor
         c: (T, k)-shaped torch.Tensor
         b: (d1*d2, 1)-shaped torch.Tensor
+        c_nonneg (bool): Indicates whether "c" should be nonnegative or fully unconstrained. For voltage data, it should be unconstrained; for calcium it should be constrained. 
 
     Returns:
         c: (T, k)-shaped np.ndarray. Updated temporal components
@@ -206,7 +207,11 @@ def temporal_update_HALS(U_sparse, R, s, V, W, a_sparse, c, b):
     ata_d = torch.diag(ata)
     ata_d[ata_d == 0] = 1  # For division-safety
 
-    threshold_function = torch.nn.ReLU()
+    if c_nonneg:
+        threshold_function = torch.nn.ReLU()
+    else:
+        threshold_function = lambda x: x
+        
     for i in range(c.shape[1]):
         curr_index = torch.arange(i, i + 1, device=device)
         a_ia = torch.index_select(ata, 0, curr_index)
