@@ -21,12 +21,33 @@ class ACVideo(FactorizedVideo):
             c (np.ndarray). Shape (frames, components)
         """
         t = c.shape[0]
+        self._c = c
         self._shape = (t,) + fov_shape
         self.pixel_mat = np.arange(np.prod(self.shape[1:])).reshape([self.shape[1], self.shape[2]], order=order)
-        self.a = a.tocsr()
-        self.c = c
-        self.order = order
+        self._a = a.tocsr()
+        self._order = order
 
+    @property
+    def c(self) -> np.ndarray:
+        """
+        return temporal time courses of all signals, shape (frames, components)
+        """
+        return self._c
+
+    @property
+    def a(self) -> scipy.sparse.csr_matrix:
+        """
+        return spatial profiles of all signals as sparse matrix, shape (pixels, components)
+        """
+        return self._a
+
+    @property
+    def order(self) -> str:
+        """
+        The spatial data is "flattened" from 2D into 1D. This specifies the order ("F" for column-major or "C" for row-major) in which reshaping happened. 
+        """
+        return self._order
+        
     @property
     def dtype(self) -> str:
         """
@@ -114,17 +135,11 @@ class ACVideo(FactorizedVideo):
         if c_crop.ndim < self.c.ndim:
             c_crop = c_crop[None, :]
 
-        # Step 4: Deal with remaining indices after lazy computing the frame(s)
+        # Step 4: First do spatial subselection before multiplying by c
         if isinstance(item, tuple):
-            if len(item) == 2:
-                pixel_space_crop = self.pixel_mat[item[1], :]
-                a_indices = pixel_space_crop.reshape((-1), order=self.order)
-                implied_fov = pixel_space_crop.shape
-            elif len(item) == 3:
-                pixel_space_crop = self.pixel_mat[item[1], item[2]]
-                a_indices = pixel_space_crop.reshape((-1), order=self.order)
-                implied_fov = pixel_space_crop.shape
-
+            pixel_space_crop = self.pixel_mat[item[1:]]
+            a_indices = pixel_space_crop.reshape((-1), order=self.order)
+            implied_fov = pixel_space_crop.shape
             a_crop = self.a[a_indices, :]
         else:
             a_crop = self.a
@@ -179,7 +194,7 @@ class FluctuatingBGVideo(FactorizedVideo):
         self.r = r
         self.s = s
         self.pixel_mat = np.arange(np.prod(self.shape[1:])).reshape([self.shape[1], self.shape[2]], order=order)
-        self.order = order
+        self._order = order
 
     @property
     def dtype(self) -> str:
@@ -194,6 +209,13 @@ class FluctuatingBGVideo(FactorizedVideo):
         Array shape (n_frames, dims_x, dims_y)
         """
         return self._shape
+
+    @property
+    def order(self) -> str:
+        """
+        The spatial data is "flattened" from 2D into 1D. This specifies the order ("F" for column-major or "C" for row-major) in which reshaping happened.
+        """
+        return self._order
 
     @property
     def ndim(self) -> int:
@@ -222,7 +244,7 @@ class FluctuatingBGVideo(FactorizedVideo):
         # Step 2: Do some basic error handling for frame_indexer before using it to slice
 
         if isinstance(frame_indexer, np.ndarray):
-            frame_indexer = frame_indexer.tolist()
+            frame_indexer = frame_indexer
 
         if isinstance(frame_indexer, list):
             pass
@@ -230,7 +252,7 @@ class FluctuatingBGVideo(FactorizedVideo):
         elif isinstance(frame_indexer, int):
             pass
 
-        # numpy int scaler
+        # numpy int scalar
         elif isinstance(frame_indexer, np.integer):
             frame_indexer = frame_indexer.item()
 
@@ -270,22 +292,13 @@ class FluctuatingBGVideo(FactorizedVideo):
 
         # Step 4: Deal with remaining indices after lazy computing the frame(s)
         if isinstance(item, tuple):
-            if len(item) == 2:
-                pixel_space_crop = self.pixel_mat[item[1], :]
-                w_indices = pixel_space_crop.reshape((-1), order=self.order)
-                implied_fov = pixel_space_crop.shape
-            elif len(item) == 3:
-                pixel_space_crop = self.pixel_mat[item[1], item[2]]
-                w_indices = pixel_space_crop.reshape((-1), order=self.order)
-                implied_fov = pixel_space_crop.shape
-            else:
-                raise ValueError("Invalid Slicing")
-
+            pixel_space_crop = self.pixel_mat[item[1:]]
+            w_indices = pixel_space_crop.reshape((-1), order=self.order)
+            
             w_crop = self.w[w_indices, :]
-            b_crop = self.b[w_indices, :]
+            implied_fov = pixel_space_crop.shape
         else:
             w_crop = self.w
-            b_crop = self.b
             implied_fov = self.shape[1], self.shape[2]
 
         # Temporal term is guaranteed to have nonzero "T" dimension below
@@ -329,17 +342,20 @@ class ResidualVideo(FactorizedVideo):
     "c" is the matrix of temporal profiles
     """
 
-    def __init__(self, pmd_video: FactorizedVideo, fluctuating_bg_video: FactorizedVideo, ac_video: FactorizedVideo):
+    def __init__(self, pmd_video: FactorizedVideo, fluctuating_bg_video: FactorizedVideo,
+                 ac_video: FactorizedVideo, static_bg: np.ndarray):
         """
         Args:
             pmd_video (FactorizedVideo): a pmd video object (mean zero, noise normalized)
             fluctuating_bg_video (FactorizedVideo): a fluctuating bg video object
             ac_video (FactorizedVideo): spatial * temporal video object (captures the sources we extracted)
+            static_bg (np.ndarray): A static background term for the spatial support
         """
         self.pmd_video = pmd_video
         self.fluctuating_bg_video = fluctuating_bg_video
         self.ac_video = ac_video
         self._shape = pmd_video.shape
+        self.static_background = static_bg
 
     @property
     def dtype(self) -> str:
@@ -366,7 +382,12 @@ class ResidualVideo(FactorizedVideo):
             self,
             item: Union[int, list, np.ndarray, Tuple[Union[int, np.ndarray, slice, range]]]
     ):
-        return self.pmd_video[item] - self.fluctuating_bg_video[item] - self.ac_video[item]
+        if isinstance(item, tuple):
+            if len(item) > 1:
+                return (self.pmd_video[item] - self.fluctuating_bg_video[item]
+                        - self.ac_video[item] - self.static_background[item[1:]][None, :])
+        return (self.pmd_video[item] - self.fluctuating_bg_video[item] - self.ac_video[item]
+                - self.static_background[None, :])
 
 
 class ColorfulACVideo(FactorizedVideo):
