@@ -1442,7 +1442,7 @@ def superpixel_init(U_sparse, R, s, V, patch_size, num_plane, data_order, dims, 
         a = np.hstack((a, a_ini))
         c = np.hstack((c, c_ini))
         a_sp = scipy.sparse.csr_matrix(a)
-        a = torch.sparse_coo_tensor(a_sp.nonzero(), a_sp.data, a_sp.shape).coalesce().float().to(device)
+        a = torch.sparse_coo_tensor(np.array(a_sp.nonzero()), a_sp.data, a_sp.shape).coalesce().float().to(device)
         c = torch.from_numpy(c).float().to(device)
         uv_mean = get_mean_data(U_sparse, R, s, V)
         b = regression_update.baseline_update(uv_mean, a, c)
@@ -1749,6 +1749,8 @@ class PMDVideo():
         self.dim1_coordinates = None
         self.dim2_coordinates = None
         self.correlations = None
+        self._th = None #When we run superpixels, this variables stores most recently used MAD threshold value
+        self._robust_corr_term = None #A noise robustness parameter for the pixelwise correlation during superpixels
 
         ## Initialize ring model object for neuropil estimation
         ring_placeholder = 5
@@ -1773,7 +1775,7 @@ class PMDVideo():
             self.superpixel_rlt_recent = None
             self.superpixel_image_recent = None
 
-    def initialize_signals_superpixels(self, num_plane, cut_off_point, residual_cut, length_cut, th, pseudo_2,
+    def initialize_signals_superpixels(self, num_plane, cut_off_point, residual_cut, length_cut, th, robust_corr_term,
                                        text=True, plot_en=False):
         """
         See superpixel_init function above for a clear explanation of what each of these parameters should be
@@ -1782,13 +1784,17 @@ class PMDVideo():
         import time
         if not self.demixing_state:
             patch_size = [100, 100]
-            if self.dim1_coordinates is None:
+            if th != self._th or self._robust_corr_term != robust_corr_term:
+                print(f"Computing correlation data structure with MAD threshold  {th}"
+                      f"and the robust corr term is {robust_corr_term}")
                 # This indicates that it is the first time we are running the superpixel init with this set of
                 # pre-existing self.a and self.c values, so we need to compute the local correlation data
                 start_time = time.time()
                 self.dim1_coordinates, self.dim2_coordinates, self.correlations = get_local_correlation_structure(
                     self.U_sparse, torch.matmul(self.R * self.s[None, :], self.V), self.shape, th,
-                    order=self.data_order, batch_size=self.batch_size, pseudo=pseudo_2, a=self.a, c=self.c)
+                    order=self.data_order, batch_size=self.batch_size, pseudo=robust_corr_term, a=self.a, c=self.c)
+                self._th = th
+                self._robust_corr_term = robust_corr_term
                 print("the time to run the one time only local corr data structure computation is {}".format(
                     time.time() - start_time))
 
@@ -1796,7 +1802,7 @@ class PMDVideo():
             (self.a_init, self.mask_a_init, self.c_init, self.b_init, output_dictionary,
              superpixel_image) = superpixel_init(
                 self.U_sparse, self.R, self.s, self.V, patch_size, num_plane, self.data_order, self.shape,
-                cut_off_point, residual_cut, length_cut, th, self.batch_size, pseudo_2, self.device,
+                cut_off_point, residual_cut, length_cut, th, self.batch_size, robust_corr_term, self.device,
                 self.dim1_coordinates, self.dim2_coordinates, self.correlations, text=text, plot_en=plot_en, a=self.a,
                 c=self.c)
             print("the time to run pure superpixelization is {}".format(time.time() - start_time))
@@ -2062,6 +2068,11 @@ class PMDVideo():
         self.superpixel_rlt = []
         self.superpixel_image_recent = None
         self.superpixel_image_list = []
+        self.dim1_coordinates = None
+        self.dim2_coordinates = None
+        self.correlations = None
+        self._th = None
+        self._robust_corr_term = None
 
     def brightness_order_and_return_state(self):
         """
@@ -2092,5 +2103,7 @@ class PMDVideo():
         self.dim1_coordinates = None
         self.dim2_coordinates = None
         self.correlations = None
+        self._th = None
+        self._robust_corr_term = None
 
         return self.a, self.c, self.b, self.W, self.res, corr_img_all_r, self.num_list
