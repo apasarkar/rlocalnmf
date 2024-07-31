@@ -810,39 +810,49 @@ def find_superpixel_UV(
 
 
 def spatial_temporal_ini_UV(
-    U_sparse, R, s, V, dims, th, comps, idx, length_cut, a=None, c=None
-):
+    u_sparse: torch.sparse_coo_tensor,
+    r: torch.Tensor,
+    s: torch.Tensor,
+    v: torch.Tensor,
+    dims: Tuple[int, int, int],
+    comps: List[Set[int]],
+    length_cut: int,
+    a: Optional[np.ndarray] = None,
+    c: Optional[np.ndarray] = None,
+) -> Tuple[np.ndarray, np.ndarray]:
     """
     Apply rank 1 NMF to find spatial and temporal initialization for each superpixel in Yt.
-    Params:
-        - U_sparse_torch: torch.sparse_coo_tensor, shape (d1*d2, R)
-        - V_torch: torch.Tensor. Shape (R, T)
-        - dims: tuple, contains (d1, d2, T) )
-        - comps: list of sets. The i-th set here describes the spatial support of the i-th neural component
-        - idx: int. number of components (in comps)
-        - length_cut: int. Min size of superpixel
-        Optional inputs:
-            - a: numpy.ndarray, dimensions (d1*d2, K)
-            - c: numpy.ndarray, dimensions (T, K)
-    Outputs:
-        - a_init: np.ndarray. Shape (d1*d2, K) where K is the total number of neurons AFTER this round of initialization
-        - c_init: np.ndarray. Shape (T, K). Describes temporal initializations
+
+    Args:
+        u_sparse (torch.sparse_coo_tensor): Shape (d1*d2, R1) where d1, d2 are field of view dimensions.
+        r (torch.Tensor): Shape (R1, R2). PMD spatial mixing matrix. UR describes left singular vectors.
+        s (torch.Tensor): Shape (R2,). Singular values of PMD decomposition.
+        v (torch.Tensor): Shape (R2, T). T is the number of timepoints.
+        dims (tuple): Contains (d1, d2, T). Describes data shape.
+        comps (List[Set[int]]): Each set describes a single superpixel. The values in that set are the pixel indices where the superpixel is active.
+        length_cut (int): Minimum number of components required for a superpixel to be declared.
+        a (Optional[np.ndarray], optional): Shape (d1*d2, K) where K is the number of neurons. Defaults to None.
+        c (Optional[np.ndarray], optional): Shape (T, K) where T is the number of time points. Defaults to None.
+
+    Returns:
+        a_init (np.ndarray): Shape (d1*d2, K). Describes initial spatial footprints.
+        c_init (np.ndarray): Shape (T, K). Describes temporal initializations.
     """
-    device = V.device
-    dims = (dims[0], dims[1], V.shape[1])
-    T = V.shape[1]
+    device = v.device
+    dims = (dims[0], dims[1], v.shape[1])
+    t = v.shape[1]
 
     pre_existing = a is not None and c is not None
     if pre_existing:
-        K = c.shape[1]
+        k = c.shape[1]
     else:
-        K = 0
+        k = 0
 
     total_length = 0
     good_indices = []
     index_val = 0
 
-    # Identify which connected compnents are large enough to be considered superpixels
+    # Step 1: Identify which connected components are large enough to qualify as superpixels
     for comp in comps:
         curr_length = len(list(comp))
         if curr_length > length_cut:
@@ -851,45 +861,38 @@ def spatial_temporal_ini_UV(
         index_val += 1
     comps = [comps[good_indices[i]] for i in range(len(good_indices))]
 
-    if pre_existing:
-        c_orig = torch.from_numpy(c).to(device)
-        c_final = torch.cat([c_orig, torch.zeros(T, len(comps), device=device)], dim=1)
-        a_sp = scipy.sparse.csr_matrix(a)
-        a_orig_row, a_orig_col = [
-            torch.from_numpy(elt).to(device) for elt in a_sp.nonzero()
-        ]
-        a_orig_values = torch.from_numpy(a_sp.data).to(device)
-        # a_orig = torch.sparse_coo_tensor(a_sp.nonzero(), a_sp.data, a_sp.shape).coalesce().to(device)
-    else:
-        c_final = torch.zeros(T, len(comps), device=device)
-
+    # Step 2: Turn the superpixels into "a" and "c" values
     a_row_init = torch.zeros(total_length, dtype=torch.long)
     a_col_init = torch.zeros(total_length, dtype=torch.long)
-    a_value_init = torch.zeros(total_length, dtype=V.dtype)
+    a_value_init = torch.zeros(total_length, dtype=v.dtype)
 
     ref_point = 0
     counter = 0
     for comp in comps:
         curr_length = len(list(comp))
-        a_col_init[ref_point : ref_point + curr_length] = counter + K
+        a_col_init[ref_point : ref_point + curr_length] = counter + k
         a_row_init[ref_point : ref_point + curr_length] = torch.Tensor(list(comp))
-        a_value_init[ref_point : ref_point + curr_length] = (
-            1  # UV_mean[list(comp), :].squeeze()
-        )
+        a_value_init[ref_point : ref_point + curr_length] = 1
         ref_point += curr_length
         counter = counter + 1
-
-    # Finally, combine a_orig and new a:
 
     a_row_init = a_row_init.to(device)
     a_col_init = a_col_init.to(device)
     a_value_init = a_value_init.to(device)
 
     if pre_existing:
+        c_orig = torch.from_numpy(c).to(device)
+        c_final = torch.cat([c_orig, torch.zeros(t, len(comps), device=device)], dim=1)
+        a_sp = scipy.sparse.csr_matrix(a)
+        a_orig_row, a_orig_col = [
+            torch.from_numpy(elt).to(device) for elt in a_sp.nonzero()
+        ]
+        a_orig_values = torch.from_numpy(a_sp.data).to(device)
         final_rows = torch.cat([a_row_init, a_orig_row], dim=0)
         final_cols = torch.cat([a_col_init, a_orig_col], dim=0)
         final_values = torch.cat([a_value_init, a_orig_values], dim=0)
     else:
+        c_final = torch.zeros(t, len(comps), device=device)
         final_rows = a_row_init
         final_cols = a_col_init
         final_values = a_value_init
@@ -899,31 +902,31 @@ def spatial_temporal_ini_UV(
         torch.sparse_coo_tensor(
             torch.stack([final_rows, final_cols]),
             final_values,
-            (dims[0] * dims[1], K + len(comps)),
+            (dims[0] * dims[1], k + len(comps)),
         )
         .coalesce()
         .to(device)
     )
-    UV_mean = get_mean_data(U_sparse, R, s, V)
+    uv_mean = get_mean_data(u_sparse, r, s, v)
     mean_ac = torch.sparse.mm(a_sparse, torch.mean(c_final.t(), dim=1, keepdim=True))
-    UV_mean -= mean_ac
-    W = ring_model(dims[0], dims[1], 1, device=device, empty=True)
+    uv_mean -= mean_ac
+    w = ring_model(dims[0], dims[1], 1, device=device, empty=True)
 
-    for k in range(1):
-        b_torch = regression_update.baseline_update(UV_mean, a_sparse, c_final)
+    for _ in range(1):
+        b_torch = regression_update.baseline_update(uv_mean, a_sparse, c_final)
         c_final = regression_update.temporal_update_HALS(
-            U_sparse, R, s, V, W, a_sparse, c_final, b_torch
+            u_sparse, r, s, v, w, a_sparse, c_final, b_torch
         )
 
         b_torch = regression_update.baseline_update(
-            UV_mean.to(device), a_sparse, c_final
+            uv_mean.to(device), a_sparse, c_final
         )
         a_sparse = regression_update.spatial_update_HALS(
-            U_sparse, R, s, V, W, a_sparse, c_final, b_torch
+            u_sparse, r, s, v, w, a_sparse, c_final, b_torch
         )
 
     # Now return only the newly initialized components
-    col_index_tensor = torch.arange(start=K, end=K + len(comps), step=1, device=device)
+    col_index_tensor = torch.arange(start=k, end=k + len(comps), step=1, device=device)
     a_sparse = torch.index_select(a_sparse, 1, col_index_tensor)
     c_final = torch.index_select(c_final, 1, col_index_tensor)
 
@@ -1625,7 +1628,7 @@ def superpixel_init(
     )
 
     c_ini, a_ini = spatial_temporal_ini_UV(
-        u_sparse, r, s, v, dims, th, comps, idx, length_cut, a=a, c=c
+        u_sparse, r, s, v, dims, comps, length_cut, a=a, c=c
     )
 
     print("find pure superpixels!")
