@@ -773,13 +773,9 @@ def find_superpixel_UV(
     ----------------
     connect_mat_1: 2d np.darray, d1 x d2
         illustrate position of each superpixel.
-        Each superpixel has a random number "indicator".  Same number means same superpixel.
-    idx: double scalar
-        number of superpixels
+        Each superpixel has all of its pixels labeled the same value.
     comps: list, length = number of superpixels
         comp on comps is also list, its value is position of each superpixel in Yt_r = Yt.reshape(np.prod(dims[:2]),-1,order="F")
-    permute_col: list, length = number of superpixels
-        all the random numbers used to indicate superpixels in connect_mat_1
     """
     # Here we can apply the threshold:
     good_indices = torch.where(correlations > cut_off_point)[0]
@@ -792,21 +788,14 @@ def find_superpixel_UV(
     comps = list(nx.connected_components(G))
 
     connect_mat = np.zeros(np.prod(dims[:2]))
-    idx = 0
-    for comp in comps:
-        if len(comp) > length_cut:
-            idx = idx + 1
-
-    np.random.seed(2)  # Reproducibility of superpixels image
-    permute_col = np.random.permutation(idx) + 1
 
     ii = 0
     for comp in comps:
         if len(comp) > length_cut:
-            connect_mat[list(comp)] = permute_col[ii]
+            connect_mat[list(comp)] = ii+1# permute_col[ii]
             ii = ii + 1
     connect_mat_1 = connect_mat.reshape(dims[0], dims[1], order=order)
-    return connect_mat_1, idx, comps, permute_col
+    return connect_mat_1, comps
 
 
 def spatial_temporal_ini_UV(
@@ -994,52 +983,49 @@ def delete_comp(
     return a, c, corr_img_all_reg, corr_img_all, mask_a, num_list
 
 
-def order_superpixels(permute_col, unique_pix, U_mat, V_mat):
+def order_superpixels(
+        a_ini: np.ndarray,
+        c_ini: np.ndarray
+) -> np.ndarray:
     """
-    order superpixels according to brightness
-    """
-    ####################### pull out all the superpixels ################################
-    permute_col = list(permute_col)
-    pos = [permute_col.index(x) for x in unique_pix]
-    U_mat = U_mat[:, pos]
-    V_mat = V_mat[:, pos]
-    ####################### order pure superpixel according to brightness ############################
-    brightness = np.zeros(len(unique_pix))
+    Order the initialized superpixels by brightness
 
-    u_max = U_mat.max(axis=0)
-    v_max = V_mat.max(axis=0)
-    brightness = u_max * v_max
-    brightness_rank = U_mat.shape[1] - ss.rankdata(brightness, method="ordinal")
+    Args:
+        a_ini (np.ndarray): Shape (d1*d2, K) where d1, d2 are fov dimensions and K is number of neurons
+        c_ini (np.ndarray): Shape (T, K) where T is number of frames and K number of neurons
+    """
+    a_max = a_ini.max(axis=0)
+    c_max = c_ini.max(axis=0)
+    brightness = a_max * c_max
+    brightness_rank = a_ini.shape[1] - ss.rankdata(brightness, method="ordinal")
     return brightness_rank
 
-
-def search_superpixel_in_range(connect_mat, permute_col, V_mat):
+def search_superpixel_in_range(
+        connect_mat_cropped: np.ndarray,
+        temporal_mat: np.ndarray
+) -> Tuple[np.ndarray, np.ndarray]:
     """
-    Search all the superpixels within connect_mat
-    Parameters:
-    ----------------
-    connect_mat_1: 2d np.darray, d1 x d2
-        illustrate position of each superpixel, same value means same superpixel
-    permute_col: list, length = number of superpixels
-        random number used to idicate superpixels in connect_mat_1
-    V_mat: 2d np.darray, dimension T x number of superpixel
-        temporal initilization
-    Return:
-    ----------------
-    unique_pix: list, length idx (number of superpixels)
-        random numbers for superpixels in this patch
-    M: 2d np.array, dimension T x idx
-        temporal components for superpixels in this patch
-    """
+    Given a spatial crop of the superpixel matrix, this routine returns the temporal traces associated with
+    the superpixels in this spatial region.
 
-    unique_pix = np.asarray(np.sort(np.unique(connect_mat)), dtype="int")
+    Args:
+        connect_mat_cropped (np.ndarray): Shape (crop_dim1, crop_dim2). Matrix indicating the position of each superpixel.
+            If a location has value "i", it belongs to the (i-1)-index superpixel.
+        temporal_mat (np.ndarray): Shape (T, num_superpixels). Temporal traces for all superpixels over the full field of view (FOV).
+
+    Returns:
+        unique_pix (np.ndarray): Array containing the indices of identified superpixels in this spatial patch.
+        temporal_trace_subset (np.ndarray): Shape (T, num_found_superpixels). Temporal traces for all superpixels
+            found in this spatial subset of the FOV.
+    """
+    unique_pix = np.asarray(np.sort(np.unique(connect_mat_cropped)), dtype="int")
     unique_pix = unique_pix[np.nonzero(unique_pix)]
 
-    M = np.zeros([V_mat.shape[0], len(unique_pix)])
+    temporal_trace_subset = np.zeros([temporal_mat.shape[0], len(unique_pix)])
     for ii in range(len(unique_pix)):
-        M[:, ii] = V_mat[:, int(np.where(permute_col == unique_pix[ii])[0])]
+        temporal_trace_subset[:, ii] = temporal_mat[:, unique_pix[ii]-1]
 
-    return unique_pix, M
+    return unique_pix, temporal_trace_subset
 
 
 def successive_projection(
@@ -1455,57 +1441,42 @@ def single_pixel_correlation_image(
     return final_result / final_normalizer
 
 
-def prepare_iteration_UV(
-    dims, connect_mat_1, permute_col, pure_pix, U_mat, V_mat, more=False
-):
+def prepare_iteration_uv(pure_pix: np.ndarray,
+                         a_mat: np.ndarray,
+                         c_mat: np.ndarray
+) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
     """
-    Get some needed variables for the successive nmf iterations.
-    Parameters:
-    ----------------
-    U: 2d np.ndarray, dimension (d1*d2) x R
-        thresholded data
-    V: 2d np.ndarray, dimension R x T
-    connect_mat_1: 2d np.darray, d1 x d2
-        illustrate position of each superpixel, same value means same superpixel
-    permute_col: list, length = number of superpixels
-        random number used to idicate superpixels in connect_mat_1
-    pure_pix: 1d np.darray, dimension d x 1. (d is number of pure superpixels)
-        pure superpixels for these superpixels, actually column indices of M.
-    V_mat: 2d np.darray, dimension T x number of superpixel
-        temporal initilization
-    U_mat: 2d np.darray, dimension (d1*d2) x number of superpixel
-        spatial initilization
-    Return:
-    ----------------
-    U_mat: 2d np.darray, number pixels x number of pure superpixels
-        initialization of spatial components
-    V_mat: 2d np.darray, T x number of pure superpixels
-        initialization of temporal components
-    brightness_rank: 2d np.darray, dimension d x 1
-        brightness rank for pure superpixels in this patch. Rank 1 means the brightest.
-    B_mat: 2d np.darray
-        initialization of constant background
-    normalize_factor: std of Y
-    """
-    ####################### pull out all the pure superpixels ################################
-    permute_col = list(permute_col)
-    pos = [permute_col.index(x) for x in pure_pix]
-    U_mat = U_mat[:, pos]
-    V_mat = V_mat[:, pos]
-    ####################### order pure superpixel according to brightness ############################
+    Extract pure superpixels and order the components by brightness
 
-    u_max = U_mat.max(axis=0)
-    v_max = V_mat.max(axis=0)
-    brightness = u_max * v_max
+    Args:
+        pure_pix (numpy.ndarray): Shape (number_of_pure_superpixels,). A value of "i" indicates the superpixel at index
+            i - 1 is a pure superpixel
+        a_mat (np.ndarray): Shape (d1*d2, K) where K is the total number of superpixels
+        c_mat (np.ndarray): Shape (T, K) where T is the number of frames.
+
+    Returns:
+        a_mat_pure (np.ndarray): The brightness-ordered spatial matrix containing only pure superpixels
+        c_mat_pure (np.ndarray): The brightness ordered temporal matrix containing only pure superpixels
+        brightness_rank (np.ndarray): Shape (number of pure superpixels,). The brightness ranks involved in reordering
+    """
+
+    #Extract the pure superpixels
+    pure_pix_indices = pure_pix - np.array([1]).astype('int')
+    a_mat = a_mat[:, pure_pix_indices]
+    c_mat = c_mat[:, pure_pix_indices]
+
+    a_max = a_mat.max(axis=0)
+    c_max = c_mat.max(axis=0)
+    brightness = a_max * c_max
     brightness_arg = np.argsort(-brightness)
-    brightness_rank = U_mat.shape[1] - ss.rankdata(brightness, method="ordinal")
-    U_mat = U_mat[:, brightness_arg]
-    V_mat = V_mat[:, brightness_arg]
+    brightness_rank = a_mat.shape[1] - ss.rankdata(brightness, method="ordinal")
+    a_mat = a_mat[:, brightness_arg]
+    c_mat = c_mat[:, brightness_arg]
 
-    temp = np.sqrt((U_mat**2).sum(axis=0, keepdims=True))
-    V_mat = V_mat * temp
-    U_mat = U_mat / temp
-    return U_mat, V_mat, brightness_rank
+    temp = np.sqrt((a_mat**2).sum(axis=0, keepdims=True))
+    c_mat = c_mat * temp
+    a_mat = a_mat / temp
+    return a_mat, c_mat, brightness_rank
 
 
 def fit_large_spatial_support(
@@ -1559,7 +1530,6 @@ def superpixel_init(
     cut_off_point: float,
     residual_cut: float,
     length_cut: int,
-    th: int,
     pseudo: float,
     device: str,
     dim1_coordinates: torch.Tensor,
@@ -1589,7 +1559,6 @@ def superpixel_init(
         cut_off_point (float): between 0 and 1. Correlation thresholds used in superpixel calculations
         residual_cut (float): between 0 and 1. Threshold used in successive projection to find pure superpixels
         length_cut (int): Minimum allowed sizes of superpixels
-        th (int): MAD threshold factor
         pseudo (float): robust correlation parameter
         device (string): string used by pytorch to move and construct objects on cpu or gpu
         dim1_coordinates (torch.tensor): shape number_correlations
@@ -1617,7 +1586,7 @@ def superpixel_init(
         raise ValueError("Invalid configuration of c and a values were provided")
 
     print("find superpixels!")
-    connect_mat_1, idx, comps, permute_col = find_superpixel_UV(
+    connect_mat_1, comps = find_superpixel_UV(
         dims,
         cut_off_point,
         length_cut,
@@ -1644,9 +1613,10 @@ def superpixel_init(
 
     unique_pix = np.asarray(np.sort(np.unique(connect_mat_1)), dtype="int")
     unique_pix = unique_pix[np.nonzero(unique_pix)]
-    brightness_rank_sup = order_superpixels(permute_col, unique_pix, a_ini, c_ini)
+    brightness_rank_sup = order_superpixels(a_ini, c_ini)
     pure_pix = []
 
+    connect_mat_2d = connect_mat_1.reshape(dims[0], dims[1], order=data_order)
     for kk in range(num_patch):
         pos = np.where(patch_ref_mat == kk)
         up = pos[0][0] * patch_height
@@ -1654,10 +1624,9 @@ def superpixel_init(
         left = pos[1][0] * patch_width
         right = min(left + patch_width, dims[1])
         unique_pix_temp, m = search_superpixel_in_range(
-            (connect_mat_1.reshape(dims[0], dims[1], order=data_order))[
+            connect_mat_2d[
                 up:down, left:right
             ],
-            permute_col,
             c_ini,
         )
         pure_pix_temp = successive_projection(
@@ -1671,16 +1640,13 @@ def superpixel_init(
     print("prepare iteration!")
     mask_a = None  ## Disable the mask after first pass over data
     if not first_init_flag:
-        a_ini, c_ini, brightness_rank = prepare_iteration_UV(
-            (dims[0], dims[1], dims[2]),
-            connect_mat_1,
-            permute_col,
+        a_newpass, c_newpass, brightness_rank = prepare_iteration_uv(
             pure_pix,
             a_ini,
             c_ini,
         )
-        a = np.hstack((a, a_ini))
-        c = np.hstack((c, c_ini))
+        a = np.hstack((a, a_newpass))
+        c = np.hstack((c, c_newpass))
         a_sp = scipy.sparse.csr_matrix(a)
         a = (
             torch.sparse_coo_tensor(np.array(a_sp.nonzero()), a_sp.data, a_sp.shape)
@@ -1692,14 +1658,10 @@ def superpixel_init(
         uv_mean = get_mean_data(u_sparse, r, s, v)
         b = regression_update.baseline_update(uv_mean, a, c)
     else:
-        a, c, brightness_rank = prepare_iteration_UV(
-            (dims[0], dims[1], dims[2]),
-            connect_mat_1,
-            permute_col,
+        a, c, brightness_rank = prepare_iteration_uv(
             pure_pix,
             a_ini,
             c_ini,
-            more=True,
         )
         a_sp = scipy.sparse.csr_matrix(a)
         a = (
@@ -2119,7 +2081,7 @@ class PMDVideo:
         robust_corr_term,
         text=True,
         plot_en=False,
-        patch_size=[100, 100],
+        patch_size=(100, 100),
     ):
         """
         See superpixel_init function above for a clear explanation of what each of these parameters should be
@@ -2176,7 +2138,6 @@ class PMDVideo:
                 cut_off_point,
                 residual_cut,
                 length_cut,
-                th,
                 robust_corr_term,
                 self.device,
                 self.dim1_coordinates,
