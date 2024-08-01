@@ -3,6 +3,7 @@ import numpy as np
 import math
 import networkx as nx
 import matplotlib.pyplot as plt
+from matplotlib.figure import Figure
 from scipy import ndimage as ndimage
 import scipy.stats as ss
 import scipy.ndimage
@@ -984,11 +985,15 @@ def delete_comp(
 
 def order_superpixels(a_ini: np.ndarray, c_ini: np.ndarray) -> np.ndarray:
     """
-    Order the initialized superpixels by brightness
+    Finding an ordering of the components based on brightness (ordered in descending order of brightness)
 
     Args:
         a_ini (np.ndarray): Shape (d1*d2, K) where d1, d2 are fov dimensions and K is number of neurons
         c_ini (np.ndarray): Shape (T, K) where T is number of frames and K number of neurons
+
+    Returns:
+        brightness_rank (np.ndarray): Shape (num_components,). Indices indicating what the brightness rank of
+            each component is; brightest component gets rank 1, etc.
     """
     a_max = a_ini.max(axis=0)
     c_max = c_ini.max(axis=0)
@@ -1264,23 +1269,43 @@ def compute_correlation(I, U, R, m, s, norm, a=None, X=None, batch_size=200):
 
 
 def pure_superpixel_corr_compare_plot(
-    connect_mat_1,
-    unique_pix,
-    pure_pix,
-    brightness_rank_sup,
-    brightness_rank,
-    Cnt,
-    text=False,
-    order="C",
-):
+    connect_mat_1: np.ndarray,
+    unique_pix: np.ndarray,
+    pure_pix: np.ndarray,
+    brightness_rank_sup: np.ndarray,
+    brightness_rank: np.ndarray,
+    mad_correlation_img: np.ndarray,
+    text: bool = False,
+    order: str = "C",
+) -> tuple[Figure, np.ndarray]:
+    """
+    General plotting diagnostic for superpixels
+    Args:
+        connect_mat_1 (np.ndarray): The (d1, d2) shaped superpixel matrix
+        unique_pix (np.ndarray): The (N,) shaped array describing the values of the superpixels in the superpix mat
+        pure_pix (np.ndarray): The (N,) shaped array describing the values of the pure superpixels
+
+    """
+
     scale = np.maximum(1, (connect_mat_1.shape[1] / connect_mat_1.shape[0]))
     fig = plt.figure(figsize=(4 * scale, 12))
     ax = plt.subplot(3, 1, 1)
-    ax.imshow(connect_mat_1, cmap="nipy_spectral_r")
+
+    random_seed = 2
+    np.random.seed(random_seed)
+    connect_mat_1 = connect_mat_1.astype("int")
+    permutation_matrix = np.random.permutation(np.arange(1, len(unique_pix) + 1))
+    permutation_matrix = np.concatenate([np.array([0]), permutation_matrix])
+    permuted_connect_mat = permutation_matrix[connect_mat_1.flatten()].reshape(
+        connect_mat_1.shape
+    )
+    ax.imshow(permuted_connect_mat, cmap="nipy_spectral_r")
 
     if text:
         for ii in range(len(unique_pix)):
-            pos = np.where(connect_mat_1[:, :] == unique_pix[ii])
+            pos = np.where(
+                permuted_connect_mat[:, :] == permutation_matrix[unique_pix[ii]]
+            )
             pos0 = pos[0]
             pos1 = pos[1]
             ax.text(
@@ -1303,11 +1328,16 @@ def pure_superpixel_corr_compare_plot(
     connect_mat_1_pure[~np.in1d(connect_mat_1_pure, pure_pix)] = 0
     connect_mat_1_pure = connect_mat_1_pure.reshape(dims, order=order)
 
-    ax1.imshow(connect_mat_1_pure, cmap="nipy_spectral_r")
+    permuted_connect_mat_1_pure = permutation_matrix[
+        connect_mat_1_pure.flatten()
+    ].reshape(connect_mat_1_pure.shape)
+    ax1.imshow(permuted_connect_mat_1_pure, cmap="nipy_spectral_r")
 
     if text:
         for ii in range(len(pure_pix)):
-            pos = np.where(connect_mat_1_pure[:, :] == pure_pix[ii])
+            pos = np.where(
+                permuted_connect_mat_1_pure == permutation_matrix[pure_pix[ii]]
+            )
             pos0 = pos[0]
             pos1 = pos[1]
             ax1.text(
@@ -1324,7 +1354,7 @@ def pure_superpixel_corr_compare_plot(
     ax1.title.set_fontweight("bold")
 
     ax2 = plt.subplot(3, 1, 3)
-    show_img(ax2, Cnt)
+    show_img(ax2, mad_correlation_img)
     ax2.set(title="Thresholded Corr Img")
     ax2.title.set_fontsize(15)
     ax2.title.set_fontweight("bold")
@@ -1610,7 +1640,6 @@ def superpixel_init(
     cut_off_point: float,
     residual_cut: float,
     length_cut: int,
-    pseudo: float,
     device: str,
     dim1_coordinates: torch.Tensor,
     dim2_coordinates: torch.Tensor,
@@ -1639,7 +1668,6 @@ def superpixel_init(
         cut_off_point (float): between 0 and 1. Correlation thresholds used in superpixel calculations
         residual_cut (float): between 0 and 1. Threshold used in successive projection to find pure superpixels
         length_cut (int): Minimum allowed sizes of superpixels
-        pseudo (float): robust correlation parameter
         device (string): string used by pytorch to move and construct objects on cpu or gpu
         dim1_coordinates (torch.tensor): shape number_correlations
         dim2_coordinates (torch.tensor): shape number_correlations
@@ -2216,7 +2244,6 @@ class PMDVideo:
                 cut_off_point,
                 residual_cut,
                 length_cut,
-                robust_corr_term,
                 self.device,
                 self.dim1_coordinates,
                 self.dim2_coordinates,
