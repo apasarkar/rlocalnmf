@@ -1759,10 +1759,7 @@ def superpixel_init(
 
     # Plot superpixel correlation image
     if plot_en:
-        # Cnt = local_correlation_mat(
-        #     u_sparse, r * s[None, :], v, dims, pseudo, a=a, c=c, order=data_order
-        # )
-        Cnt = local_mad_correlation_mat(
+        mad_correlation_img = local_mad_correlation_mat(
             dim1_coordinates, dim2_coordinates, correlations, dims, data_order
         )
         _, superpixel_img = pure_superpixel_corr_compare_plot(
@@ -1771,7 +1768,7 @@ def superpixel_init(
             pure_pix,
             brightness_rank_sup,
             brightness_rank,
-            Cnt,
+            mad_correlation_img,
             text,
             order=data_order,
         )
