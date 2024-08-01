@@ -583,7 +583,6 @@ def get_local_correlation_structure(
         )
 
     dims = (dims[0], dims[1], V.shape[1])
-    T = V.shape[1]
 
     ref_mat = torch.arange(np.prod(dims[:-1]), device=device)
     if order == "F":
@@ -591,10 +590,10 @@ def get_local_correlation_structure(
     else:
         ref_mat = reshape_c(ref_mat, (dims[0], dims[1]))
 
-    tiles = math.floor(math.sqrt(batch_size))
+    tilesize = math.floor(math.sqrt(batch_size))
 
-    iters_x = math.ceil((dims[0] / (tiles - 1)))
-    iters_y = math.ceil((dims[1] / (tiles - 1)))
+    iters_x = math.ceil((dims[0] / (tilesize - 1)))
+    iters_y = math.ceil((dims[1] / (tilesize - 1)))
 
     # Pixel-to-pixel coordinates for highly-correlated neighbors
     total_edges = 2 * get_total_edges(
@@ -607,10 +606,10 @@ def get_local_correlation_structure(
     progress_index = 0
     for tile_x in range(iters_x):
         for tile_y in range(iters_y):
-            x_pt = (tiles - 1) * tile_x
-            x_end = x_pt + tiles
-            y_pt = (tiles - 1) * tile_y
-            y_end = y_pt + tiles
+            x_pt = (tilesize - 1) * tile_x
+            x_end = x_pt + tilesize
+            y_pt = (tilesize - 1) * tile_y
+            y_end = y_pt + tilesize
 
             indices_curr_2d = ref_mat[x_pt:x_end, y_pt:y_end]
             x_interval = indices_curr_2d.shape[0]
@@ -1326,7 +1325,7 @@ def pure_superpixel_corr_compare_plot(
 
     ax2 = plt.subplot(3, 1, 3)
     show_img(ax2, Cnt)
-    ax2.set(title="Local mean correlation")
+    ax2.set(title="Thresholded Corr Img")
     ax2.title.set_fontsize(15)
     ax2.title.set_fontweight("bold")
     plt.tight_layout()
@@ -1344,6 +1343,72 @@ def show_img(ax, img, vmin=None, vmax=None):
     else:
         format_tile = "%5d"
     plt.colorbar(im, cax=cax, orientation="vertical", spacing="uniform")
+
+
+def local_mad_correlation_mat(
+    dim1_coordinates: torch.tensor,
+    dim2_coordinates: torch.tensor,
+    correlations: torch.tensor,
+    dims: tuple[int, int, Optional[int]],
+    order: str = "C",
+) -> np.ndarray:
+    """
+    We MAD-threshold each pixel and compute correlations between neighboring pixels in the superpixel step
+    This routine is compute and memory optimized to manipulate these (on CPU and on GPU)
+    and produce a single correlation heatmap. Each pixel's intensity is the average of its correlation with neighboring
+    pixels.
+
+    Args:
+        dim1_coordinates (torch.tensor): Shape (N). Pixel coordinates in the field of view
+        dim2_coordinates (torch.tensor): Shape (N). Pixel coordinates in the field of view
+        correlations (torch.tensor): Shape (N). Correlation values for dim1_coordinates[i], dim2_coordinates[i]
+        dims (tuple): Integer specifying shape of data (field of view dim1, field of view dim2, and maybe frames).
+        order (str): either "F" or "C" indicating how to reshape flattened data
+
+    Returns:
+        correlation_image (np.ndarray): Shape (d1, d2).
+    """
+    coordinate_pairs = torch.stack((dim1_coordinates, dim2_coordinates), dim=1)
+    sorted_coordinates, _ = torch.sort(coordinate_pairs, dim=1)
+
+    num_pixels_fov = np.prod(dims[:2])
+
+    multiplicity_tracker = 100
+    correlations = (
+        correlations + multiplicity_tracker
+    )  # Now every correlation is between 99 and 101
+
+    correlations_mat = torch.sparse_coo_tensor(
+        sorted_coordinates.T, correlations, (num_pixels_fov, num_pixels_fov)
+    ).coalesce()
+
+    rows, cols = correlations_mat.indices()
+    correlation_sums = correlations_mat.values()
+    multiplicity = torch.round(correlation_sums / multiplicity_tracker)
+    correlation_sums = (
+        correlation_sums - multiplicity_tracker * multiplicity
+    ) / multiplicity
+
+    # Now repeat this algorithm again
+    correlation_sums = correlation_sums + multiplicity_tracker
+
+    final_rows = torch.concatenate([rows, cols], dim=0)
+    final_cols = torch.zeros_like(final_rows, device=final_rows.device)
+    final_values = torch.concatenate([correlation_sums, correlation_sums])
+
+    correlations_mat = torch.sparse_coo_tensor(
+        torch.stack([final_rows, final_cols]), final_values, (num_pixels_fov, 1)
+    ).coalesce()
+
+    rows, _ = correlations_mat.indices()
+    final_values = correlations_mat.values()
+    multiplicity = torch.round(final_values / multiplicity_tracker)
+    final_values = (final_values - multiplicity_tracker * multiplicity) / multiplicity
+
+    dense_correlation_mat = torch.zeros(num_pixels_fov, device=rows.device)
+    dense_correlation_mat[rows] = final_values
+
+    return dense_correlation_mat.cpu().numpy().reshape((dims[0], dims[1]), order=order)
 
 
 def local_correlation_mat(
@@ -1694,8 +1759,11 @@ def superpixel_init(
 
     # Plot superpixel correlation image
     if plot_en:
-        Cnt = local_correlation_mat(
-            u_sparse, r * s[None, :], v, dims, pseudo, a=a, c=c, order=data_order
+        # Cnt = local_correlation_mat(
+        #     u_sparse, r * s[None, :], v, dims, pseudo, a=a, c=c, order=data_order
+        # )
+        Cnt = local_mad_correlation_mat(
+            dim1_coordinates, dim2_coordinates, correlations, dims, data_order
         )
         _, superpixel_img = pure_superpixel_corr_compare_plot(
             connect_mat_1,
