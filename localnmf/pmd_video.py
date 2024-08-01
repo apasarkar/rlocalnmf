@@ -792,7 +792,7 @@ def find_superpixel_UV(
     ii = 0
     for comp in comps:
         if len(comp) > length_cut:
-            connect_mat[list(comp)] = ii+1# permute_col[ii]
+            connect_mat[list(comp)] = ii + 1  # permute_col[ii]
             ii = ii + 1
     connect_mat_1 = connect_mat.reshape(dims[0], dims[1], order=order)
     return connect_mat_1, comps
@@ -983,10 +983,7 @@ def delete_comp(
     return a, c, corr_img_all_reg, corr_img_all, mask_a, num_list
 
 
-def order_superpixels(
-        a_ini: np.ndarray,
-        c_ini: np.ndarray
-) -> np.ndarray:
+def order_superpixels(a_ini: np.ndarray, c_ini: np.ndarray) -> np.ndarray:
     """
     Order the initialized superpixels by brightness
 
@@ -1000,9 +997,9 @@ def order_superpixels(
     brightness_rank = a_ini.shape[1] - ss.rankdata(brightness, method="ordinal")
     return brightness_rank
 
+
 def search_superpixel_in_range(
-        connect_mat_cropped: np.ndarray,
-        temporal_mat: np.ndarray
+    connect_mat_cropped: np.ndarray, temporal_mat: np.ndarray
 ) -> Tuple[np.ndarray, np.ndarray]:
     """
     Given a spatial crop of the superpixel matrix, this routine returns the temporal traces associated with
@@ -1023,7 +1020,7 @@ def search_superpixel_in_range(
 
     temporal_trace_subset = np.zeros([temporal_mat.shape[0], len(unique_pix)])
     for ii in range(len(unique_pix)):
-        temporal_trace_subset[:, ii] = temporal_mat[:, unique_pix[ii]-1]
+        temporal_trace_subset[:, ii] = temporal_mat[:, unique_pix[ii] - 1]
 
     return unique_pix, temporal_trace_subset
 
@@ -1350,39 +1347,58 @@ def show_img(ax, img, vmin=None, vmax=None):
 
 
 def local_correlation_mat(
-    U, R, V, dims, pseudo, a=None, c=None, order="C", batch_size=200
+    u: torch.sparse_coo_tensor,
+    r: torch.tensor,
+    v: torch.tensor,
+    dims: tuple[int, int, Optional[int]],
+    pseudo: float,
+    a: Optional[torch.sparse_coo_tensor] = None,
+    c: Optional[torch.tensor] = None,
+    order: str = "C",
+    batch_size: int = 200,
 ):
     """
-    Local correlation matrix for U and V computations
+    This function uses the PMD representation to compute a "correlation" heatmap.
+    Pixels which are highly correlated with their neighbors are brighter, etc.
 
-    Inputs:
-        U: torch.sparse_coo_tensor. Shape (d1*d2, R)
-        R: torch.Tensor. Shape (R, R)
-        V: torch.Tensor. Shape (R, T)
-        pseudo: value typically near 0.1. Noise variance parameter used for correlation image calculation
-        a: torch.sparse_coo_tensor. Shape (d1*d2, K), where K is # of neural signals
-        c: torch.Tensor. Shape (T, K).
-        order: either "F" or "C" indicating how to reshape data back into (d1, d2, whatever) format from (d1*d2, whatever)
+    Args:
+        u (torch.sparse_coo_tensor): Shape (d1*d2, R)
+        r (torch.tensor): Shape (R, R)
+        v (torch.tensor): Shape (R, T)
+        dims (tuple): Integer specifying shape of data (field of view dim1, field of view dim2, and maybe frames).
+        pseudo (float): value typically near 0.1. Noise variance parameter used for correlation image calculation
+        a (torch.sparse_coo_tensor): Shape (d1*d2, K), where K is # of neural signals
+        c (torch.tensor): Shape (T, K).
+        order (str): either "F" or "C" indicating how to reshape flattened data
+        batch_size (int): Integer specifying batch size for pixelwise norm calcuations.
+
+    Returns:
+        correlation_image (np.ndarray): Shape (d1, d2).
     """
     if a is not None and c is not None:
-        X = torch.matmul(
-            V, c
+        x = torch.matmul(
+            v, c
         ).t()  # Equivalently a linear subspace projection of c onto V...
     else:
-        X = None
+        x = None
 
-    m, s = get_mean(U, R, V, a=a, X=X)
-    norm = get_pixel_normalizer(U, R, V, m, s, pseudo, a=a, X=X, batch_size=batch_size)
+    m, s = get_mean(u, r, v, a=a, X=x)
+    norm = get_pixel_normalizer(u, r, v, m, s, pseudo, a=a, X=x, batch_size=batch_size)
 
-    (r, c, v) = construct_index_mat(dims[0], dims[1], order=order, device=R.device)
-
-    I = torch.sparse_coo_tensor(
-        torch.stack([r, c]), v.float(), (dims[0] * dims[1], dims[0] * dims[1])
+    (rows, columns, values) = construct_index_mat(
+        dims[0], dims[1], order=order, device=r.device
     )
-    # I = torch_sparse.tensor.SparseTensor(row=r, col=c, value=v, sparse_sizes=(dims[0] * dims[1], dims[0] * dims[1]))
+
+    sparse_convolution_matrix = torch.sparse_coo_tensor(
+        torch.stack([rows, columns]),
+        values.float(),
+        (dims[0] * dims[1], dims[0] * dims[1]),
+    )
 
     return (
-        compute_correlation(I, U, R, m, s, norm, a=a, X=X, batch_size=batch_size)
+        compute_correlation(
+            sparse_convolution_matrix, u, r, m, s, norm, a=a, X=x, batch_size=batch_size
+        )
         .cpu()
         .numpy()
         .reshape((dims[0], dims[1], -1), order=order)
@@ -1441,9 +1457,8 @@ def single_pixel_correlation_image(
     return final_result / final_normalizer
 
 
-def prepare_iteration_uv(pure_pix: np.ndarray,
-                         a_mat: np.ndarray,
-                         c_mat: np.ndarray
+def prepare_iteration_uv(
+    pure_pix: np.ndarray, a_mat: np.ndarray, c_mat: np.ndarray
 ) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
     """
     Extract pure superpixels and order the components by brightness
@@ -1460,8 +1475,8 @@ def prepare_iteration_uv(pure_pix: np.ndarray,
         brightness_rank (np.ndarray): Shape (number of pure superpixels,). The brightness ranks involved in reordering
     """
 
-    #Extract the pure superpixels
-    pure_pix_indices = pure_pix - np.array([1]).astype('int')
+    # Extract the pure superpixels
+    pure_pix_indices = pure_pix - np.array([1]).astype("int")
     a_mat = a_mat[:, pure_pix_indices]
     c_mat = c_mat[:, pure_pix_indices]
 
@@ -1624,9 +1639,7 @@ def superpixel_init(
         left = pos[1][0] * patch_width
         right = min(left + patch_width, dims[1])
         unique_pix_temp, m = search_superpixel_in_range(
-            connect_mat_2d[
-                up:down, left:right
-            ],
+            connect_mat_2d[up:down, left:right],
             c_ini,
         )
         pure_pix_temp = successive_projection(
