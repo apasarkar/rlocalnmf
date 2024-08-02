@@ -806,9 +806,9 @@ def spatial_temporal_ini_UV(
     dims: Tuple[int, int, int],
     comps: List[Set[int]],
     length_cut: int,
-    a: Optional[np.ndarray] = None,
-    c: Optional[np.ndarray] = None,
-) -> Tuple[np.ndarray, np.ndarray]:
+    a: Optional[torch.sparse_coo_tensor] = None,
+    c: Optional[torch.tensor] = None,
+) -> Tuple[torch.sparse_coo_tensor, torch.tensor]:
     """
     Apply rank 1 NMF to find spatial and temporal initialization for each superpixel in Yt.
 
@@ -824,8 +824,8 @@ def spatial_temporal_ini_UV(
         c (Optional[np.ndarray], optional): Shape (T, K) where T is the number of time points. Defaults to None.
 
     Returns:
-        a_init (np.ndarray): Shape (d1*d2, K). Describes initial spatial footprints.
-        c_init (np.ndarray): Shape (T, K). Describes temporal initializations.
+        a_init (torch.sparse_coo_tensor): Shape (d1*d2, K). Describes initial spatial footprints.
+        c_init (torch.tensor): Shape (T, K). Describes temporal initializations.
     """
     device = v.device
     dims = (dims[0], dims[1], v.shape[1])
@@ -859,6 +859,7 @@ def spatial_temporal_ini_UV(
     counter = 0
     for comp in comps:
         curr_length = len(list(comp))
+        ##Below line super important: + k allows concatenation
         a_col_init[ref_point : ref_point + curr_length] = counter + k
         a_row_init[ref_point : ref_point + curr_length] = torch.Tensor(list(comp))
         a_value_init[ref_point : ref_point + curr_length] = 1
@@ -870,13 +871,9 @@ def spatial_temporal_ini_UV(
     a_value_init = a_value_init.to(device)
 
     if pre_existing:
-        c_orig = torch.from_numpy(c).to(device)
-        c_final = torch.cat([c_orig, torch.zeros(t, len(comps), device=device)], dim=1)
-        a_sp = scipy.sparse.csr_matrix(a)
-        a_orig_row, a_orig_col = [
-            torch.from_numpy(elt).to(device) for elt in a_sp.nonzero()
-        ]
-        a_orig_values = torch.from_numpy(a_sp.data).to(device)
+        c_final = torch.cat([c, torch.zeros(t, len(comps), device=device)], dim=1)
+        a_orig_row, a_orig_col = a.indices()
+        a_orig_values = a.values()
         final_rows = torch.cat([a_row_init, a_orig_row], dim=0)
         final_cols = torch.cat([a_col_init, a_orig_col], dim=0)
         final_values = torch.cat([a_value_init, a_orig_values], dim=0)
@@ -920,8 +917,8 @@ def spatial_temporal_ini_UV(
     c_final = torch.index_select(c_final, 1, col_index_tensor)
 
     return (
-        c_final.cpu().numpy(),
-        a_sparse.cpu().to_dense().numpy(),
+        c_final,
+        a_sparse,
     )
 
 
@@ -983,28 +980,27 @@ def delete_comp(
     return a, c, corr_img_all_reg, corr_img_all, mask_a, num_list
 
 
-def order_superpixels(a_ini: np.ndarray, c_ini: np.ndarray) -> np.ndarray:
+def order_superpixels(c_mat: torch.tensor) -> np.ndarray:
     """
-    Finding an ordering of the components based on brightness (ordered in descending order of brightness)
+    Finding an ordering of the components based on most prominent activity (ordered in descending order of brightness)
 
     Args:
-        a_ini (np.ndarray): Shape (d1*d2, K) where d1, d2 are fov dimensions and K is number of neurons
-        c_ini (np.ndarray): Shape (T, K) where T is number of frames and K number of neurons
+        c_ini (torch.tensor): Shape (T, K) where T is number of frames and K number of neurons
 
     Returns:
-        brightness_rank (np.ndarray): Shape (num_components,). Indices indicating what the brightness rank of
+        ordering (np.ndarray): Shape (num_components,). Indices indicating what the brightness rank of
             each component is; brightest component gets rank 1, etc.
     """
-    a_max = a_ini.max(axis=0)
-    c_max = c_ini.max(axis=0)
-    brightness = a_max * c_max
-    brightness_rank = a_ini.shape[1] - ss.rankdata(brightness, method="ordinal")
-    return brightness_rank
+
+    c_mat_norm = c_mat / torch.linalg.norm(c_mat, dim=0, keepdim=True)
+    max_values = torch.amax(c_mat_norm, dim=0)
+    ordering = torch.argsort(max_values, descending=True).cpu().numpy()
+    return ordering
 
 
 def search_superpixel_in_range(
-    connect_mat_cropped: np.ndarray, temporal_mat: np.ndarray
-) -> Tuple[np.ndarray, np.ndarray]:
+    connect_mat_cropped: np.ndarray, temporal_mat: torch.tensor
+) -> Tuple[np.ndarray, torch.tensor]:
     """
     Given a spatial crop of the superpixel matrix, this routine returns the temporal traces associated with
     the superpixels in this spatial region.
@@ -1012,33 +1008,37 @@ def search_superpixel_in_range(
     Args:
         connect_mat_cropped (np.ndarray): Shape (crop_dim1, crop_dim2). Matrix indicating the position of each superpixel.
             If a location has value "i", it belongs to the (i-1)-index superpixel.
-        temporal_mat (np.ndarray): Shape (T, num_superpixels). Temporal traces for all superpixels over the full field of view (FOV).
+        temporal_mat (torch.tensor): Shape (T, num_superpixels). Temporal traces for all superpixels over the full field of view (FOV).
 
     Returns:
         unique_pix (np.ndarray): Array containing the indices of identified superpixels in this spatial patch.
-        temporal_trace_subset (np.ndarray): Shape (T, num_found_superpixels). Temporal traces for all superpixels
+        temporal_trace_subset (torch.tensor): Shape (T, num_found_superpixels). Temporal traces for all superpixels
             found in this spatial subset of the FOV.
+
+    TODO: Eliminate this function and move all ops end to end to pytorch
     """
     unique_pix = np.asarray(np.sort(np.unique(connect_mat_cropped)), dtype="int")
     unique_pix = unique_pix[np.nonzero(unique_pix)]
+    unique_pix = torch.from_numpy(unique_pix).long().to(temporal_mat.device)
+    temporal_trace_subset = torch.index_select(temporal_mat, 1, unique_pix - 1)
 
-    temporal_trace_subset = np.zeros([temporal_mat.shape[0], len(unique_pix)])
-    for ii in range(len(unique_pix)):
-        temporal_trace_subset[:, ii] = temporal_mat[:, unique_pix[ii] - 1]
-
-    return unique_pix, temporal_trace_subset
+    return unique_pix.cpu().numpy(), temporal_trace_subset
 
 
 def successive_projection(
-    temporal_traces, max_pure_superpixels, th, normalize=1, device="cpu"
-):
+    temporal_traces: torch.tensor,
+    max_pure_superpixels: int,
+    th: float,
+    normalize: int = 1,
+    device: str = "cpu",
+) -> np.ndarray:
     """
     Find pure superpixels via successive projection algorithm.
     Solve nmf problem M = M(:,K)H, K is a subset of M's columns.
 
     Parameters:
     ----------------
-    temporal_traces (np.ndarray): 2d np.arraynumber of timepoints x number of superpixels
+    temporal_traces (torch.tensor): 2d np.arraynumber of timepoints x number of superpixels
         temporal components of superpixels.
     max_pure_superpixels: int scalar
         maximum number of pure superpixels you want to find.  Usually it's set to idx, which is number of superpixels.
@@ -1052,8 +1052,6 @@ def successive_projection(
         pure superpixels for these superpixels, actually column indices of M.
     """
     pure_pixels = []
-
-    temporal_traces = torch.from_numpy(temporal_traces.astype(np.float32)).to(device)
     if normalize == 1:
         temporal_traces /= torch.linalg.norm(
             temporal_traces, dim=0, ord=1, keepdim=True
@@ -1553,40 +1551,36 @@ def single_pixel_correlation_image(
 
 
 def prepare_iteration_uv(
-    pure_pix: np.ndarray, a_mat: np.ndarray, c_mat: np.ndarray
-) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
+    pure_pix: np.ndarray, a_mat: torch.sparse_coo_tensor, c_mat: torch.tensor
+) -> Tuple[torch.sparse_coo_tensor, torch.tensor, np.ndarray]:
     """
     Extract pure superpixels and order the components by brightness
 
     Args:
         pure_pix (numpy.ndarray): Shape (number_of_pure_superpixels,). A value of "i" indicates the superpixel at index
             i - 1 is a pure superpixel
-        a_mat (np.ndarray): Shape (d1*d2, K) where K is the total number of superpixels
-        c_mat (np.ndarray): Shape (T, K) where T is the number of frames.
+        a_mat (torch.sparse_coo_tensro): Shape (d1*d2, K) where K is the total number of superpixels
+        c_mat (torch.tensor): Shape (T, K) where T is the number of frames.
 
     Returns:
-        a_mat_pure (np.ndarray): The brightness-ordered spatial matrix containing only pure superpixels
-        c_mat_pure (np.ndarray): The brightness ordered temporal matrix containing only pure superpixels
+        a_mat_pure (torch.sparse_coo_tensor): The brightness-ordered spatial matrix containing only pure superpixels
+        c_mat_pure (torch.tensor): The brightness ordered temporal matrix containing only pure superpixels
         brightness_rank (np.ndarray): Shape (number of pure superpixels,). The brightness ranks involved in reordering
     """
 
     # Extract the pure superpixels
     pure_pix_indices = pure_pix - np.array([1]).astype("int")
-    a_mat = a_mat[:, pure_pix_indices]
-    c_mat = c_mat[:, pure_pix_indices]
+    pure_pix_indices = torch.from_numpy(pure_pix_indices).long().to(a_mat.device)
+    a_mat = torch.index_select(a_mat, 1, pure_pix_indices).coalesce()
+    c_mat = torch.index_select(c_mat, 1, pure_pix_indices)
 
-    a_max = a_mat.max(axis=0)
-    c_max = c_mat.max(axis=0)
-    brightness = a_max * c_max
-    brightness_arg = np.argsort(-brightness)
-    brightness_rank = a_mat.shape[1] - ss.rankdata(brightness, method="ordinal")
-    a_mat = a_mat[:, brightness_arg]
-    c_mat = c_mat[:, brightness_arg]
+    c_mat_norm = c_mat / torch.linalg.norm(c_mat, dim=0, keepdim=True)
+    max_values = torch.amax(c_mat_norm, dim=0)
+    ordering = torch.argsort(max_values, descending=True)
 
-    temp = np.sqrt((a_mat**2).sum(axis=0, keepdims=True))
-    c_mat = c_mat * temp
-    a_mat = a_mat / temp
-    return a_mat, c_mat, brightness_rank
+    a_mat = torch.index_select(a_mat, 1, ordering).coalesce()
+    c_mat = torch.index_select(c_mat, 1, ordering)
+    return a_mat, c_mat, ordering.cpu().numpy()
 
 
 def fit_large_spatial_support(
@@ -1684,12 +1678,22 @@ def superpixel_init(
         b (torch.Tensor): Pixelwise baseline estimate, shape(d1*d2)
         superpixel_dictionary (dict): Dictionary of key superpixel matrices for this round of initialization
         superpixel_img (np.ndarray): Shape (d1, d2): Plotted superpixel image
+
+    TODO: Make the second pass "a" also a sparse tensor.
     """
 
     if a is None and c is None:
         first_init_flag = True
     elif a is not None and c is not None:
         first_init_flag = False
+        a_sp = scipy.sparse.csr_matrix(a)
+        a = (
+            torch.sparse_coo_tensor(np.array(a_sp.nonzero()), a_sp.data, a_sp.shape)
+            .coalesce()
+            .float()
+            .to(device)
+        )
+        c = torch.from_numpy(c).float().to(device)
     else:
         raise ValueError("Invalid configuration of c and a values were provided")
 
@@ -1721,7 +1725,7 @@ def superpixel_init(
 
     unique_pix = np.asarray(np.sort(np.unique(connect_mat_1)), dtype="int")
     unique_pix = unique_pix[np.nonzero(unique_pix)]
-    brightness_rank_sup = order_superpixels(a_ini, c_ini)
+    brightness_rank_sup = order_superpixels(c_ini)
     pure_pix = []
 
     connect_mat_2d = connect_mat_1.reshape(dims[0], dims[1], order=data_order)
@@ -1751,16 +1755,19 @@ def superpixel_init(
             a_ini,
             c_ini,
         )
-        a = np.hstack((a, a_newpass))
-        c = np.hstack((c, c_newpass))
-        a_sp = scipy.sparse.csr_matrix(a)
-        a = (
-            torch.sparse_coo_tensor(np.array(a_sp.nonzero()), a_sp.data, a_sp.shape)
-            .coalesce()
-            .float()
-            .to(device)
-        )
-        c = torch.from_numpy(c).float().to(device)
+
+        ## Boilerplate for concatenating two sparse tensors along dim 1:
+        a_dims = (a.shape[0], a.shape[1] + a_newpass.shape[1])
+        a_row, a_col = a.indices()
+        a_vals = a.values()
+        a_new_row, a_new_col = a_newpass.indices()
+        a_new_vals = a_newpass.values()
+
+        new_rows = torch.concatenate([a_row, a_new_row])
+        new_col = torch.concatenate([a_col, a_new_col + a.shape[1]])
+        new_vals = torch.concatenate([a_vals, a_new_vals])
+        a = torch.sparse_coo_tensor(torch.stack([new_rows, new_col]), new_vals, a_dims)
+        c = torch.concatenate([c, c_newpass], dim=1)
         uv_mean = get_mean_data(u_sparse, r, s, v)
         b = regression_update.baseline_update(uv_mean, a, c)
     else:
@@ -1769,14 +1776,6 @@ def superpixel_init(
             a_ini,
             c_ini,
         )
-        a_sp = scipy.sparse.csr_matrix(a)
-        a = (
-            torch.sparse_coo_tensor(np.array(a_sp.nonzero()), a_sp.data, a_sp.shape)
-            .coalesce()
-            .float()
-            .to(device)
-        )
-        c = torch.from_numpy(c).float().to(device)
         uv_mean = get_mean_data(u_sparse, r, s, v)
         b = regression_update.baseline_update(uv_mean, a, c)
 
