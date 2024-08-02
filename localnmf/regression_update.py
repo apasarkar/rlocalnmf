@@ -1,8 +1,9 @@
 import scipy.sparse
 import torch
+from typing import *
 
 
-def fast_matmul(a, b, device='cuda'):
+def fast_matmul(a, b, device="cuda"):
     a_torch = torch.from_numpy(a).float().to(device)
     b_torch = torch.from_numpy(b).float().to(device)
     return torch.mm(a_torch, b_torch).cpu().numpy()
@@ -32,7 +33,9 @@ def baseline_update(uv_mean, a, c, to_torch=False):
         return b
 
 
-def project_U_HALS(U_sparse, R, W, vector, a_sparse):
+def project_U_HALS(
+    U_sparse, R, W, vector, a_sparse, selected_indices: Optional[torch.tensor] = None
+):
     """
     Commonly used routine to project background term (W) onto U basis in HALS calculations.
     We exploit the fact that the product UR has orthonormal columns
@@ -50,12 +53,19 @@ def project_U_HALS(U_sparse, R, W, vector, a_sparse):
     UtWv = torch.sparse.mm(U_sparse.t(), Wv)
     RRt = torch.matmul(R, R.t())
     RRtUtWv = torch.matmul(RRt, UtWv)
-    final_projection = torch.sparse.mm(U_sparse, RRtUtWv)
+
+    if selected_indices is None:
+        final_projection = torch.sparse.mm(U_sparse, RRtUtWv)
+    else:
+        u_subset = torch.index_select(U_sparse, 0, selected_indices)
+        final_projection = torch.sparse.mm(u_subset, RRtUtWv)
 
     return final_projection
 
 
-def spatial_update_HALS(U_sparse, R, s, V, W, a_sparse, c, b, mask_ab=None):
+def spatial_update_HALS(
+    U_sparse, R, s, V, W, a_sparse, c, b, blocks=None, mask_ab=None
+):
     """
     Computes a spatial HALS updates:
     Params:
@@ -77,63 +87,83 @@ def spatial_update_HALS(U_sparse, R, s, V, W, a_sparse, c, b, mask_ab=None):
 
     TODO: Make 'a' input a sparse matrix
     """
+    import pdb
+
     # Load all values onto device in torch
     device = V.device
 
     if mask_ab is None:
         mask_ab = a_sparse.bool()
 
-    mask_ab = mask_ab.to_dense()
+    mask_ab = mask_ab.long().to_dense()
+    nonzero_row_indices = torch.squeeze(torch.sum(mask_ab, dim=1).nonzero())
+    mask_ab = torch.index_select(mask_ab, 0, nonzero_row_indices)
 
     Vc = torch.matmul(V, c)
-    a_dense = a_sparse.to_dense()
+    a_dense = torch.index_select(a_sparse, 0, nonzero_row_indices).to_dense()
 
     # Find the tensor, e, (a 1 x R' shaped tensor) such that eV gives a 1 x T tensor consisting of all 1's
     e = torch.matmul(torch.ones([1, V.shape[1]], device=device), V.t())
 
     # Find the tensor, X (a N x K shaped tensor) such that XV closely approximates c.T
-    X = Vc.t()  # This is just a linear subspace projection of c.T onto the rowspace of V; can reuse above computation for this
+    X = (
+        Vc.t()
+    )  # This is just a linear subspace projection of c.T onto the rowspace of V; can reuse above computation for this
 
     C_prime = torch.matmul(c.t(), c)
     C_prime_diag = torch.diag(C_prime)
     C_prime_diag[C_prime_diag == 0] = 1  # For division safety
-    '''
+    """
     We will now compute the TRANSPOSE of the following expression: 
     
     [URs - be - Proj(W)(URS -be - aX)]Vc
     
     The result (after the transpose) is a N x d sized matrix, where N is the number of neural signals
-    '''
+    """
+
+    ### TODO: Optimize this later to avoid computing D x r matrices...?
     URsVc = torch.sparse.mm(U_sparse, torch.matmul(R, s[:, None] * Vc))
     beVc = torch.matmul(b, torch.matmul(e, Vc))
-    aXVc = torch.matmul(a_dense, torch.matmul(X, Vc))
+    aXVc = torch.sparse.mm(a_sparse, torch.matmul(X, Vc))
 
-    ring_term = project_U_HALS(U_sparse, R, W, URsVc - beVc - aXVc, a_sparse)
-    cumulator = URsVc - beVc - ring_term
-
-    cumulator = cumulator.t()
+    ring_term = project_U_HALS(
+        U_sparse,
+        R,
+        W,
+        URsVc - beVc - aXVc,
+        a_sparse,
+        selected_indices=nonzero_row_indices,
+    )
+    cumulator = (
+        torch.index_select(URsVc, 0, nonzero_row_indices)
+        - torch.index_select(beVc, 0, nonzero_row_indices)
+        - ring_term
+    )
 
     threshold_func = torch.nn.ReLU(0)
-    for i in range(c.shape[1]):
-        index_select_tensor = torch.arange(i, i + 1, device=device)
+    if blocks is None:
+        blocks = torch.arange(c.shape[1], device=device)[None, :]
+    for index_select_tensor in blocks:
         mask_apply = torch.squeeze(torch.index_select(mask_ab, 1, index_select_tensor))
 
-        C_prime_i = C_prime.index_select(0, index_select_tensor).t()
-        cumulator_i = cumulator.index_select(0, index_select_tensor)
-        cca = torch.matmul(a_dense, C_prime_i).t()
-        final_vec = (cumulator_i - cca) / C_prime_diag[i]
+        c_prime_i = C_prime.index_select(0, index_select_tensor).t()
+        cumulator_i = cumulator.index_select(1, index_select_tensor)
+        acc = torch.matmul(a_dense, c_prime_i)
+        final_vec = (cumulator_i - acc) / C_prime_diag[None, index_select_tensor]
         curr_frame = torch.squeeze(torch.index_select(a_dense, 1, index_select_tensor))
         curr_frame += torch.squeeze(final_vec)
         curr_frame *= mask_apply
         curr_frame = threshold_func(curr_frame)
-        a_dense[:, i] = curr_frame
+        a_dense[:, index_select_tensor] = curr_frame
 
-    nonzero_indices = torch.nonzero(a_dense)
-    rows = nonzero_indices[:, 0]
-    cols = nonzero_indices[:, 1]
-    values = a_dense[rows, cols]
+    pruned_indices = a_dense.nonzero()
+    pruned_row, pruned_col = [pruned_indices[:, i] for i in range(2)]
+    final_values = a_dense[pruned_row, pruned_col]
+    real_row = nonzero_row_indices[pruned_row]
 
-    a_sparse = torch.sparse_coo_tensor(nonzero_indices.t(), values, a_sparse.shape).coalesce()
+    a_sparse = torch.sparse_coo_tensor(
+        torch.stack([real_row, pruned_col]), final_values, a_sparse.shape
+    ).coalesce()
     return a_sparse
 
 
@@ -161,7 +191,7 @@ def temporal_update_HALS(U_sparse, R, s, V, W, a_sparse, c, b, c_nonneg=True):
         a: (d1*d2, k)-shaped torch.sparse_coo_tensor
         c: (T, k)-shaped torch.Tensor
         b: (d1*d2, 1)-shaped torch.Tensor
-        c_nonneg (bool): Indicates whether "c" should be nonnegative or fully unconstrained. For voltage data, it should be unconstrained; for calcium it should be constrained. 
+        c_nonneg (bool): Indicates whether "c" should be nonnegative or fully unconstrained. For voltage data, it should be unconstrained; for calcium it should be constrained.
 
     Returns:
         c: (T, k)-shaped np.ndarray. Updated temporal components
@@ -175,8 +205,9 @@ def temporal_update_HALS(U_sparse, R, s, V, W, a_sparse, c, b, c_nonneg=True):
     e = torch.matmul(torch.ones([1, V.shape[1]], device=device), V.t())
 
     # Find the tensor, X (a N x K shaped tensor) such that XV closely approximates c.T
-    X = torch.matmul(V,
-                     c).t()  # This is just a linear subspace projection of c.T onto the rowspace of V; can reuse above computation for this
+    X = torch.matmul(
+        V, c
+    ).t()  # This is just a linear subspace projection of c.T onto the rowspace of V; can reuse above computation for this
 
     # Step 1: Get aTURs
     aTU = torch.sparse.mm(U_sparse.t(), a_dense).t()
@@ -188,7 +219,9 @@ def temporal_update_HALS(U_sparse, R, s, V, W, a_sparse, c, b, c_nonneg=True):
     aTbe = torch.matmul(aTb, e)
 
     # Step 3:
-    projector = get_projection_matrix_temporal_HALS_routine(U_sparse, R, W, a_dense, a_sparse)
+    projector = get_projection_matrix_temporal_HALS_routine(
+        U_sparse, R, W, a_dense, a_sparse
+    )
     PU = torch.sparse.mm(U_sparse.t(), projector.t()).t()
     PUR = torch.matmul(PU, R)
     PURs = PUR * s[None, :]
@@ -211,14 +244,16 @@ def temporal_update_HALS(U_sparse, R, s, V, W, a_sparse, c, b, c_nonneg=True):
         threshold_function = torch.nn.ReLU()
     else:
         threshold_function = lambda x: x
-        
+
     for i in range(c.shape[1]):
         curr_index = torch.arange(i, i + 1, device=device)
         a_ia = torch.index_select(ata, 0, curr_index)
         a_iaC = torch.matmul(a_ia, c.t())
 
         curr_trace = torch.index_select(c, 1, curr_index)
-        curr_trace += ((torch.index_select(cumulator, 0, curr_index) - a_iaC) / ata_d[i]).t()
+        curr_trace += (
+            (torch.index_select(cumulator, 0, curr_index) - a_iaC) / ata_d[i]
+        ).t()
         curr_trace = threshold_function(curr_trace)
         c[:, [i]] = curr_trace
 
