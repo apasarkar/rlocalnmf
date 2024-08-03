@@ -63,23 +63,23 @@ def project_U_HALS(
     return final_projection
 
 
-def spatial_update_HALS(
-    U_sparse, R, s, V, W, a_sparse, c, b, blocks=None, mask_ab=None
+def spatial_update_hals(
+    u_sparse, r, s, v, a_sparse, c, b, w=None, blocks=None, mask_ab=None
 ):
     """
     Computes a spatial HALS updates:
     Params:
 
         Note: The first four parameters are the "PMD" representation of the data: it is given in a traditional SVD form: URsV, where UR is the left orthogonal basis, 's' represents the diagonal matrix, and V is the right orthogonal basis.
-        U_sparse: torch.sparse_coo_tensor. Sparse matrix, with dimensions (d x R)
-        R: torch.Tensor. Dimensions (R, R') where R' is roughly equal to R (it may be equal to R+1)
+        u_sparse: torch.sparse_coo_tensor. Sparse matrix, with dimensions (d x R)
+        r: torch.Tensor. Dimensions (R, R') where R' is roughly equal to R (it may be equal to R+1)
         s: torch.Tensor. This is the diagonal of a R' x R' matrix (so it is represented by a R' shaped tensor)
-        V: torch.Tensor. Dimensions R' x T. Dimensions R' x T, where T is the number of frames, where all rows are orthonormal.
+        v: torch.Tensor. Dimensions R' x T. Dimensions R' x T, where T is the number of frames, where all rows are orthonormal.
             Note:  V must contain the 1 x T vector of all 1's in its rowspan.
-        W: ring_model object. Describes a sparse matrix with dimensions (d x d)
         a_sparse: torch.sparse_coo_tensor. dimensions d x k, where k represents the number of neural signals.
         c: torch.Tensor. Dimensions T x k
         b: torch.Tensor. Dimensions d x 1. Represents static background
+        W: ring_model object. Describes a sparse matrix with dimensions (d x d)
         mask_ab: torch.sparse_coo_tensor. Dimensions (d x k). For each neuron, indicates the allowed support of neuron
 
     Returns:
@@ -90,7 +90,7 @@ def spatial_update_HALS(
     import pdb
 
     # Load all values onto device in torch
-    device = V.device
+    device = v.device
 
     if mask_ab is None:
         mask_ab = a_sparse.bool()
@@ -99,11 +99,11 @@ def spatial_update_HALS(
     nonzero_row_indices = torch.squeeze(torch.sum(mask_ab, dim=1).nonzero())
     mask_ab = torch.index_select(mask_ab, 0, nonzero_row_indices)
 
-    Vc = torch.matmul(V, c)
+    Vc = torch.matmul(v, c)
     a_dense = torch.index_select(a_sparse, 0, nonzero_row_indices).to_dense()
 
     # Find the tensor, e, (a 1 x R' shaped tensor) such that eV gives a 1 x T tensor consisting of all 1's
-    e = torch.matmul(torch.ones([1, V.shape[1]], device=device), V.t())
+    e = torch.matmul(torch.ones([1, v.shape[1]], device=device), v.t())
 
     # Find the tensor, X (a N x K shaped tensor) such that XV closely approximates c.T
     X = (
@@ -122,27 +122,32 @@ def spatial_update_HALS(
     """
 
     ### TODO: Optimize this later to avoid computing D x r matrices...?
-    URsVc = torch.sparse.mm(U_sparse, torch.matmul(R, s[:, None] * Vc))
+    URsVc = torch.sparse.mm(u_sparse, torch.matmul(r, s[:, None] * Vc))
     beVc = torch.matmul(b, torch.matmul(e, Vc))
     aXVc = torch.sparse.mm(a_sparse, torch.matmul(X, Vc))
 
-    ring_term = project_U_HALS(
-        U_sparse,
-        R,
-        W,
-        URsVc - beVc - aXVc,
-        a_sparse,
-        selected_indices=nonzero_row_indices,
-    )
+
     cumulator = (
         torch.index_select(URsVc, 0, nonzero_row_indices)
         - torch.index_select(beVc, 0, nonzero_row_indices)
-        - ring_term
     )
+
+    if w is not None and not w.empty:
+        residual_term = URsVc - beVc - aXVc
+
+        ring_term = project_U_HALS(
+            u_sparse,
+            r,
+            w,
+            residual_term,
+            a_sparse,
+            selected_indices=nonzero_row_indices,
+        )
+        cumulator -= ring_term
 
     threshold_func = torch.nn.ReLU(0)
     if blocks is None:
-        blocks = torch.arange(c.shape[1], device=device)[None, :]
+        blocks = torch.arange(c.shape[1], device=device)
     for index_select_tensor in blocks:
         mask_apply = torch.squeeze(torch.index_select(mask_ab, 1, index_select_tensor))
 
@@ -178,7 +183,7 @@ def get_projection_matrix_temporal_HALS_routine(U_sparse, R, W, a_dense, a_spars
     return projector
 
 
-def temporal_update_HALS(U_sparse, R, s, V, W, a_sparse, c, b, c_nonneg=True):
+def temporal_update_hals(U_sparse, R, s, V, a_sparse, c, b, w=None, c_nonneg=True, blocks=None):
     """
     Inputs:
          Note: The first four parameters are the "PMD" representation of the data: it is given in a traditional SVD form: URsV, where UR is the left orthogonal basis, 's' represents the diagonal matrix, and V is the right orthogonal basis.
@@ -219,20 +224,26 @@ def temporal_update_HALS(U_sparse, R, s, V, W, a_sparse, c, b, c_nonneg=True):
     aTbe = torch.matmul(aTb, e)
 
     # Step 3:
-    projector = get_projection_matrix_temporal_HALS_routine(
-        U_sparse, R, W, a_dense, a_sparse
-    )
-    PU = torch.sparse.mm(U_sparse.t(), projector.t()).t()
-    PUR = torch.matmul(PU, R)
-    PURs = PUR * s[None, :]
+    cumulator = aTURs - aTbe
 
-    PA = torch.matmul(projector, a_dense)
-    PAX = torch.matmul(PA, X)
+    if w is not None and not w.empty:
+        projector = get_projection_matrix_temporal_HALS_routine(
+            U_sparse, R, w, a_dense, a_sparse
+        )
+        PU = torch.sparse.mm(U_sparse.t(), projector.t()).t()
+        PUR = torch.matmul(PU, R)
+        PURs = PUR * s[None, :]
 
-    Pb = torch.matmul(projector, b)
-    Pbe = torch.matmul(Pb, e)
+        PA = torch.matmul(projector, a_dense)
+        PAX = torch.matmul(PA, X)
 
-    cumulator = aTURs - aTbe - (PURs - PAX - Pbe)
+        Pb = torch.matmul(projector, b)
+        Pbe = torch.matmul(Pb, e)
+
+        ring_term = PURs - PAX - Pbe
+
+        cumulator -= ring_term
+
     cumulator = torch.matmul(cumulator, V)
 
     ata = torch.matmul(a_dense.t(), a_dense)
@@ -245,16 +256,17 @@ def temporal_update_HALS(U_sparse, R, s, V, W, a_sparse, c, b, c_nonneg=True):
     else:
         threshold_function = lambda x: x
 
-    for i in range(c.shape[1]):
-        curr_index = torch.arange(i, i + 1, device=device)
-        a_ia = torch.index_select(ata, 0, curr_index)
+    if blocks is None:
+        blocks = torch.arange(c.shape[1], device=device)
+    for index_to_select in blocks:
+        a_ia = torch.index_select(ata, 0, index_to_select)
         a_iaC = torch.matmul(a_ia, c.t())
 
-        curr_trace = torch.index_select(c, 1, curr_index)
+        curr_trace = torch.index_select(c, 1, index_to_select)
         curr_trace += (
-            (torch.index_select(cumulator, 0, curr_index) - a_iaC) / ata_d[i]
+            (torch.index_select(cumulator, 0, index_to_select) - a_iaC) / ata_d[index_to_select]
         ).t()
         curr_trace = threshold_function(curr_trace)
-        c[:, [i]] = curr_trace
+        c[:, index_to_select] = torch.squeeze(curr_trace)
 
     return c

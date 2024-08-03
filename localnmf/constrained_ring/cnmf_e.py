@@ -1,4 +1,6 @@
 import math
+from xml.sax.handler import property_encoding
+
 import torch
 import numpy as np
 from localnmf import ca_utils
@@ -7,13 +9,13 @@ import logging
 class ring_model:
 
     def __init__(self, d1, d2, r, empty=False, device='cpu', order="F"):
-        if empty:
+        self._empty=empty
+        if self.empty:
             row = torch.Tensor([]).to(device).long()
             col = torch.Tensor([]).to(device).long()
             value = torch.Tensor([]).to(device).float()
             self.W_mat = torch.sparse_coo_tensor(torch.stack([row, col]), value, (d1 * d2, d1 * d2)).coalesce()
             self.weights = torch.zeros((d1 * d2, 1), device=device)
-            self.empty = True
         else:
             row_coordinates, column_coordinates, values = self._construct_init_values(d1, d2, r, device=device,
                                                                                       order=order)
@@ -21,7 +23,10 @@ class ring_model:
             self.W_mat = torch.sparse_coo_tensor(torch.stack([row_coordinates,
                                                   column_coordinates]), values, (d1 * d2, d1 * d2)).coalesce()
             self.weights = torch.ones((d1 * d2, 1), device=device)
-            self.empty = False
+
+    @property
+    def empty(self):
+        return self._empty
 
     def _construct_init_values(self, d1, d2, r, device='cuda', order="F"):
         a, b = torch.meshgrid((torch.arange(d1, device=device), torch.arange(d2, device=device)), indexing='ij')

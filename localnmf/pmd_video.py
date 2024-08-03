@@ -449,9 +449,7 @@ def process_custom_signals(a_init, U_sparse, R, s, V, order="C", c_nonneg=True):
 
     # Baseline update followed by 'c' update:
     b = regression_update.baseline_update(uv_mean, a, c)
-    c = regression_update.temporal_update_HALS(
-        U_sparse, R, s, V, W, a, c, b, c_nonneg=c_nonneg
-    )
+    c = regression_update.temporal_update_hals(U_sparse, R, s, V, a, c, b, W, c_nonneg=c_nonneg)
 
     c_norm = torch.linalg.norm(c, dim=0)
     nonzero_dim1 = torch.nonzero(c_norm).squeeze()
@@ -900,16 +898,12 @@ def spatial_temporal_ini_UV(
 
     for _ in range(1):
         b_torch = regression_update.baseline_update(uv_mean, a_sparse, c_final)
-        c_final = regression_update.temporal_update_HALS(
-            u_sparse, r, s, v, w, a_sparse, c_final, b_torch
-        )
+        c_final = regression_update.temporal_update_hals(u_sparse, r, s, v, a_sparse, c_final, b_torch, w=w)
 
         b_torch = regression_update.baseline_update(
             uv_mean.to(device), a_sparse, c_final
         )
-        a_sparse = regression_update.spatial_update_HALS(
-            u_sparse, r, s, v, w, a_sparse, c_final, b_torch
-        )
+        a_sparse = regression_update.spatial_update_hals(u_sparse, r, s, v, a_sparse, c_final, b_torch, w=w)
 
     # Now return only the newly initialized components
     col_index_tensor = torch.arange(start=k, end=k + len(comps), step=1, device=device)
@@ -2367,17 +2361,8 @@ class PMDVideo:
     def temporal_update(self, denoise=False, plot_en=False, c_nonneg=True):
         self._assert_initialization()
         self._assert_ready_to_demix()
-        self.c = regression_update.temporal_update_HALS(
-            self.U_sparse,
-            self.R,
-            self.s,
-            self.V,
-            self.W,
-            self.a,
-            self.c,
-            self.b,
-            c_nonneg=c_nonneg,
-        )
+        self.c = regression_update.temporal_update_hals(self.U_sparse, self.R, self.s, self.V, self.a, self.c, self.b,
+                                                        self.W, c_nonneg=c_nonneg)
 
         # Denoise 'c' components if desired
         if denoise:
@@ -2415,17 +2400,8 @@ class PMDVideo:
             )
 
     def spatial_update(self, plot_en=False):
-        self.a = regression_update.spatial_update_HALS(
-            self.U_sparse,
-            self.R,
-            self.s,
-            self.V,
-            self.W,
-            self.a,
-            self.c,
-            self.b,
-            mask_ab=self.mask_ab,
-        )
+        self.a = regression_update.spatial_update_hals(self.U_sparse, self.R, self.s, self.V, self.a, self.c, self.b,
+                                                       w=self.W, mask_ab=self.mask_ab)
 
         ## Delete Bad Components
         temp = (
