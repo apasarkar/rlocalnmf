@@ -173,9 +173,9 @@ def spatial_update_hals(
 
 
 ##Compute the projection matrix:
-def get_projection_matrix_temporal_HALS_routine(U_sparse, R, W, a_dense, a_sparse):
-    aU = torch.sparse.mm(U_sparse.t(), a_dense).t()
-    aUR = torch.matmul(aU, R)
+def get_projection_matrix_temporal_HALS_routine(U_sparse, R, W, a_sparse):
+    aU = torch.sparse.mm(a_sparse.t(), U_sparse)
+    aUR = torch.sparse.mm(aU, R)
     aURRt = torch.matmul(aUR, R.t())
     aURRtUt = torch.sparse.mm(U_sparse, aURRt.t()).t()  # Shape here is N x d
     projector = W.apply_model_left(aURRtUt, a_sparse)
@@ -183,44 +183,39 @@ def get_projection_matrix_temporal_HALS_routine(U_sparse, R, W, a_dense, a_spars
     return projector
 
 
-def temporal_update_hals(U_sparse, R, s, V, a_sparse, c, b, w=None, c_nonneg=True, blocks=None):
+def temporal_update_hals(u_sparse, r, s, v, a_sparse, c, b, w=None, c_nonneg=True, blocks=None):
     """
     Inputs:
          Note: The first four parameters are the "PMD" representation of the data: it is given in a traditional SVD form: URsV, where UR is the left orthogonal basis, 's' represents the diagonal matrix, and V is the right orthogonal basis.
-        U_sparse: torch.sparse_coo_tensor. Sparse matrix, with dimensions (d x R)
-        R: torch.Tensor. Dimensions (R, R') where R' is roughly equal to R (it may be equal to R+1)
+        u_sparse: torch.sparse_coo_tensor. Sparse matrix, with dimensions (d x R)
+        r: torch.Tensor. Dimensions (R, R') where R' is roughly equal to R (it may be equal to R+1)
         s: torch.Tensor. This is the diagonal of a R' x R' matrix (so it is represented by a R' shaped tensor)
-        V: torch.Tensor. Dimensions R' x T. Dimensions R' x T, where T is the number of frames, where all rows are orthonormal.
+        v: torch.Tensor. Dimensions R' x T. Dimensions R' x T, where T is the number of frames, where all rows are orthonormal.
             Note:  V must contain the 1 x T vector of all 1's in its rowspan.
-        W: (d1*d2, d1*d2)-shaped ring model object
+
         a: (d1*d2, k)-shaped torch.sparse_coo_tensor
         c: (T, k)-shaped torch.Tensor
         b: (d1*d2, 1)-shaped torch.Tensor
+        w: (d1*d2, d1*d2)-shaped ring model object
         c_nonneg (bool): Indicates whether "c" should be nonnegative or fully unconstrained. For voltage data, it should be unconstrained; for calcium it should be constrained.
 
     Returns:
         c: (T, k)-shaped np.ndarray. Updated temporal components
     """
-    device = V.device
+    device = v.device
 
     ##Precompute quantities used throughout all iterations
-    a_dense = a_sparse.to_dense()
 
     # Find the tensor, e, (a 1 x R' shaped tensor) such that eV gives a 1 x T tensor consisting of all 1's
-    e = torch.matmul(torch.ones([1, V.shape[1]], device=device), V.t())
-
-    # Find the tensor, X (a N x K shaped tensor) such that XV closely approximates c.T
-    X = torch.matmul(
-        V, c
-    ).t()  # This is just a linear subspace projection of c.T onto the rowspace of V; can reuse above computation for this
+    e = torch.matmul(torch.ones([1, v.shape[1]], device=device), v.t())
 
     # Step 1: Get aTURs
-    aTU = torch.sparse.mm(U_sparse.t(), a_dense).t()
-    aTUR = torch.matmul(aTU, R)
+    aTU = torch.sparse.mm(a_sparse.t(), u_sparse)
+    aTUR = torch.matmul(aTU, r)
     aTURs = aTUR * s[None, :]
 
     # Step 2: Get aTbe
-    aTb = torch.matmul(a_dense.t(), b)
+    aTb = torch.matmul(a_sparse.t(), b)
     aTbe = torch.matmul(aTb, e)
 
     # Step 3:
@@ -228,28 +223,24 @@ def temporal_update_hals(U_sparse, R, s, V, a_sparse, c, b, w=None, c_nonneg=Tru
 
     if w is not None and not w.empty:
         projector = get_projection_matrix_temporal_HALS_routine(
-            U_sparse, R, w, a_dense, a_sparse
+            u_sparse, r, w, a_sparse
         )
-        PU = torch.sparse.mm(U_sparse.t(), projector.t()).t()
-        PUR = torch.matmul(PU, R)
+        PU = torch.sparse.mm(u_sparse.t(), projector.t()).t()
+        PUR = torch.matmul(PU, r)
         PURs = PUR * s[None, :]
-
-        PA = torch.matmul(projector, a_dense)
-        PAX = torch.matmul(PA, X)
 
         Pb = torch.matmul(projector, b)
         Pbe = torch.matmul(Pb, e)
 
-        ring_term = PURs - PAX - Pbe
+        ring_term = PURs - Pbe
 
         cumulator -= ring_term
 
-    cumulator = torch.matmul(cumulator, V)
+    cumulator = torch.matmul(cumulator, v)
 
-    ata = torch.matmul(a_dense.t(), a_dense)
-
-    ata_d = torch.diag(ata)
-    ata_d[ata_d == 0] = 1  # For division-safety
+    ata = torch.sparse.mm(a_sparse.t(), a_sparse)
+    ata = ata.to_dense()
+    diagonals = torch.diag(ata)
 
     if c_nonneg:
         threshold_function = torch.nn.ReLU()
@@ -264,7 +255,7 @@ def temporal_update_hals(U_sparse, R, s, V, a_sparse, c, b, w=None, c_nonneg=Tru
 
         curr_trace = torch.index_select(c, 1, index_to_select)
         curr_trace += (
-            (torch.index_select(cumulator, 0, index_to_select) - a_iaC) / ata_d[index_to_select]
+            (torch.index_select(cumulator, 0, index_to_select) - a_iaC) / diagonals[index_to_select]
         ).t()
         curr_trace = threshold_function(curr_trace)
         c[:, index_to_select] = torch.squeeze(curr_trace)
