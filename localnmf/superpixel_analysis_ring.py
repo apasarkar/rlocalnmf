@@ -205,8 +205,7 @@ def update_AC_bg_l2_Y_ring_lowrank(pmd_video, maxiter,corr_th_fix, corr_th_fix_s
     pmd_video.precompute_quantities(maxiter, ring_radius)
     pmd_video.compute_standard_correlation_image()
     pmd_video.compute_residual_correlation_image()
-
-
+    pmd_video.update_hals_scheduler()
 
     
     if denoise is None: 
@@ -234,7 +233,8 @@ def update_AC_bg_l2_Y_ring_lowrank(pmd_video, maxiter,corr_th_fix, corr_th_fix_s
         pmd_video.temporal_update(denoise=denoise_flag, plot_en=plot_en, c_nonneg=c_nonneg)
            
         if update_after and ((iters+1) % update_after == 0):
-            
+
+
             ##First: Compute correlation images
             pmd_video.compute_standard_correlation_image()
             pmd_video.compute_residual_correlation_image()
@@ -243,7 +243,7 @@ def update_AC_bg_l2_Y_ring_lowrank(pmd_video, maxiter,corr_th_fix, corr_th_fix_s
             
             #TODO: Eliminate the need for moving a and c off GPU
             pmd_video.merge_signals(merge_corr_thr, merge_overlap_thr, plot_en, data_order)
-
+            pmd_video.update_hals_scheduler()
             
 
     pmd_video.delete_precomputed()

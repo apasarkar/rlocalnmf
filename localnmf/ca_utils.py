@@ -9,6 +9,68 @@ import scipy.sparse
 import matplotlib.pyplot as plt
 from mpl_toolkits.axes_grid1 import make_axes_locatable
 import torch
+from typing import *
+import networkx as nx
+from collections import defaultdict
+
+
+def construct_graph_from_sparse_tensor(adj_tensor: torch.sparse_coo_tensor) -> nx.Graph:
+    """
+    Constructs a NetworkX graph from a sparse COO tensor representing an adjacency matrix.
+
+    Args:
+        adj_tensor (torch.sparse_coo_tensor): A sparse COO tensor representing the adjacency matrix of the graph.
+
+    Returns:
+        nx.Graph: A NetworkX graph constructed from the sparse tensor, including all nodes.
+    """
+    # Move tensor to CPU if it's on CUDA
+
+    curr_indices = adj_tensor.indices().cpu()
+    # Convert indices to NumPy arrays
+    rows = curr_indices[0].numpy()
+    cols = curr_indices[1].numpy()
+
+    # Determine the number of nodes
+    num_nodes = adj_tensor.shape[0]
+
+    # Create the NetworkX graph
+    graph = nx.Graph()
+
+    # Add all nodes to the graph
+    graph.add_nodes_from(range(num_nodes))
+
+    # Add edges to the graph
+    graph.add_edges_from(zip(rows, cols))
+
+    return graph
+
+def color_and_get_tensors(graph: nx.Graph, device: str) -> List[torch.Tensor]:
+    """
+    Color the nodes of a graph using a greedy coloring algorithm and convert the
+    resulting color groups into PyTorch tensors.
+
+    Args:
+        graph (nx.Graph): The input graph to be colored.
+
+    Returns:
+        List[torch.Tensor]: A list of PyTorch tensors, where each tensor contains
+        the nodes corresponding to a specific color. The list is ordered by color.
+    """
+    # Compute coloring using greedy algorithm
+    coloring = nx.coloring.greedy_color(graph, strategy="largest_first")
+
+    # Create a dictionary mapping colors to lists of nodes
+    color_to_nodes: Dict[int, List[int]] = defaultdict(list)
+    for node, color in coloring.items():
+        color_to_nodes[color].append(node)
+
+    # Convert lists of nodes to PyTorch tensors
+    color_to_tensors: List[torch.Tensor] = [
+        torch.tensor(nodes, dtype=torch.long).to(device) for nodes in color_to_nodes.values()
+    ]
+
+    return color_to_tensors
 
 
 def torch_sparse_to_scipy_coo(a):

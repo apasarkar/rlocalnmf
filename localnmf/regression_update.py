@@ -254,8 +254,10 @@ def temporal_update_hals(u_sparse, r, s, v, a_sparse, c, b, w=None, c_nonneg=Tru
         a_iaC = torch.matmul(a_ia, c.t())
 
         curr_trace = torch.index_select(c, 1, index_to_select)
+        # import pdb
+        # pdb.set_trace()
         curr_trace += (
-            (torch.index_select(cumulator, 0, index_to_select) - a_iaC) / diagonals[index_to_select]
+            (torch.index_select(cumulator, 0, index_to_select) - a_iaC) / torch.unsqueeze(diagonals[index_to_select], -1)
         ).t()
         curr_trace = threshold_function(curr_trace)
         c[:, index_to_select] = torch.squeeze(curr_trace)

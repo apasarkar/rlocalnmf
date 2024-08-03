@@ -1,22 +1,21 @@
 import torch
 import numpy as np
 import math
-import networkx as nx
 import matplotlib.pyplot as plt
 from matplotlib.figure import Figure
 from scipy import ndimage as ndimage
-import scipy.stats as ss
 import scipy.ndimage
 import scipy.signal
 import scipy.sparse
 import scipy
 import logging
 from typing import *
+import networkx as nx
 
 from mpl_toolkits.axes_grid1 import make_axes_locatable
 
 from localnmf import ca_utils
-from localnmf.ca_utils import add_1s_to_rowspan, denoise
+from localnmf.ca_utils import add_1s_to_rowspan, denoise, construct_graph_from_sparse_tensor, color_and_get_tensors
 from localnmf import regression_update
 from localnmf.constrained_ring.cnmf_e import ring_model, ring_model_update
 
@@ -409,7 +408,7 @@ def PMD_setup_routine(U_sparse, R, s, V):
     return U_sparse, R, s, V
 
 
-def process_custom_signals(a_init, U_sparse, R, s, V, order="C", c_nonneg=True):
+def process_custom_signals(a_init, U_sparse, R, s, V, order="C", c_nonneg=True, blocks=None):
     """
     Custom initialization: Given a set of neuron spatial footprints ('a'), this provides initial estimates to the other component (temporal traces, baseline, fluctuating background)
     Terms:
@@ -449,7 +448,7 @@ def process_custom_signals(a_init, U_sparse, R, s, V, order="C", c_nonneg=True):
 
     # Baseline update followed by 'c' update:
     b = regression_update.baseline_update(uv_mean, a, c)
-    c = regression_update.temporal_update_hals(U_sparse, R, s, V, a, c, b, W, c_nonneg=c_nonneg)
+    c = regression_update.temporal_update_hals(U_sparse, R, s, V, a, c, b, w=W, c_nonneg=c_nonneg, blocks=blocks)
 
     c_norm = torch.linalg.norm(c, dim=0)
     nonzero_dim1 = torch.nonzero(c_norm).squeeze()
@@ -2065,7 +2064,7 @@ def spatial_comp_plot(a, corr_img_all_r, num_list=None, ini=False, order="C"):
 class PMDVideo:
 
     def __init__(
-        self, U_sparse, R, s, V, dimensions, mean, var, data_order="F", device="cpu"
+        self, U_sparse, R, s, V, dimensions, mean, var, data_order="F", device="cpu", blocks=None
     ):
         """
         From now on: U_sparse is scipy.sparse.coo_matrix
@@ -2074,6 +2073,7 @@ class PMDVideo:
 
         """
         self.device = device
+        self.blocks = blocks
         self.data_order = data_order
         self.shape = dimensions
         self.R = torch.Tensor(R).float().to(self.device)
@@ -2358,11 +2358,19 @@ class PMDVideo:
             self.a,
         )
 
+    def update_hals_scheduler(self):
+        """
+        Lots of HALS updates can be done in parallel because the underlying signals don't overlap
+        """
+        adjacency_mat = torch.sparse.mm(self.a.t(), self.a)
+        graph = construct_graph_from_sparse_tensor(adjacency_mat)
+        self.blocks = color_and_get_tensors(graph, self.device)
+
     def temporal_update(self, denoise=False, plot_en=False, c_nonneg=True):
         self._assert_initialization()
         self._assert_ready_to_demix()
         self.c = regression_update.temporal_update_hals(self.U_sparse, self.R, self.s, self.V, self.a, self.c, self.b,
-                                                        self.W, c_nonneg=c_nonneg)
+                                                        self.W, c_nonneg=c_nonneg, blocks=self.blocks)
 
         # Denoise 'c' components if desired
         if denoise:
@@ -2399,9 +2407,10 @@ class PMDVideo:
                 order=self.data_order,
             )
 
+
     def spatial_update(self, plot_en=False):
         self.a = regression_update.spatial_update_hals(self.U_sparse, self.R, self.s, self.V, self.a, self.c, self.b,
-                                                       w=self.W, mask_ab=self.mask_ab)
+                                                       w=self.W, mask_ab=self.mask_ab, blocks=self.blocks)
 
         ## Delete Bad Components
         temp = (
