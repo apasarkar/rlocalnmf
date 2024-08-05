@@ -87,8 +87,6 @@ def spatial_update_hals(
 
     TODO: Make 'a' input a sparse matrix
     """
-    import pdb
-
     # Load all values onto device in torch
     device = v.device
 
@@ -105,11 +103,6 @@ def spatial_update_hals(
     # Find the tensor, e, (a 1 x R' shaped tensor) such that eV gives a 1 x T tensor consisting of all 1's
     e = torch.matmul(torch.ones([1, v.shape[1]], device=device), v.t())
 
-    # Find the tensor, X (a N x K shaped tensor) such that XV closely approximates c.T
-    X = (
-        Vc.t()
-    )  # This is just a linear subspace projection of c.T onto the rowspace of V; can reuse above computation for this
-
     C_prime = torch.matmul(c.t(), c)
     C_prime_diag = torch.diag(C_prime)
     C_prime_diag[C_prime_diag == 0] = 1  # For division safety
@@ -124,7 +117,6 @@ def spatial_update_hals(
     ### TODO: Optimize this later to avoid computing D x r matrices...?
     URsVc = torch.sparse.mm(u_sparse, torch.matmul(r, s[:, None] * Vc))
     beVc = torch.matmul(b, torch.matmul(e, Vc))
-    aXVc = torch.sparse.mm(a_sparse, torch.matmul(X, Vc))
 
 
     cumulator = (
@@ -133,7 +125,7 @@ def spatial_update_hals(
     )
 
     if w is not None and not w.empty:
-        residual_term = URsVc - beVc - aXVc
+        residual_term = URsVc - beVc
 
         ring_term = project_U_HALS(
             u_sparse,
