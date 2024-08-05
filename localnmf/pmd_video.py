@@ -17,7 +17,7 @@ from mpl_toolkits.axes_grid1 import make_axes_locatable
 from localnmf import ca_utils
 from localnmf.ca_utils import add_1s_to_rowspan, denoise, construct_graph_from_sparse_tensor, color_and_get_tensors
 from localnmf import regression_update
-from localnmf.constrained_ring.cnmf_e import ring_model, ring_model_update
+from localnmf.constrained_ring.cnmf_e import RingModel, ring_model_update
 
 
 def make_mask_dynamic(corr_img_all_r, corr_percent, mask_a, data_order="C"):
@@ -442,7 +442,7 @@ def process_custom_signals(a_init, U_sparse, R, s, V, order="C", c_nonneg=True, 
         .to(device)
     )
     c = torch.zeros([dims[2], a_init.shape[2]], device=device, dtype=torch.float)
-    W = ring_model(dims[0], dims[1], 1, device=device, order=order, empty=True)
+    W = RingModel(dims[0], dims[1], 1, device=device, order=order, empty=True)
 
     uv_mean = get_mean_data(U_sparse, R, s, V)
 
@@ -893,7 +893,7 @@ def spatial_temporal_ini_UV(
     uv_mean = get_mean_data(u_sparse, r, s, v)
     mean_ac = torch.sparse.mm(a_sparse, torch.mean(c_final.t(), dim=1, keepdim=True))
     uv_mean -= mean_ac
-    w = ring_model(dims[0], dims[1], 1, device=device, empty=True)
+    w = RingModel(dims[0], dims[1], 1, device=device, empty=True)
 
     for _ in range(1):
         b_torch = regression_update.baseline_update(uv_mean, a_sparse, c_final)
@@ -2142,7 +2142,7 @@ class PMDVideo:
 
         ## Initialize ring model object for neuropil estimation
         ring_placeholder = 5
-        self.W = ring_model(
+        self.W = RingModel(
             self.d1,
             self.d2,
             ring_placeholder,
@@ -2296,7 +2296,7 @@ class PMDVideo:
             print("MASK IS NOT NONE")
         self.mask_ab = self.mask_a
 
-        self.W = ring_model(
+        self.W = RingModel(
             self.d1,
             self.d2,
             self.r,
@@ -2340,7 +2340,7 @@ class PMDVideo:
 
         if self.W.empty:
             # This means we need to create the actual W matrix (i.e. it can't just be empty)
-            self.W = ring_model(
+            self.W = RingModel(
                 self.d1,
                 self.d2,
                 self.r,

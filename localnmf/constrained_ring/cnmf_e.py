@@ -6,7 +6,7 @@ import numpy as np
 from localnmf import ca_utils
 import logging
 
-class ring_model:
+class RingModel:
 
     def __init__(self, d1, d2, r, empty=False, device='cpu', order="F"):
         self._empty=empty
@@ -15,18 +15,26 @@ class ring_model:
             col = torch.Tensor([]).to(device).long()
             value = torch.Tensor([]).to(device).float()
             self.W_mat = torch.sparse_coo_tensor(torch.stack([row, col]), value, (d1 * d2, d1 * d2)).coalesce()
-            self.weights = torch.zeros((d1 * d2, 1), device=device)
+            self._weights = torch.zeros((d1 * d2, 1), device=device)
         else:
             row_coordinates, column_coordinates, values = self._construct_init_values(d1, d2, r, device=device,
                                                                                       order=order)
             torch.cuda.empty_cache()
             self.W_mat = torch.sparse_coo_tensor(torch.stack([row_coordinates,
                                                   column_coordinates]), values, (d1 * d2, d1 * d2)).coalesce()
-            self.weights = torch.ones((d1 * d2, 1), device=device)
+            self._weights = torch.ones((d1 * d2, 1), device=device)
 
     @property
     def empty(self):
         return self._empty
+
+    @property
+    def weights(self):
+        return self._weights
+
+    @weights.setter
+    def weights(self, tensor):
+        self._weights = tensor
 
     def _construct_init_values(self, d1, d2, r, device='cuda', order="F"):
         a, b = torch.meshgrid((torch.arange(d1, device=device), torch.arange(d2, device=device)), indexing='ij')
@@ -84,12 +92,6 @@ class ring_model:
         values = values[good_entries]
 
         return row_coordinates, column_coordinates, values.float()
-
-    def set_weights(self, tensor):
-        """
-        Tensor should have shape (d1*d2, 1)
-        """
-        self.weights = tensor
 
     def apply_model_right(self, tensor, a_sparse):
         """
@@ -237,4 +239,4 @@ def ring_model_update(U_sparse, R, V, W, c, b, a, num_samples=1000):
     values = torch.nan_to_num(numerator / denominator, nan=0.0, posinf=0.0, neginf=0.0)
     threshold_function = torch.nn.ReLU()
     values = threshold_function(values)
-    W.set_weights(values[:, None])
+    W.weights = values[:, None]
