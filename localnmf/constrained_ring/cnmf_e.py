@@ -1,5 +1,4 @@
 import math
-from xml.sax.handler import property_encoding
 
 import torch
 import numpy as np
@@ -37,61 +36,43 @@ class RingModel:
         self._weights = tensor
 
     def _construct_init_values(self, d1, d2, r, device='cuda', order="F"):
-        a, b = torch.meshgrid((torch.arange(d1, device=device), torch.arange(d2, device=device)), indexing='ij')
+        original_indices = torch.arange(d1*d2, device=device, dtype=torch.long)
         dim1_spread = torch.arange(-(r + 1), (r + 2), device=device)
         dim2_spread = torch.arange(-(r + 1), (r + 2), device=device)
 
         spr1, spr2 = torch.meshgrid((dim1_spread, dim2_spread), indexing='ij')
         norms = torch.sqrt(spr1 * spr1 + spr2 * spr2)
         outputs = torch.argwhere(torch.logical_and(norms >= r, norms < r + 1)).to(device)
-        logging.debug("number of elts in ring is {}".format(outputs.shape[0]))
-
-        ring_dim1 = dim1_spread[outputs[:, 0]].to(device)
-        ring_dim2 = dim2_spread[outputs[:, 1]].to(device)
-
-        dim1_full = a[:, :, None] + ring_dim1[None, None, :]
-        dim2_full = b[:, :, None] + ring_dim2[None, None, :]
-
-        values = torch.ones_like(dim1_full, device=device).bool()  # float()#.long()
-
-        good_components = torch.logical_and(dim1_full >= 0, dim1_full < d1)
-        good_components = torch.logical_and(good_components, dim2_full >= 0)
-        good_components = torch.logical_and(good_components, dim2_full < d2)
-        logging.debug("the max of good components is {}".format(good_components.max()))
-
-        dim1_full *= good_components
-        dim2_full *= good_components
-        values *= good_components
 
         if order == "C":
-            column_coordinates = d2 * dim1_full + dim2_full
-            del dim1_full
-            del dim2_full
-            row_coordinates = torch.flatten(
-                (d2 * a + b)[:, :, None] + torch.zeros([1, 1, column_coordinates.shape[2]], device=device)).long()
-
-            column_coordinates = torch.flatten(column_coordinates).long()
-            values = torch.flatten(values).bool()
-
+            ring_indices = outputs[:, 0]*d2 + outputs[:, 1]
         elif order == "F":
-            column_coordinates = dim1_full + d1 * dim2_full
-            del dim1_full
-            del dim2_full
-            row_coordinates = torch.flatten(
-                (a + d1 * b)[:, :, None] + torch.zeros([1, 1, column_coordinates.shape[2]], device=device)).long()
-
-            column_coordinates = torch.flatten(column_coordinates).long()
-            values = torch.flatten(values).bool()
-
+            ring_indices = outputs[:, 0] + d1*outputs[:, 1]
         else:
-            raise ValueError("Order must be row-major (C) or column-major (F)")
+            raise ValueError("Not a valid ordering")
+        logging.debug("number of elts in ring is {}".format(outputs.shape[0]))
 
-        good_entries = values > 0
-        row_coordinates = row_coordinates[good_entries]
-        column_coordinates = column_coordinates[good_entries]
-        values = values[good_entries]
+        column_indices = original_indices.unsqueeze(1) + ring_indices.unsqueeze(0)
+        row_indices = original_indices.unsqueeze(1) + torch.zeros((1, ring_indices.shape[0]),
+                                                                  device=device, dtype=torch.long)
 
-        return row_coordinates, column_coordinates, values.float()
+        column_indices = column_indices.flatten()
+        row_indices = row_indices.flatten()
+
+        good_components = torch.logical_and(column_indices >= 0, column_indices <d1*d2)
+        good_components = torch.logical_and(good_components, row_indices >= 0)
+        good_components = torch.logical_and(good_components, row_indices < d1*d2)
+
+        column_indices = column_indices[good_components]
+        row_indices = row_indices[good_components]
+        values = torch.ones(row_indices.shape, device=device, dtype=torch.float32)
+
+        return column_indices, row_indices, values
+
+    def generate_coo_ring_indices(self, rows: torch.tensor):
+        """
+        Given the row indices, this function makes row, column, value indices to construct a subset of the ring matrix
+        """
 
     def apply_model_right(self, tensor, a_sparse):
         """
