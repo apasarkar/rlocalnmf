@@ -39,35 +39,57 @@ class RingModel:
         original_indices = torch.arange(d1*d2, device=device, dtype=torch.long)
         dim1_spread = torch.arange(-(r + 1), (r + 2), device=device)
         dim2_spread = torch.arange(-(r + 1), (r + 2), device=device)
-
         spr1, spr2 = torch.meshgrid((dim1_spread, dim2_spread), indexing='ij')
         norms = torch.sqrt(spr1 * spr1 + spr2 * spr2)
-        outputs = torch.argwhere(torch.logical_and(norms >= r, norms < r + 1)).to(device)
+        outputs = torch.logical_and(norms >= r, norms < r + 1).to(device)
 
+        dim1_ring = spr1[outputs].flatten().squeeze().long()
+        dim2_ring = spr2[outputs].flatten().squeeze().long()
+
+        #flatten the 2D ring representation to 1D for efficiency
         if order == "C":
-            ring_indices = outputs[:, 0]*d2 + outputs[:, 1]
+            ring_indices = dim1_ring*d2 + dim2_ring
         elif order == "F":
-            ring_indices = outputs[:, 0] + d1*outputs[:, 1]
+            ring_indices = dim1_ring + d1*dim2_ring
         else:
             raise ValueError("Not a valid ordering")
         logging.debug("number of elts in ring is {}".format(outputs.shape[0]))
 
+        #Define the "column indices" of the (d1*d2, d1*d2) sparse matrix (every row is a ring) in 1D representation.
         column_indices = original_indices.unsqueeze(1) + ring_indices.unsqueeze(0)
         row_indices = original_indices.unsqueeze(1) + torch.zeros((1, ring_indices.shape[0]),
                                                                   device=device, dtype=torch.long)
 
-        column_indices = column_indices.flatten()
-        row_indices = row_indices.flatten()
+        #preliminary filter
+        good_components = torch.logical_and(column_indices >= 0, column_indices < d1 * d2)
+        if order == "C":
+            '''
+            We get rid of values that are out of bounds
+            '''
+            twod_column_indices = (original_indices % d2).unsqueeze(1) + dim2_ring.unsqueeze(0)
+            good_components = torch.logical_and(good_components, twod_column_indices >= 0)
+            good_components = torch.logical_and(good_components, twod_column_indices < d2)
 
-        good_components = torch.logical_and(column_indices >= 0, column_indices <d1*d2)
-        good_components = torch.logical_and(good_components, row_indices >= 0)
-        good_components = torch.logical_and(good_components, row_indices < d1*d2)
+            twod_row_indices = (original_indices // d2).unsqueeze(1) + dim1_ring.unsqueeze(0)
+            good_components = torch.logical_and(good_components, twod_row_indices >= 0)
+            good_components = torch.logical_and(good_components, twod_row_indices < d1)
+        elif order == "F": #Make sure the vertical indices do not shift by columns
+            '''
+            good_components, as defined above, will filter out columns that are out of bounds, now we filter out rows
+            '''
+            twod_column_indices = (original_indices // d1).unsqueeze(1) + dim2_ring.unsqueeze(0)
+            good_components = torch.logical_and(good_components, twod_column_indices >= 0)
+            good_components = torch.logical_and(good_components, twod_column_indices < d2)
+
+            twod_row_indices = (original_indices % d1).unsqueeze(1) + dim1_ring.unsqueeze(0)
+            good_components = torch.logical_and(good_components, twod_row_indices >= 0)
+            good_components = torch.logical_and(good_components, twod_row_indices < d1)
 
         column_indices = column_indices[good_components]
         row_indices = row_indices[good_components]
         values = torch.ones(row_indices.shape, device=device, dtype=torch.float32)
 
-        return column_indices, row_indices, values
+        return row_indices, column_indices, values
 
     def generate_coo_ring_indices(self, rows: torch.tensor):
         """
