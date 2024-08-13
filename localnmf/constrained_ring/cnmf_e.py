@@ -4,11 +4,16 @@ import torch
 import numpy as np
 from localnmf import ca_utils
 import logging
+import math
 
 class RingModel:
 
-    def __init__(self, d1, d2, r, empty=False, device='cpu', order="F"):
+    def __init__(self, d1, d2, radius, empty=False, device='cpu', order="F", batchsize=200000):
+        self._shape = (d1, d2)
         self._empty=empty
+        self._radius = radius
+        self._device = device
+        self._order = order
         if self.empty:
             row = torch.Tensor([]).to(device).long()
             col = torch.Tensor([]).to(device).long()
@@ -16,12 +21,26 @@ class RingModel:
             self.W_mat = torch.sparse_coo_tensor(torch.stack([row, col]), value, (d1 * d2, d1 * d2)).coalesce()
             self._weights = torch.zeros((d1 * d2, 1), device=device)
         else:
-            row_coordinates, column_coordinates, values = self._construct_init_values(d1, d2, r, device=device,
-                                                                                      order=order)
+            rowcol_stacked, values = self._construct_init_values(batchsize=batchsize)
             torch.cuda.empty_cache()
-            self.W_mat = torch.sparse_coo_tensor(torch.stack([row_coordinates,
-                                                  column_coordinates]), values, (d1 * d2, d1 * d2)).coalesce()
+            self.W_mat = torch.sparse_coo_tensor(rowcol_stacked, values, (d1 * d2, d1 * d2)).coalesce()
             self._weights = torch.ones((d1 * d2, 1), device=device)
+
+    @property
+    def shape(self):
+        return self._shape
+
+    @property
+    def order(self):
+        return self._order
+
+    @property
+    def device(self):
+        return self._device
+
+    @property
+    def radius(self):
+        return self._radius
 
     @property
     def empty(self):
@@ -35,61 +54,78 @@ class RingModel:
     def weights(self, tensor):
         self._weights = tensor
 
-    def _construct_init_values(self, d1, d2, r, device='cuda', order="F"):
-        original_indices = torch.arange(d1*d2, device=device, dtype=torch.long)
-        dim1_spread = torch.arange(-(r + 1), (r + 2), device=device)
-        dim2_spread = torch.arange(-(r + 1), (r + 2), device=device)
+    def _construct_init_values(self, batchsize = 100000):
+        num_rows = self.shape[0]*self.shape[1]
+        num_iterations = math.ceil(num_rows / batchsize)
+        net_rowcol = [] #Store the results of torch.stack([curr_rows, curr_columns])
+        net_values = []
+        for ind in range(num_iterations):
+            start_value = batchsize * ind
+            end_value = min(num_rows, start_value + batchsize)
+            rows_to_process = torch.arange(start_value, end_value, device=self.device, dtype=torch.long)
+            curr_rowcol, curr_values = self._construct_at_indices(rows_to_process)
+            net_rowcol.append(curr_rowcol)
+            net_values.append(curr_values)
+
+        print(curr_rowcol.shape)
+
+        return torch.cat(net_rowcol, dim=1), torch.cat(net_values)
+
+    def _construct_at_indices(self, rows_to_process):
+        d1, d2 = self.shape
+        dim1_spread = torch.arange(-(self.radius + 1), (self.radius + 2), device=self.device)
+        dim2_spread = torch.arange(-(self.radius + 1), (self.radius + 2), device=self.device)
         spr1, spr2 = torch.meshgrid((dim1_spread, dim2_spread), indexing='ij')
         norms = torch.sqrt(spr1 * spr1 + spr2 * spr2)
-        outputs = torch.logical_and(norms >= r, norms < r + 1).to(device)
+        outputs = torch.logical_and(norms >= self.radius, norms < self.radius + 1).to(self.device)
 
         dim1_ring = spr1[outputs].flatten().squeeze().long()
         dim2_ring = spr2[outputs].flatten().squeeze().long()
 
         #flatten the 2D ring representation to 1D for efficiency
-        if order == "C":
+        if self.order == "C":
             ring_indices = dim1_ring*d2 + dim2_ring
-        elif order == "F":
+        elif self.order == "F":
             ring_indices = dim1_ring + d1*dim2_ring
         else:
             raise ValueError("Not a valid ordering")
         logging.debug("number of elts in ring is {}".format(outputs.shape[0]))
 
         #Define the "column indices" of the (d1*d2, d1*d2) sparse matrix (every row is a ring) in 1D representation.
-        column_indices = original_indices.unsqueeze(1) + ring_indices.unsqueeze(0)
-        row_indices = original_indices.unsqueeze(1) + torch.zeros((1, ring_indices.shape[0]),
-                                                                  device=device, dtype=torch.long)
+        column_indices = rows_to_process.unsqueeze(1) + ring_indices.unsqueeze(0)
+        row_indices = rows_to_process.unsqueeze(1) + torch.zeros((1, ring_indices.shape[0]),
+                                                                 device=self.device, dtype=torch.long)
 
         #preliminary filter
         good_components = torch.logical_and(column_indices >= 0, column_indices < d1 * d2)
-        if order == "C":
+        if self.order == "C":
             '''
             We get rid of values that are out of bounds
             '''
-            twod_column_indices = (original_indices % d2).unsqueeze(1) + dim2_ring.unsqueeze(0)
+            twod_column_indices = (rows_to_process % d2).unsqueeze(1) + dim2_ring.unsqueeze(0)
             good_components = torch.logical_and(good_components, twod_column_indices >= 0)
             good_components = torch.logical_and(good_components, twod_column_indices < d2)
 
-            twod_row_indices = (original_indices // d2).unsqueeze(1) + dim1_ring.unsqueeze(0)
+            twod_row_indices = (rows_to_process // d2).unsqueeze(1) + dim1_ring.unsqueeze(0)
             good_components = torch.logical_and(good_components, twod_row_indices >= 0)
             good_components = torch.logical_and(good_components, twod_row_indices < d1)
-        elif order == "F": #Make sure the vertical indices do not shift by columns
+        elif self.order == "F": #Make sure the vertical indices do not shift by columns
             '''
             good_components, as defined above, will filter out columns that are out of bounds, now we filter out rows
             '''
-            twod_column_indices = (original_indices // d1).unsqueeze(1) + dim2_ring.unsqueeze(0)
+            twod_column_indices = (rows_to_process // d1).unsqueeze(1) + dim2_ring.unsqueeze(0)
             good_components = torch.logical_and(good_components, twod_column_indices >= 0)
             good_components = torch.logical_and(good_components, twod_column_indices < d2)
 
-            twod_row_indices = (original_indices % d1).unsqueeze(1) + dim1_ring.unsqueeze(0)
+            twod_row_indices = (rows_to_process % d1).unsqueeze(1) + dim1_ring.unsqueeze(0)
             good_components = torch.logical_and(good_components, twod_row_indices >= 0)
             good_components = torch.logical_and(good_components, twod_row_indices < d1)
 
         column_indices = column_indices[good_components]
         row_indices = row_indices[good_components]
-        values = torch.ones(row_indices.shape, device=device, dtype=torch.float32)
+        values = torch.ones(row_indices.shape, device=self.device, dtype=torch.float32)
 
-        return row_indices, column_indices, values
+        return torch.stack([row_indices, column_indices]), values
 
     def generate_coo_ring_indices(self, rows: torch.tensor):
         """
