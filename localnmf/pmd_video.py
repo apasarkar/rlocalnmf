@@ -17,7 +17,7 @@ from mpl_toolkits.axes_grid1 import make_axes_locatable
 from localnmf import ca_utils
 from localnmf.ca_utils import add_1s_to_rowspan, denoise, construct_graph_from_sparse_tensor, color_and_get_tensors
 from localnmf import regression_update
-from localnmf.constrained_ring.cnmf_e import RingModel, ring_model_update
+from localnmf.constrained_ring.cnmf_e import RingModel
 
 
 def make_mask_dynamic(corr_img_all_r, corr_percent, mask_a, data_order="C"):
