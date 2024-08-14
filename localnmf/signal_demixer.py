@@ -2061,49 +2061,46 @@ def spatial_comp_plot(a, corr_img_all_r, num_list=None, ini=False, order="C"):
 
 
 ##TODO: Finalize the API and make this class inherit "FunctionalVideo"
-class PMDVideo:
+class SignalDemixer:
 
     def __init__(
-        self, U_sparse, R, s, V, dimensions, mean, var, data_order="F", device="cpu", blocks=None
-    ):
+        self, u_sparse: scipy.sparse.coo_matrix, r, s, v, dimensions, data_order="F", device="cpu"):
         """
-        From now on: U_sparse is scipy.sparse.coo_matrix
-        Things to manage:
-            - 'a', 'c' and the like should be optional. If they are not None, it's implied custom init, and we should do the standard custom init pipeline
+        A class to manage the state and execution of the maskNMF demixing pipeline
+
+        Provides methods to run, update, and manage the iterative process of signal demixing from imaging data.
+        It allows for the addition of new signals, tracks the current state of the demixing process,
+        and provides access to the unmixed signals. The class is designed to
+        facilitate interactive usage, enabling users to iteratively refine the demixing results.
+
+        Args:
+            u_sparse (scipy.sparse.coo_matrix): Shape (pixels, PMD Rank1).
+            r (numpy.ndarray): Shape (PMD rank1, PMD rank 2). Together, (u_sparse)(r) give left singular vectors for pmd.
+            s (numpy.ndarray): Shape (PMD rank 2). Singular values for the pmd decomposition
+            v (numpy.ndarray): Shape (pmd rank2, frames). Orthogonal temporal basis vectors for PMD rank.
+            dimensions (tuple): (frames, fov dimension 1, fov dimension 2).
+            mean (numpy.ndarray): (fov dimension 1, fov dimension 2).
+            var (numpy.ndarray): (fov dimension 1, fov dimension 2)
+            data_order (str): The order in which n-dimensional vectors are flattened to 1D
+            device (str): Indicator for pytorch for which device to use ("cpu" or "cuda")
+            blocks (
 
         """
         self.device = device
-        self.blocks = blocks
+        self.blocks = None
         self.data_order = data_order
         self.shape = dimensions
-        self.R = torch.Tensor(R).float().to(self.device)
+        self.r = torch.Tensor(r).float().to(self.device)
         self.s = torch.from_numpy(s).float().to(self.device)
-        self.U_sparse = (
+        self.u_sparse = (
             torch.sparse_coo_tensor(
-                np.array(U_sparse.nonzero()), U_sparse.data, U_sparse.shape
+                np.array(u_sparse.nonzero()), u_sparse.data, u_sparse.shape
             )
             .coalesce()
             .float()
             .to(self.device)
         )
-        self.V = torch.Tensor(V).float().to(self.device)
-        self.mean_img = torch.Tensor(mean).float().to(self.device)
-        self.noise_var_img = torch.Tensor(var).float().to(self.device)
-        self.mean_img_flat = (
-            torch.Tensor(
-                mean.reshape((self.shape[0] * self.shape[1],), order=self.data_order)
-            )
-            .float()
-            .to(self.device)
-        )
-        self.noise_var_img_flat = (
-            torch.Tensor(
-                var.reshape((self.shape[0] * self.shape[1],), order=self.data_order)
-            )
-            .float()
-            .to(self.device)
-        )
-
+        self.v = torch.Tensor(v).float().to(self.device)
         self.d1 = dimensions[0]
         self.d2 = dimensions[1]
         self.T = dimensions[2]
@@ -2113,11 +2110,11 @@ class PMDVideo:
         self.demixing_state = False
         self.precomputed = False
 
-        self.U_sparse, self.R, self.s, self.V = PMD_setup_routine(
-            self.U_sparse, self.R, self.s, self.V
+        self.u_sparse, self.r, self.s, self.v = PMD_setup_routine(
+            self.u_sparse, self.r, self.s, self.v
         )
 
-        self.factorized_ring_term = torch.zeros([self.R.shape[1], self.V.shape[0]], device=self.device)
+        self.factorized_ring_term = torch.zeros([self.r.shape[1], self.v.shape[0]], device=self.device)
         self.batch_size = 1000  # Change this long term
 
         ##These are the "signal" components
@@ -2201,8 +2198,8 @@ class PMDVideo:
                 start_time = time.time()
                 self.dim1_coordinates, self.dim2_coordinates, self.correlations = (
                     get_local_correlation_structure(
-                        self.U_sparse,
-                        torch.matmul(self.R * self.s[None, :], self.V),
+                        self.u_sparse,
+                        torch.matmul(self.r * self.s[None, :], self.v),
                         self.shape,
                         th,
                         order=self.data_order,
@@ -2229,10 +2226,10 @@ class PMDVideo:
                 output_dictionary,
                 superpixel_image,
             ) = superpixel_init(
-                self.U_sparse,
-                self.R,
+                self.u_sparse,
+                self.r,
                 self.s,
-                self.V,
+                self.v,
                 patch_size,
                 self.data_order,
                 self.shape,
@@ -2271,25 +2268,24 @@ class PMDVideo:
         self.a_init, self.mask_a_init, self.c_init, self.b_init = (
             process_custom_signals(
                 custom_init["a"].copy(),
-                self.U_sparse,
-                self.R,
+                self.u_sparse,
+                self.r,
                 self.s,
-                self.V,
+                self.v,
                 order=self.data_order,
             )
         )
 
-    def precompute_quantities(self, maxiter, ring_radius=15):
+    def precompute_quantities(self, maxiter: int, ring_radius: int=15):
         """
         Args:
-            maxiter: int. Number of iterations to be run (long term eliminate this)
-            ring_radius. int, default of 15
+            maxiter (int): Number of iterations to be run (long term eliminate this)
+            ring_radius (int): int, default of 15
         """
         self.finalize_initialization()
-        self.r = ring_radius
         self.K = self.c.shape[1]
         self.res = np.zeros(maxiter)
-        self.uv_mean = get_mean_data(self.U_sparse, self.R, self.s, self.V)
+        self.uv_mean = get_mean_data(self.u_sparse, self.r, self.s, self.v)
         self.num_list = np.arange(self.K)
 
         if self.mask_a is None:
@@ -2301,7 +2297,7 @@ class PMDVideo:
         self.W = RingModel(
             self.d1,
             self.d2,
-            self.r,
+            ring_radius,
             device=self.device,
             order=self.data_order,
             empty=True,
@@ -2336,7 +2332,13 @@ class PMDVideo:
         self._assert_ready_to_demix()
         self.b = regression_update.baseline_update(self.uv_mean, self.a, self.c)
 
-    def fluctuating_baseline_update(self):
+    def fluctuating_baseline_update(self, ring_radius):
+        """
+        Performs a fluctuating baseline update
+        Args:
+            ring_radius (int): If the ring matrix has not been constructed yet (ie it is empty), then this is the
+                radius value used for the new ring model.
+        """
         self._assert_initialization()
         self._assert_ready_to_demix()
 
@@ -2345,7 +2347,7 @@ class PMDVideo:
             self.W = RingModel(
                 self.d1,
                 self.d2,
-                self.r,
+                ring_radius,
                 empty=False,
                 device=self.device,
                 order=self.data_order,
@@ -2354,23 +2356,23 @@ class PMDVideo:
         self.ring_model_weight_update()
 
     def ring_model_weight_update(self, num_samples=1000):
-        batches = math.ceil(self.R.shape[1] / num_samples)
+        batches = math.ceil(self.r.shape[1] / num_samples)
         denominator = 0
         numerator = 0
         self.W.reset_weights()
 
-        X = torch.matmul(self.c.t(), self.V.t())
-        e = torch.matmul(torch.ones([1, self.V.shape[1]], device=self.device), self.V.t())
+        X = torch.matmul(self.c.t(), self.v.t())
+        e = torch.matmul(torch.ones([1, self.v.shape[1]], device=self.device), self.v.t())
 
         for k in range(batches):
             start = num_samples * k
-            end = min(self.R.shape[1], start + num_samples)
+            end = min(self.r.shape[1], start + num_samples)
             indices = torch.arange(start, end, device=self.device)
-            R_crop = torch.index_select(self.R, 1, indices)
+            R_crop = torch.index_select(self.r, 1, indices)
             X_crop = torch.index_select(X, 1, indices)
             e_crop = torch.index_select(e, 1, indices)
 
-            resid_V_basis = (torch.sparse.mm(self.U_sparse, R_crop)*self.s[None, :] -
+            resid_V_basis = (torch.sparse.mm(self.u_sparse, R_crop) * self.s[None, :] -
                              torch.sparse.mm(self.a, X_crop) - torch.matmul(self.b, e_crop))
 
             W_residual = self.W.apply_model_right(resid_V_basis)
@@ -2400,7 +2402,7 @@ class PMDVideo:
     def temporal_update(self, denoise=False, plot_en=False, c_nonneg=True):
         self._assert_initialization()
         self._assert_ready_to_demix()
-        self.c = regression_update.temporal_update_hals(self.U_sparse, self.R, self.s, self.V, self.a, self.c, self.b,
+        self.c = regression_update.temporal_update_hals(self.u_sparse, self.r, self.s, self.v, self.a, self.c, self.b,
                                                         self.W, c_nonneg=c_nonneg, blocks=self.blocks)
 
         # Denoise 'c' components if desired
@@ -2440,7 +2442,7 @@ class PMDVideo:
 
 
     def spatial_update(self, plot_en=False):
-        self.a = regression_update.spatial_update_hals(self.U_sparse, self.R, self.s, self.V, self.a, self.c, self.b,
+        self.a = regression_update.spatial_update_hals(self.u_sparse, self.r, self.s, self.v, self.a, self.c, self.b,
                                                        w=self.W, mask_ab=self.mask_ab, blocks=self.blocks)
 
         ## Delete Bad Components
@@ -2480,9 +2482,9 @@ class PMDVideo:
         )
         c_device = torch.from_numpy(self.c).float().to(self.device)
         return local_correlation_mat(
-            self.U_sparse,
-            self.R * self.s[None, :],
-            self.V,
+            self.u_sparse,
+            self.r * self.s[None, :],
+            self.v,
             self.shape,
             pseudo,
             a=a_device,
@@ -2509,9 +2511,9 @@ class PMDVideo:
             c_device = None
         return single_pixel_correlation_image(
             row_index,
-            self.U_sparse,
-            self.R * self.s[None, :],
-            self.V,
+            self.u_sparse,
+            self.r * self.s[None, :],
+            self.v,
             a=a_device,
             c=c_device,
             batch_size=self.batch_size,
@@ -2519,9 +2521,9 @@ class PMDVideo:
 
     def compute_standard_correlation_image(self):
         self.standard_correlation_image = vcorrcoef_UV_noise(
-            self.U_sparse,
-            self.R * self.s[None, :],
-            self.V,
+            self.u_sparse,
+            self.r * self.s[None, :],
+            self.v,
             self.c,
             batch_size=self.batch_size,
             device=self.device,
@@ -2530,9 +2532,9 @@ class PMDVideo:
     # TODO: Profile this to see if you can precompute some quantities ahead of time
     def compute_residual_correlation_image(self):
         self.residual_correlation_image = vcorrcoef_resid(
-            self.U_sparse,
-            self.R * self.s[None, :],
-            self.V,
+            self.u_sparse,
+            self.r * self.s[None, :],
+            self.v,
             self.a,
             self.c,
             batch_size=self.batch_size,
@@ -2638,77 +2640,6 @@ class PMDVideo:
             .to(self.device)
         )
 
-    def get_PMD_row(self, row_index, rescale=False):
-        """
-        Utility function for accessing a single row of the PMD denoised data
-        Inputs:
-            row_index. int. The pixel of the movie to load. Note that we flatten the 2D FOV into a 1D vector and this indexing refers to indexing into this 1D vector.
-            rescale: boolean. PMD normalizes the data; for display purposes we may want to undo this normalization. Setting rescale = True accomplishes that.
-
-        """
-        assert (
-            0 <= row_index and row_index < self.U_sparse.shape[0]
-        ), "Row Index is out of range"
-
-        row_index_tensor = torch.arange(row_index, row_index + 1, device=self.device)
-        my_row = torch.index_select(self.U_sparse, 0, row_index_tensor).coalesce()
-        my_row_R = torch.sparse.mm(my_row, self.R)
-        my_row_R = my_row_R * self.s[None, :]
-        my_row_RV = torch.matmul(my_row_R, self.V)
-
-        if rescale:
-            my_row_RV = (
-                my_row_RV * self.noise_var_img_flat[row_index]
-                + self.mean_img_flat[row_index]
-            )
-
-        return my_row_RV
-
-    def get_PMD_frame(self, frame, rescale=False):
-        """
-        Returns the index of a frame of the movie (this is pythonic indexing, so to generate the first frame, you should use frame = 0)
-        Inputs:
-            frame: int. The frame of the movie to load
-            rescale: boolean. PMD normalizes the data; for display purposes we may want to undo this normalization. Setting rescale = True accomplishes that.
-        """
-        assert (
-            0 <= frame and frame < self.V.shape[1]
-        ), "Requested frame is out of bounds"
-
-        curr_index = torch.arange(frame, frame + 1, device=self.device)
-        curr_sV = self.s[:, None] * torch.index_select(self.V, 1, curr_index)
-        RsV = torch.matmul(self.R, curr_sV)
-        URsV = torch.squeeze(torch.sparse.mm(self.U_sparse, RsV))
-
-        if self.data_order == "C":
-            return mov
-        elif self.data_order == "F":
-            output = reshape_fortran(URsV, self.shape[:2])
-        else:
-            raise ValueError("Invalid order")
-
-        if rescale:
-            output = output * self.noise_var_img + self.mean_img
-
-        return output
-
-    def get_background_row(self, row_index):
-        # Add assert statement to make sure there even is "a"
-        assert (
-            self.a is not None
-        ), "There are no signals, so the background estimate will not be valid"
-        assert (
-            self.demixing_state is False
-        ), "This function is currently meant to be run after demixing, not during it"
-        return self.W.compute_fluctuating_background_row(
-            self.U_sparse,
-            self.R,
-            self.s,
-            self.V,
-            self.active_weights,
-            self.b,
-            row_index,
-        )
 
     def reset(self):
         """
@@ -2736,17 +2667,17 @@ class PMDVideo:
 
 
     def export_factorized_ring_model(self):
-        sparse_component = torch.sparse.mm(self.U_sparse.T, self.W.weights)
+        sparse_component = torch.sparse.mm(self.u_sparse.T, self.W.weights)
         sparse_component = torch.sparse.mm(sparse_component, self.W.ring_mat)
         sparse_component = torch.sparse.mm(sparse_component, self.W.support)
 
-        sparse_component_U = torch.sparse.mm(sparse_component, self.U_sparse)
-        sparse_component_URs = torch.sparse.mm(sparse_component_U, self.R)*self.s[None, :]
+        sparse_component_U = torch.sparse.mm(sparse_component, self.u_sparse)
+        sparse_component_URs = torch.sparse.mm(sparse_component_U, self.r) * self.s[None, :]
 
-        e = torch.matmul(torch.ones([1, self.V.shape[1]], device=self.device), self.V.t())
+        e = torch.matmul(torch.ones([1, self.v.shape[1]], device=self.device), self.v.t())
         sparse_component_be = torch.sparse.mm(sparse_component, self.b) @ e
 
-        self.factorized_ring_term = torch.matmul(self.R.T, sparse_component_URs - sparse_component_be)
+        self.factorized_ring_term = torch.matmul(self.r.T, sparse_component_URs - sparse_component_be)
 
 
     def brightness_order_and_return_state(self):
@@ -2785,6 +2716,7 @@ class PMDVideo:
         self.correlations = None
         self._th = None
         self._robust_corr_term = None
+        self.blocks = None
 
 
         return self.a, self.c, self.b, self.factorized_ring_term, self.res, corr_img_all_r, self.num_list

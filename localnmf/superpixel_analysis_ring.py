@@ -183,7 +183,7 @@ def demix_whole_data_robust_ring_lowrank(pmd_video, cut_off_point=[0.95,0.9], le
         plt.show();
     
     W_final = W.create_complete_ring_matrix(a)
-    fin_rlt = {'U_sparse': pmd_video.U_sparse.cpu().to_scipy(layout='csr'), 'R': pmd_video.R.cpu().numpy(), 'V': pmd_video.V.cpu().numpy(), 'a':a, 'c':c, 'b':b, "W":W_final, 'res':res, 'corr_img_all_r':corr_img_all_r, 'num_list':num_list, 'data_order': order, 'data_shape':(d1, d2, T)};
+    fin_rlt = {'U_sparse': pmd_video.u_sparse.cpu().to_scipy(layout='csr'), 'R': pmd_video.r.cpu().numpy(), 'V': pmd_video.v.cpu().numpy(), 'a':a, 'c':c, 'b':b, "W":W_final, 'res':res, 'corr_img_all_r':corr_img_all_r, 'num_list':num_list, 'data_order': order, 'data_shape':(d1, d2, T)};
     
     
     if pass_num > 1:
@@ -223,7 +223,7 @@ def update_AC_bg_l2_Y_ring_lowrank(pmd_video, maxiter,corr_th_fix, corr_th_fix_s
         pmd_video.static_baseline_update()
         
         if iters >= skips:
-            pmd_video.fluctuating_baseline_update()
+            pmd_video.fluctuating_baseline_update(ring_radius)
         else:
             pass
         
