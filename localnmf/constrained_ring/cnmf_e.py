@@ -1,14 +1,26 @@
-import math
-
 import torch
-import numpy as np
+import scipy
 from localnmf import ca_utils
 import logging
 import math
+from typing import *
 
 class RingModel:
 
-    def __init__(self, d1, d2, radius, empty=False, device='cpu', order="F", batchsize=200000):
+    def __init__(self, d1: int, d2: int, radius: int, empty: bool=False, device: str='cpu',
+                 order: str="F", batchsize: int=200000):
+        """
+        Ring Model object manages the state of the ring model during the model fit phase.
+
+        Args:
+            d1 (int): the 0th dimension of the FOV (in python indexing)
+            d2 (int): the 1st dimension of the FOV (in python indexing)
+            radius (int): the ring radius
+            empty (bool): if we want an empty ring model (all elements 0)
+            device (str): which device the pytorch data lies on
+            order (str): the order used to reshape from 1D to 2D (and vice versa)
+            batchsize (int): the batch size for constructing the ring model (to save memory)
+        """
         self._shape = (d1, d2)
         self._empty=empty
         self._radius = radius
@@ -18,13 +30,15 @@ class RingModel:
             row = torch.Tensor([]).to(device).long()
             col = torch.Tensor([]).to(device).long()
             value = torch.Tensor([]).to(device).float()
-            self.W_mat = torch.sparse_coo_tensor(torch.stack([row, col]), value, (d1 * d2, d1 * d2)).coalesce()
-            self._weights = torch.zeros((d1 * d2, 1), device=device)
+            self.ring_mat = torch.sparse_coo_tensor(torch.stack([row, col]), value, (d1 * d2, d1 * d2)).coalesce()
+            self.weights = torch.zeros((d1 * d2), device=device)
         else:
             rowcol_stacked, values = self._construct_init_values(batchsize=batchsize)
             torch.cuda.empty_cache()
-            self.W_mat = torch.sparse_coo_tensor(rowcol_stacked, values, (d1 * d2, d1 * d2)).coalesce()
-            self._weights = torch.ones((d1 * d2, 1), device=device)
+            self.ring_mat = torch.sparse_coo_tensor(rowcol_stacked, values, (d1 * d2, d1 * d2)).coalesce()
+            self.weights = torch.ones((d1 * d2), device=device)
+
+        self.support = torch.ones((self.shape[0]*self.shape[1]), device=self.device, dtype=torch.float32)
 
     @property
     def shape(self):
@@ -48,11 +62,49 @@ class RingModel:
 
     @property
     def weights(self):
+        """
+        The ring model uses a constant weight assumption: that pixel "i" of the data can be explained as a scaled
+        average of the pixels in a ring surrounding pixel "i". This is enforced by a diagonal weight matrix: d_weight.
+
+        Returns:
+            d_weights (torch.sparse_coo_tensor): (d1*d2, d1*d2) diagonal matrix
+        """
         return self._weights
 
     @weights.setter
-    def weights(self, tensor):
-        self._weights = tensor
+    def weights(self, new_weights):
+        """
+        Sets the weights
+        Args:
+            new_weights (torch.tensor): Shape (d1*d2)
+        """
+        net_pixels = (self.shape[0] * self.shape[1])
+        index_values = torch.arange(net_pixels, device=self.device, dtype=torch.long)
+        self._weights = torch.sparse_coo_tensor(torch.stack([index_values, index_values]), new_weights,
+                                             (net_pixels, net_pixels)).coalesce()
+
+
+    @property
+    def support(self):
+        """
+        The ring model only operates on pixels that do not contain spatial footprints. This is enforced by a diagonal
+        mask matrix, D_{mask}. The i-th entry  is 0 if pixel i contains neural footprints, otherwise it is 1
+
+        Returns:
+            d_mask (torch.sparse_coo_tensor): (d1*d2, d1*d2) diagonal matrix represe
+        """
+        return self._support
+
+    @support.setter
+    def support(self, new_mask):
+        """
+        Args:
+            new_mask (torch.tensor): Shape (d1*d2), index i is 0 if pixel i contains neural signal, otherwise it is 0
+        """
+        net_pixels = (self.shape[0]*self.shape[1])
+        index_values = torch.arange(net_pixels, device=self.device, dtype=torch.long)
+        self._support = torch.sparse_coo_tensor(torch.stack([index_values, index_values]), new_mask,
+                                                (net_pixels, net_pixels)).coalesce()
 
     def _construct_init_values(self, batchsize = 100000):
         num_rows = self.shape[0]*self.shape[1]
@@ -66,8 +118,6 @@ class RingModel:
             curr_rowcol, curr_values = self._construct_at_indices(rows_to_process)
             net_rowcol.append(curr_rowcol)
             net_values.append(curr_values)
-
-        print(curr_rowcol.shape)
 
         return torch.cat(net_rowcol, dim=1), torch.cat(net_values)
 
@@ -127,62 +177,31 @@ class RingModel:
 
         return torch.stack([row_indices, column_indices]), values
 
-    def generate_coo_ring_indices(self, rows: torch.tensor):
-        """
-        Given the row indices, this function makes row, column, value indices to construct a subset of the ring matrix
-        """
 
-    def apply_model_right(self, tensor, a_sparse):
+    def apply_model_right(self, tensor: Union[torch.tensor, torch.sparse_coo_tensor]) -> Union[torch.tensor, torch.sparse_coo_tensor]:
         """
-        Computes ring_matrix times tensor. Inputs: tensor: torch.Tensor of dimensions (d1*d2, X) for some X a_sparse:
-        torch.sparse_coo_tensor. Dimensions (d1*d2, K) where K is the number of neurons described by a_sparse,  and d1,
-        d2 are the FOV dimensions of the imaging video.
+        Applies the model, d_weights @ Ring @ d_mask @ tensor
+
+        Returns sparse or dense tensor
         """
-        device = tensor.device
-        a_sum_vec = torch.ones((a_sparse.shape[1], 1), device=device)
-        a_sum = torch.sparse.mm(a_sparse, a_sum_vec)
-        good_indices = (a_sum == 0).bool()
+        output = torch.sparse.mm(self.support, tensor)
+        output = torch.sparse.mm(self.ring_mat, output)
+        return  torch.sparse.mm(self.weights, output)
 
-        return self.apply_weighted_ring_right(tensor, good_indices=good_indices)
-
-    def apply_model_left(self, tensor, a_sparse):
+    def apply_model_left(self, tensor):
         """
-        Computes tensor times ring_matrix.
-        Inputs:
-            tensor: torch.Tensor of dimensions (X, d1*d2) for some X
-            a_sparse: torch.sparse_coo_tensor. Dimensions (d1*d2, K) where K is the number of neurons described by a_sparse, and
-                d1, d2 are the FOV dimensions of the imaging video.
+        Applies the model, tensor @ d_weights @ Ring @ d_mask
+
+        Returns sparse or dense tensor
         """
-        device = tensor.device
-        a_sum_vec = torch.ones((a_sparse.shape[1], 1), device=device)
-        a_sum = torch.sparse.mm(a_sparse, a_sum_vec)
-        good_indices = (a_sum == 0).bool()
-
-        return self.apply_weighted_ring_left(tensor, good_indices=good_indices)
-
-    def apply_weighted_ring_right(self, tensor, good_indices=None):
-        """
-        Multiplies weighted_ring_matrix by tensor. Note that tensor must have (d1*d2) rows (since ring_matrix is (d1*d2, d1*d2)
-        Inputs:
-            tensor. torch.Tensor. Shape (d1*d2, X) for some X
-            good_indices. torch.Tensor, dtype bool. Shape (d1*d2, 1). Describes which columns
-             of the ring matrix must be zero'd out.
-        """
-        if good_indices is not None:
-            tensor = good_indices * tensor
-        return self.weights * torch.sparse.mm(self.W_mat, tensor)
-
-    def apply_weighted_ring_left(self, tensor, good_indices=None):
-        tensor_t = self.weights * tensor.t()
-        product = torch.sparse.mm(self.W_mat.t(), tensor_t)
-
-        if good_indices is not None:
-            return (good_indices * product).t()
-        else:
-            return product.t()
+        output = torch.sparse.mm(self.weights, tensor.T)
+        output = torch.sparse.mm(self.ring_mat.T, output)
+        output = torch.sparse.mm(self.support, output)
+        return output.T
 
     def compute_fluctuating_background_row(self, U_sparse, R, s, V, active_weights, b, row_index):
         """
+        TODO: Remove this
         Computes a specific row of W(URsV - ac - b), which is the fluctuating background.
         Recall  we enforce that column i of W contains all zeros whenever row 'i' of a contains nonzero entries. So W*a will always be zero, and the above expression becomes:
         W(URV - b)
@@ -201,7 +220,7 @@ class RingModel:
         active_weights = torch.Tensor(active_weights).float().to(device)
 
         row_index_tensor = torch.arange(row_index, row_index + 1, device=device)
-        W_selected = torch.index_select(self.W_mat, 0, row_index_tensor).coalesce().to_dense().float()
+        W_selected = torch.index_select(self.ring_mat, 0, row_index_tensor).coalesce().to_dense().float()
 
         W_selected = W_selected * active_weights.t()
 
@@ -219,27 +238,18 @@ class RingModel:
         return weighted_row
 
     def zero_weights(self):
-        self.weights = self.weights * 0
+        self.weights = torch.zeros((self.shape[0]*self.shape[1]), device=self.device)
 
     def reset_weights(self):
-        self.weights = torch.ones_like(self.weights)
+        self.weights = torch.ones((self.shape[0]*self.shape[1]), device=self.device)
 
-    def create_complete_ring_matrix(self, a):
+    def export_to_scipy(self) -> scipy.sparse.coo_matrix:
         """
-        Constructs a complete W matrix, combining the ring weights and the zero'd out columns into a single scipy sparse csr matrix.
-        Input:
-            a: np.ndarray. Dimensions (d, K) where d is the number of pixels in FOV and K is number of neurons identified
-        Output:
-            W_plain: The ring matrix with the weights (and zero'd out columns) applied
+        Temporary code to export the ring model to a scipy sparse matrix
         """
-        W_plain = ca_utils.torch_sparse_to_scipy_coo(self.W_mat).tocsr()
-        W_plain = W_plain.multiply(self.weights.cpu().numpy())
-
-        a_sum = (np.sum(a, axis=1, keepdims=True) == 0).T
-        W_plain = W_plain.multiply(a_sum)
-
-        return W_plain
-
+        output = torch.sparse.mm(self.weights, self.ring_mat)
+        output = torch.sparse.mm(output, self.support)
+        return ca_utils.torch_sparse_to_scipy_coo(output)
 
 def get_sampled_indices(num_frames, num_samples, device='cuda'):
     num_samples = min(num_samples, num_frames)
@@ -270,7 +280,7 @@ def ring_model_update(U_sparse, R, V, W, c, b, a, num_samples=1000):
 
         resid_V_basis = torch.sparse.mm(U_sparse, R_crop) - torch.sparse.mm(a, X_crop) - torch.matmul(b, s_crop)
 
-        W_residual = W.apply_model_right(resid_V_basis, a)
+        W_residual = W.apply_model_right(resid_V_basis)
 
         denominator += torch.sum(W_residual * W_residual, dim=1)
         numerator += torch.sum(W_residual * resid_V_basis, dim=1)
@@ -278,4 +288,4 @@ def ring_model_update(U_sparse, R, V, W, c, b, a, num_samples=1000):
     values = torch.nan_to_num(numerator / denominator, nan=0.0, posinf=0.0, neginf=0.0)
     threshold_function = torch.nn.ReLU()
     values = threshold_function(values)
-    W.weights = values[:, None]
+    W.weights = values

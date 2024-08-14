@@ -49,7 +49,7 @@ def project_U_HALS(
         vector: torch.Tensor. Dimensions (d, k) for some value k
         a_sparse. torch.sparse_coo_tensor object, with shape (d, k)
     """
-    Wv = W.apply_model_right(vector, a_sparse)
+    Wv = W.apply_model_right(vector)
     UtWv = torch.sparse.mm(U_sparse.t(), Wv)
     RRt = torch.matmul(R, R.t())
     RRtUtWv = torch.matmul(RRt, UtWv)
@@ -170,7 +170,7 @@ def get_projection_matrix_temporal_HALS_routine(U_sparse, R, W, a_sparse):
     aUR = torch.sparse.mm(aU, R)
     aURRt = torch.matmul(aUR, R.t())
     aURRtUt = torch.sparse.mm(U_sparse, aURRt.t()).t()  # Shape here is N x d
-    projector = W.apply_model_left(aURRtUt, a_sparse)
+    projector = W.apply_model_left(aURRtUt)
 
     return projector
 

@@ -206,6 +206,7 @@ def update_AC_bg_l2_Y_ring_lowrank(pmd_video, maxiter,corr_th_fix, corr_th_fix_s
     pmd_video.compute_standard_correlation_image()
     pmd_video.compute_residual_correlation_image()
     pmd_video.update_hals_scheduler()
+    pmd_video.update_ring_model_support()
 
     
     if denoise is None: 
@@ -240,9 +241,12 @@ def update_AC_bg_l2_Y_ring_lowrank(pmd_video, maxiter,corr_th_fix, corr_th_fix_s
             pmd_video.compute_residual_correlation_image()
             
             pmd_video.support_update_prune_elements_apply_mask(corr_th_fix, corr_th_del, plot_en)
+
+
             
             #TODO: Eliminate the need for moving a and c off GPU
             pmd_video.merge_signals(merge_corr_thr, merge_overlap_thr, plot_en, data_order)
+            pmd_video.update_ring_model_support()
             pmd_video.update_hals_scheduler()
             
 

@@ -2348,6 +2348,7 @@ class PMDVideo:
                 device=self.device,
                 order=self.data_order,
             )
+        self.update_ring_model_support()
         ring_model_update(
             self.U_sparse,
             self.R * self.s[None, :],
@@ -2357,6 +2358,12 @@ class PMDVideo:
             self.b,
             self.a,
         )
+
+    def update_ring_model_support(self):
+        ones_vec = torch.ones((self.a.shape[1], 1), device=self.a.device)
+        indicator = (torch.sparse.mm(self.a, ones_vec).squeeze() == 0).to(torch.float32)
+        self.W.support = indicator
+
 
     def update_hals_scheduler(self):
         """
@@ -2523,6 +2530,7 @@ class PMDVideo:
         self.a = rlt[0]
         self.c = rlt[1]
         self.num_list = rlt[2]
+
 
     def support_update_prune_elements_apply_mask(
         self, corr_th_fix, corr_th_del, plot_en
