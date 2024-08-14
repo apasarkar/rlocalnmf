@@ -2349,15 +2349,37 @@ class PMDVideo:
                 order=self.data_order,
             )
         self.update_ring_model_support()
-        ring_model_update(
-            self.U_sparse,
-            self.R * self.s[None, :],
-            self.V,
-            self.W,
-            self.c,
-            self.b,
-            self.a,
-        )
+        self.ring_model_weight_update()
+
+    def ring_model_weight_update(self, num_samples=1000):
+        batches = math.ceil(self.R.shape[1] / num_samples)
+        denominator = 0
+        numerator = 0
+        self.W.reset_weights()
+
+        X = torch.matmul(self.c.t(), self.V.t())
+        e = torch.matmul(torch.ones([1, self.V.shape[1]], device=self.device), self.V.t())
+
+        for k in range(batches):
+            start = num_samples * k
+            end = min(self.R.shape[1], start + num_samples)
+            indices = torch.arange(start, end, device=self.device)
+            R_crop = torch.index_select(self.R, 1, indices)
+            X_crop = torch.index_select(X, 1, indices)
+            e_crop = torch.index_select(e, 1, indices)
+
+            resid_V_basis = (torch.sparse.mm(self.U_sparse, R_crop)*self.s[None, :] -
+                             torch.sparse.mm(self.a, X_crop) - torch.matmul(self.b, e_crop))
+
+            W_residual = self.W.apply_model_right(resid_V_basis)
+
+            denominator += torch.sum(W_residual * W_residual, dim=1)
+            numerator += torch.sum(W_residual * resid_V_basis, dim=1)
+
+        values = torch.nan_to_num(numerator / denominator, nan=0.0, posinf=0.0, neginf=0.0)
+        threshold_function = torch.nn.ReLU()
+        values = threshold_function(values)
+        self.W.weights = values
 
     def update_ring_model_support(self):
         ones_vec = torch.ones((self.a.shape[1], 1), device=self.a.device)
