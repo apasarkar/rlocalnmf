@@ -2116,6 +2116,8 @@ class PMDVideo:
         self.U_sparse, self.R, self.s, self.V = PMD_setup_routine(
             self.U_sparse, self.R, self.s, self.V
         )
+
+        self.factorized_ring_term = torch.zeros([self.R.shape[1], self.V.shape[0]], device=self.device)
         self.batch_size = 1000  # Change this long term
 
         ##These are the "signal" components
@@ -2732,11 +2734,28 @@ class PMDVideo:
         self._th = None
         self._robust_corr_term = None
 
+
+    def export_factorized_ring_model(self):
+        sparse_component = torch.sparse.mm(self.U_sparse.T, self.W.weights)
+        sparse_component = torch.sparse.mm(sparse_component, self.W.ring_mat)
+        sparse_component = torch.sparse.mm(sparse_component, self.W.support)
+
+        sparse_component_U = torch.sparse.mm(sparse_component, self.U_sparse)
+        sparse_component_URs = torch.sparse.mm(sparse_component_U, self.R)*self.s[None, :]
+
+        e = torch.matmul(torch.ones([1, self.V.shape[1]], device=self.device), self.V.t())
+        sparse_component_be = torch.sparse.mm(sparse_component, self.b) @ e
+
+        self.factorized_ring_term = torch.matmul(self.R.T, sparse_component_URs - sparse_component_be)
+
+
     def brightness_order_and_return_state(self):
         """
         This is a compatibility function. Long term the api for this should change.
         Assumption here is that before running this function, the data is on the "device" in "demixing" state. After, it will not be.
         """
+        self.export_factorized_ring_model()
+
         a_sum_vec = torch.ones((self.a.shape[1], 1), device=self.device)
         self.active_weights = (
             (torch.sparse.mm(self.a, a_sum_vec) == 0).float().cpu().numpy()
@@ -2767,4 +2786,5 @@ class PMDVideo:
         self._th = None
         self._robust_corr_term = None
 
-        return self.a, self.c, self.b, self.W, self.res, corr_img_all_r, self.num_list
+
+        return self.a, self.c, self.b, self.factorized_ring_term, self.res, corr_img_all_r, self.num_list
