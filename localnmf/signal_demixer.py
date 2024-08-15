@@ -11,6 +11,7 @@ import scipy
 import logging
 from typing import *
 import networkx as nx
+from tqdm import tqdm
 
 from mpl_toolkits.axes_grid1 import make_axes_locatable
 
@@ -2059,8 +2060,6 @@ def spatial_comp_plot(a, corr_img_all_r, num_list=None, ini=False, order="C"):
     plt.show()
     return fig
 
-
-##TODO: Finalize the API and make this class inherit "FunctionalVideo"
 class SignalDemixer:
 
     def __init__(
@@ -2083,8 +2082,6 @@ class SignalDemixer:
             var (numpy.ndarray): (fov dimension 1, fov dimension 2)
             data_order (str): The order in which n-dimensional vectors are flattened to 1D
             device (str): Indicator for pytorch for which device to use ("cpu" or "cuda")
-            blocks (
-
         """
         self.device = device
         self.blocks = None
@@ -2720,3 +2717,61 @@ class SignalDemixer:
 
 
         return self.a, self.c, self.b, self.factorized_ring_term, self.res, corr_img_all_r, self.num_list
+
+    def demix(self, maxiter, corr_th_fix, corr_th_fix_sec, corr_th_del, switch_point,
+                                       skips,
+                                       merge_corr_thr, merge_overlap_thr, ring_radius, denoise=None, plot_en=False,
+                                       update_after=4, c_nonneg=True):
+        """
+        Function for computing background, spatial and temporal components of neurons. Uses HALS updates to iteratively
+        refine spatial and temporal estimates.
+        """
+
+        data_order = self.data_order
+
+        self.precompute_quantities(maxiter, ring_radius)
+        self.compute_standard_correlation_image()
+        self.compute_residual_correlation_image()
+        self.update_hals_scheduler()
+        self.update_ring_model_support()
+
+        if denoise is None:
+            denoise = [False for i in range(maxiter)]
+        elif len(denoise) != maxiter:
+            print("Length of denoise list is not consistent, setting all denoise values to false for this pass of NMF")
+            denoise = [False for i in range(maxiter)]
+
+        for iters in tqdm(range(maxiter)):
+            if iters >= maxiter - switch_point:
+                corr_th_fix = corr_th_fix_sec
+
+            self.static_baseline_update()
+
+            if iters >= skips:
+                self.fluctuating_baseline_update(ring_radius)
+            else:
+                pass
+
+            self.spatial_update(plot_en=plot_en)
+            self.static_baseline_update()
+
+            denoise_flag = denoise[iters]
+            self.temporal_update(denoise=denoise_flag, plot_en=plot_en, c_nonneg=c_nonneg)
+
+            if update_after and ((iters + 1) % update_after == 0):
+                ##First: Compute correlation images
+                self.compute_standard_correlation_image()
+                self.compute_residual_correlation_image()
+
+                self.support_update_prune_elements_apply_mask(corr_th_fix, corr_th_del, plot_en)
+
+                # TODO: Eliminate the need for moving a and c off GPU
+                self.merge_signals(merge_corr_thr, merge_overlap_thr, plot_en, data_order)
+                self.update_ring_model_support()
+                self.update_hals_scheduler()
+
+        self.delete_precomputed()
+        a, c, b, w, res, corr_img_all_r, num_list = self.brightness_order_and_return_state()
+
+        return a, c, b, w, res, corr_img_all_r, num_list
+
