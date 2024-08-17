@@ -2269,7 +2269,7 @@ class SignalDemixer:
             )
         )
 
-    def precompute_quantities(self, maxiter: int, ring_radius: int=15):
+    def precompute_quantities(self, ring_radius: int=15):
         """
         Args:
             maxiter (int): Number of iterations to be run (long term eliminate this)
@@ -2714,7 +2714,7 @@ class SignalDemixer:
 
         data_order = self.data_order
 
-        self.precompute_quantities(maxiter, ring_radius)
+        self.precompute_quantities(ring_radius)
         self.compute_standard_correlation_image()
         self.compute_residual_correlation_image()
         self.update_hals_scheduler()
@@ -2759,4 +2759,3 @@ class SignalDemixer:
         a, c, b, factorized_ring_term, residual_corr_img, standard_corr_img = self.brightness_order_and_return_state()
 
         return a, c, b, factorized_ring_term, residual_corr_img, standard_corr_img
-
