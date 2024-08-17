@@ -2277,7 +2277,6 @@ class SignalDemixer:
         """
         self.finalize_initialization()
         self.K = self.c.shape[1]
-        self.res = np.zeros(maxiter)
         self.uv_mean = get_mean_data(self.u_sparse, self.r, self.s, self.v)
 
         if self.mask_a is None:
@@ -2680,9 +2679,14 @@ class SignalDemixer:
         brightness_rank = np.argsort(-brightness)
         self.a = self.a[:, brightness_rank]
         self.c = self.c[:, brightness_rank]
-        corr_img_all_r = self.residual_correlation_image.reshape(
+        residual_correlation_image_2d = self.residual_correlation_image.reshape(
             (self.d1, self.d2, -1), order=self.data_order
         )[:, :, brightness_rank]
+        standard_correlation_image_2d = self.standard_correlation_image.reshape(
+            (self.d1, self.d2, -1), order=self.data_order
+        )[:, :, brightness_rank]
+
+
 
         self.demixing_state = False
         self.precomputed = False
@@ -2696,7 +2700,8 @@ class SignalDemixer:
         self.blocks = None
 
 
-        return self.a, self.c, self.b, self.factorized_ring_term, self.res, corr_img_all_r
+        return (self.a, self.c, self.b, self.factorized_ring_term,
+                residual_correlation_image_2d, standard_correlation_image_2d)
 
     def demix(self, maxiter, corr_th_fix, corr_th_fix_sec, corr_th_del, switch_point,
                                        skips,
@@ -2751,7 +2756,7 @@ class SignalDemixer:
                 self.update_hals_scheduler()
 
         self.delete_precomputed()
-        a, c, b, factorized_ring_term, res, corr_img_all_r = self.brightness_order_and_return_state()
+        a, c, b, factorized_ring_term, residual_corr_img, standard_corr_img = self.brightness_order_and_return_state()
 
-        return a, c, b, factorized_ring_term, res, corr_img_all_r
+        return a, c, b, factorized_ring_term, residual_corr_img, standard_corr_img
 
