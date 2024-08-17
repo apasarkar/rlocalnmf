@@ -917,61 +917,67 @@ def spatial_temporal_ini_UV(
 
 
 def delete_comp(
-    a,
-    c,
-    corr_img_all_reg,
-    corr_img_all,
-    mask_a,
-    num_list,
-    temp,
-    word,
+    spatial_components,
+    temporal_components,
+    standard_correlation_image,
+    residual_correlation_image,
+    spatial_masks,
+    components_to_delete,
+    reasoning_message,
     plot_en,
     fov_dims,
     order="C",
 ):
     """
-    Delete zero components, specified by "temp".
-    Inputs:
-        a: torch.sparse_coo_tensor. Dimensions (d, K), d = number of pixels in movie, K = number of neurons
-        c: torch.Tensor. Dimensions (T, K), K = number of neurons in movie
-        corr_img_all_reg. np.ndarray. Dimensions (d, K). d = number of pixels in movie, K = number of neurons
-        corr_img_all. np.ndarray. Dimensions (d, K). d = number of pixels in movie, K = number of neurons
-        mask_a. torch.sparse_coo_tensor. Dimensions (d, K). Dtype bool. d = number of pixels in movie, K = number of neurons
-        num_list. np.ndarray.
-        temp: torch.Tensor. Dimensions (K). K= number of neurons
+    General routine to delete components in the demixing procedure
+    Args:
+        
+        spatial_components (torch.sparse_coo_tensor): Dimensions (d, K), d = number of pixels in movie,
+            K = number of neurons
+        temporal_components (torch.Tensor): Dimensions (T, K), K = number of neurons in movie
+        standard_correlation_image (np.ndarray): Dimensions (d, K). d = number of pixels in movie, K = number of neurons
+        residual_correlation_image (np.ndarray): Dimensions (d, K). d = number of pixels in movie, K = number of neurons
+        spatial_masks (torch.sparse_coo_tensor): Dimensions (d, K). Dtype bool. d = number of pixels in movie, K = number of neurons
+        components_to_delete (torch.tensor): 1D tensor indicating which components to delete
+        reasoning_message (str): An option to provide a reason for why deletion is happening
+        plot_en (bool): Indicates whether plotting is enabled
+        fov_dims (tuple): Tuple (fov dimension 1, fov dimension 2) describing field of view dimensions.
+        order (str): "C" or "F" depending on how we flatten 2D spatial data into 1D vectors (and vice versa)
     Returns:
-        Updated a, c, corr_img_all_reg, corr_img_all, mask_a, num_list after getting rid of deleted comps
-
-    Notes:
-    As of now, the correlation images are confined to the CPU as numpy ndarrays. Soon, these will be ported over to pytorch once an appropriate memory efficient implementation is ready.
+        Tuple: A tuple containing the following elements:
+            - spatial_components (torch.sparse_coo_tensor): Updated sparse tensor of dimensions (d, K')
+              containing the spatial components after deletion, where K' is the new number of remaining neurons.
+            - temporal_components (torch.Tensor): Updated tensor of dimensions (T, K')
+              containing the temporal components after deletion.
+            - standard_correlation_image (np.ndarray): Updated array of dimensions (d, K')
+              containing the standard correlation images after deletion.
+            - residual_correlation_image (np.ndarray): Updated array of dimensions (d, K')
+              containing the residual correlation images after deletion.
+            - spatial_masks (torch.sparse_coo_tensor): Updated sparse tensor of dimensions (d, K')
+              containing the spatial masks after deletion.
     """
-    print(word)
-    pos = torch.nonzero(temp)[:, 0]
-    neg = torch.nonzero(temp == 0)[:, 0]
-    if int(torch.sum(temp).cpu()) == a.shape[1]:
+    print(reasoning_message)
+    pos = torch.nonzero(components_to_delete)[:, 0]
+    neg = torch.nonzero(components_to_delete == 0)[:, 0]
+    if int(torch.sum(components_to_delete).cpu()) == spatial_components.shape[1]:
         raise ValueError("All Components are slated to be deleted")
 
     pos_for_cpu = pos.cpu().numpy()
-    print("delete components" + str(num_list[pos_for_cpu] + 1))
-    corr_img_all_reg_r = corr_img_all_reg.reshape(
-        (fov_dims[0], fov_dims[1], -1), order=order
-    )
+    standard_correlation_image_2d = standard_correlation_image.reshape((fov_dims[0], fov_dims[1], -1), order=order)
     if plot_en:
-        a_used = a.cpu().to_dense().numpy()
+        a_used = spatial_components.cpu().to_dense().numpy()
         spatial_comp_plot(
             a_used[:, pos_for_cpu],
-            corr_img_all_reg_r[:, :, pos_for_cpu],
-            num_list=num_list[pos_for_cpu],
+            standard_correlation_image_2d[:, :, pos_for_cpu],
             ini=False,
             order=order,
         )
-    corr_img_all_reg = np.delete(corr_img_all_reg, pos_for_cpu, axis=1)
-    corr_img_all = np.delete(corr_img_all, pos_for_cpu, axis=1)
-    mask_a = torch.index_select(mask_a, 1, neg)
-    a = torch.index_select(a, 1, neg)
-    c = torch.index_select(c, 1, neg)
-    num_list = np.delete(num_list, pos_for_cpu)
-    return a, c, corr_img_all_reg, corr_img_all, mask_a, num_list
+    standard_correlation_image = np.delete(standard_correlation_image, pos_for_cpu, axis=1)
+    residual_correlation_image = np.delete(residual_correlation_image, pos_for_cpu, axis=1)
+    spatial_masks = torch.index_select(spatial_masks, 1, neg)
+    spatial_components = torch.index_select(spatial_components, 1, neg)
+    temporal_components = torch.index_select(temporal_components, 1, neg)
+    return spatial_components, temporal_components, standard_correlation_image, residual_correlation_image, spatial_masks
 
 
 def order_superpixels(c_mat: torch.tensor) -> np.ndarray:
@@ -979,7 +985,7 @@ def order_superpixels(c_mat: torch.tensor) -> np.ndarray:
     Finding an ordering of the components based on most prominent activity (ordered in descending order of brightness)
 
     Args:
-        c_ini (torch.tensor): Shape (T, K) where T is number of frames and K number of neurons
+        c_mat (torch.tensor): Shape (T, K) where T is number of frames and K number of neurons
 
     Returns:
         ordering (np.ndarray): Shape (num_components,). Indices indicating what the brightness rank of
@@ -1810,16 +1816,15 @@ def superpixel_init(
 def merge_components(
     a,
     c,
-    corr_img_all_r,
-    num_list,
-    patch_size,
+    standard_correlation_image,
+    fov_dims,
     merge_corr_thr=0.6,
     merge_overlap_thr=0.6,
     plot_en=False,
     data_order="C",
 ):
     """want to merge components whose correlation images are highly overlapped,
-    and update a and c after merge with region constrain
+    and update a and c after merge with region constraint
     Parameters:
     -----------
     a: torch.sparse_coo_tensor
@@ -1828,7 +1833,6 @@ def merge_components(
          torch Tensor describing the temporal profiles of all signals. Shape (T, K), where T is the number of frames in the movie
     corr_img_all_r: np.ndarray (TODO: for now...)
          corr image
-    num_list: list. numbered list assigning an index value to each component (for tracking purposes)
     patch_size: (list-like) dimensions for data
     merge_corr_thr: scalar between 0 and 1
         temporal correlation threshold for truncating corr image (corr(Y,c)) (default 0.6)
@@ -1843,41 +1847,43 @@ def merge_components(
             is the number of neural signals after this merging procedure (entirely possible no merge happens and K' = K)
     c_pri: torch.Tensor.
         torch Tensor of merged temporal components, shape (T,K')
-    num_list: np.ndarray. numbered list assigning an index value to each component (for tracking purposes)
-    flag: int. if merging occurred, return 1. Otherwise, returns 0
     """
     device = c.device
-    corr_img_all_r = torch.from_numpy(corr_img_all_r).to(
+    standard_correlation_image = torch.from_numpy(standard_correlation_image).to(
         device
-    )  # TODO: Enforce this in the function definition
+    )
     ############ calculate overlap area ###########
 
     a_corr = torch.sparse.mm(a.t(), a).to_dense()
     a_corr = torch.triu(a_corr, diagonal=1)
-    cor = ((corr_img_all_r > merge_corr_thr) * 1).float()
+    cor = ((standard_correlation_image > merge_corr_thr) * 1).float()
     temp = torch.sum(cor, dim=0)
-    temp[temp == 0] = 1
+    temp[temp == 0] = 1 # For division safety
     cor_corr = torch.matmul(cor.t(), cor)
     cor_corr = torch.triu(cor_corr, diagonal=1)
-    cri = (
-        ((cor_corr / temp.t()) > merge_overlap_thr)
-        * ((cor_corr / temp) > merge_overlap_thr)
-        * (a_corr > 0)
-    )
+
+    # Test to see for each pair of neurons (a, b) whether overlap(a, b) / support_size(corr_img(a)) > merge_overlap_thres
+    condition1 = ((cor_corr / temp.t()) > merge_overlap_thr)
+
+    # Test to see for each pair of neurons (a, b) whether overlap(a, b) / support_size(corr_img(b)) > merge_overlap_thres
+    condition2 =  ((cor_corr / temp.unsqueeze(0)) > merge_overlap_thr)
+
+    # Test to make sure the two cells actually overlap
+    condition3 = (a_corr > 0)
+    cri = condition1*condition2*condition3
 
     connect_comps = torch.argwhere(cri)
 
     if torch.numel(connect_comps) > 0:
-        flag = 1
-        G = nx.Graph()
-        G.add_edges_from(
+        merge_graph = nx.Graph()
+        merge_graph.add_edges_from(
             list(
                 zip(
                     connect_comps[:, 0].cpu().numpy(), connect_comps[:, 1].cpu().numpy()
                 )
             )
         )
-        comps = list(nx.connected_components(G))
+        comps = list(nx.connected_components(merge_graph))
         remove_indices = torch.unique(torch.flatten(connect_comps))
         all_indices = torch.ones([c.shape[1]], device=device)
         all_indices[remove_indices] = 0
@@ -1887,10 +1893,8 @@ def merge_components(
 
         a_preserved = torch.index_select(a, 1, indices_arange).coalesce()
         c_preserved = torch.index_select(c, 1, indices_arange)
-        num_preserved = num_list[indices_arange.cpu().numpy()]
 
         c_append_list = [c_preserved]
-        num_append_list = [num_preserved]
 
         row_indices = [a_preserved.indices()[0, :]]
         col_indices = [a_preserved.indices()[1, :]]
@@ -1898,8 +1902,8 @@ def merge_components(
         num_preserved_comps = a_preserved.shape[1]
         added_counter = 0
         for comp in comps:
+            print(f"merging {comp}")
             comp = list(comp)
-            logging.debug("merge" + str(num_list[comp] + 1))
             good_comps = torch.Tensor(comp).to(device).long()
 
             a_merge = torch.index_select(a, 1, good_comps).coalesce()
@@ -1910,11 +1914,10 @@ def merge_components(
             if plot_en:
                 spatial_comp_plot(
                     a_merge.cpu().to_dense().numpy(),
-                    corr_img_all_r[:, comp]
+                    standard_correlation_image[:, comp]
                     .cpu()
                     .numpy()
-                    .reshape(patch_size[0], patch_size[1], -1, order=data_order),
-                    num_list[comp],
+                    .reshape(fov_dims[0], fov_dims[1], -1, order=data_order),
                     ini=False,
                     order=data_order,
                 )
@@ -1931,22 +1934,17 @@ def merge_components(
             values_indices.append(nonzero_values)
 
             c_append_list.append(c_rank1)
-            num_append_list.append(num_list[comp[0]])
 
         row_indices_net = torch.cat(row_indices, dim=0)
         col_indices_net = torch.cat(col_indices, dim=0)
         value_indices_net = torch.cat(values_indices, dim=0)
         c = torch.cat(c_append_list, dim=1)
-        num_list = np.hstack(num_append_list)
         a = torch.sparse_coo_tensor(
             torch.stack([row_indices_net, col_indices_net]),
             value_indices_net,
             (a.shape[0], c.shape[1]),
         ).coalesce()
-    else:
-        flag = 0
-
-    return a, c, num_list, flag
+    return a, c, a.bool()
 
 
 def rank_1_NMF_fit(a_merge, c_merge):
@@ -2033,18 +2031,17 @@ def _temporal_fit_routine(a_merge, c_merge, spatial_component):
     return least_squares_fits.T
 
 
-def spatial_comp_plot(a, corr_img_all_r, num_list=None, ini=False, order="C"):
+def spatial_comp_plot(a, corr_img_all_r, ini=False, order="C"):
     print("DISPLAYING SOME OF THE COMPONENTS")
     num = min(3, a.shape[1])
     patch_size = corr_img_all_r.shape[:2]
     scale = np.maximum(1, (corr_img_all_r.shape[1] / corr_img_all_r.shape[0]))
     fig = plt.figure(figsize=(8 * scale, 4 * num))
-    if num_list is None:
-        num_list = np.arange(num)
+    neuron_numbering = np.arange(num)
     for ii in range(num):
         plt.subplot(num, 2, 2 * ii + 1)
         plt.imshow(a[:, ii].reshape(patch_size, order=order), cmap="nipy_spectral_r")
-        plt.ylabel(str(num_list[ii] + 1), fontsize=15, fontweight="bold")
+        plt.ylabel(str(neuron_numbering[ii] + 1), fontsize=15, fontweight="bold")
         if ii == 0:
             if ini:
                 plt.title("Spatial components ini", fontweight="bold", fontsize=15)
@@ -2283,7 +2280,6 @@ class SignalDemixer:
         self.K = self.c.shape[1]
         self.res = np.zeros(maxiter)
         self.uv_mean = get_mean_data(self.u_sparse, self.r, self.s, self.v)
-        self.num_list = np.arange(self.K)
 
         if self.mask_a is None:
             self.mask_a = self.a.bool()
@@ -2422,25 +2418,25 @@ class SignalDemixer:
                 self.standard_correlation_image,
                 self.residual_correlation_image,
                 self.mask_ab,
-                self.num_list,
             ) = delete_comp(
                 self.a,
                 self.c,
                 self.standard_correlation_image,
                 self.residual_correlation_image,
                 self.mask_ab,
-                self.num_list,
                 temp,
                 "zero c!",
                 plot_en,
                 (self.d1, self.d2),
                 order=self.data_order,
             )
+            self.update_hals_scheduler()
 
 
     def spatial_update(self, plot_en=False):
         self.a = regression_update.spatial_update_hals(self.u_sparse, self.r, self.s, self.v, self.a, self.c, self.b,
                                                        w=self.W, mask_ab=self.mask_ab, blocks=self.blocks)
+
 
         ## Delete Bad Components
         temp = (
@@ -2453,20 +2449,19 @@ class SignalDemixer:
                 self.standard_correlation_image,
                 self.residual_correlation_image,
                 self.mask_ab,
-                self.num_list,
             ) = delete_comp(
                 self.a,
                 self.c,
                 self.standard_correlation_image,
                 self.residual_correlation_image,
                 self.mask_ab,
-                self.num_list,
                 temp,
                 "zero a!",
                 plot_en,
                 (self.d1, self.d2),
                 order=self.data_order,
             )
+            self.update_hals_scheduler()
 
     def compute_local_correlation_image(self, pseudo):
         ##Long term: the currently initialized "a" and "c" should just be on the same device as U_sparse,R,V
@@ -2538,11 +2533,10 @@ class SignalDemixer:
         )
 
     def merge_signals(self, merge_corr_thr, merge_overlap_thr, plot_en, data_order):
-        rlt = merge_components(
+        self.a, self.c, self.mask_ab = merge_components(
             self.a,
             self.c,
             self.standard_correlation_image,
-            self.num_list,
             self.shape,
             merge_corr_thr=merge_corr_thr,
             merge_overlap_thr=merge_overlap_thr,
@@ -2550,9 +2544,6 @@ class SignalDemixer:
             data_order=self.data_order,
         )
 
-        self.a = rlt[0]
-        self.c = rlt[1]
-        self.num_list = rlt[2]
 
 
     def support_update_prune_elements_apply_mask(
@@ -2600,32 +2591,23 @@ class SignalDemixer:
                 self.standard_correlation_image,
                 self.residual_correlation_image,
                 self.mask_ab,
-                self.num_list,
             ) = delete_comp(
                 self.a,
                 self.c,
                 self.standard_correlation_image,
                 self.residual_correlation_image,
                 self.mask_ab,
-                self.num_list,
                 temp,
                 "zero mask!",
                 plot_en,
                 (self.d1, self.d2),
                 order=self.data_order,
             )
+            self.update_hals_scheduler()
 
         ##Apply mask to existing 'a'
-        # data = self.a.values().cpu().detach().numpy()
-        # row = self.a.indices().cpu().detach().numpy()[0, :]
-        # col = self.a.indices().cpu().detach().numpy()[1, :]
-        # a_scipy = scipy.sparse.coo_matrix((data, (row, col)), self.a.shape).tocsr()
         a_scipy = ca_utils.torch_sparse_to_scipy_coo(self.a).tocsr()
 
-        # data = self.mask_ab.values().cpu().detach().numpy()
-        # row = self.mask_ab.indices().cpu().detach().numpy()[0, :]
-        # col = self.mask_ab.indices().cpu().detach().numpy()[1, :]
-        # mask_ab_scipy = scipy.sparse.coo_matrix((data, (row, col)), self.mask_ab.shape).tocsr()
         mask_ab_scipy = ca_utils.torch_sparse_to_scipy_coo(self.mask_ab).tocsr()
         a_scipy = a_scipy.multiply(mask_ab_scipy)
         self.a = (
@@ -2702,7 +2684,6 @@ class SignalDemixer:
         corr_img_all_r = self.residual_correlation_image.reshape(
             (self.d1, self.d2, -1), order=self.data_order
         )[:, :, brightness_rank]
-        self.num_list = self.num_list[brightness_rank]
 
         self.demixing_state = False
         self.precomputed = False
@@ -2716,7 +2697,7 @@ class SignalDemixer:
         self.blocks = None
 
 
-        return self.a, self.c, self.b, self.factorized_ring_term, self.res, corr_img_all_r, self.num_list
+        return self.a, self.c, self.b, self.factorized_ring_term, self.res, corr_img_all_r
 
     def demix(self, maxiter, corr_th_fix, corr_th_fix_sec, corr_th_del, switch_point,
                                        skips,
@@ -2771,7 +2752,7 @@ class SignalDemixer:
                 self.update_hals_scheduler()
 
         self.delete_precomputed()
-        a, c, b, w, res, corr_img_all_r, num_list = self.brightness_order_and_return_state()
+        a, c, b, factorized_ring_term, res, corr_img_all_r = self.brightness_order_and_return_state()
 
-        return a, c, b, w, res, corr_img_all_r, num_list
+        return a, c, b, factorized_ring_term, res, corr_img_all_r
 

@@ -139,16 +139,16 @@ def spatial_update_hals(
 
     threshold_func = torch.nn.ReLU(0)
     if blocks is None:
-        blocks = torch.arange(c.shape[1], device=device)
+        blocks = torch.arange(c.shape[1], device=device).unsqueeze(1)
     for index_select_tensor in blocks:
-        mask_apply = torch.squeeze(torch.index_select(mask_ab, 1, index_select_tensor))
+        mask_apply = torch.index_select(mask_ab, 1, index_select_tensor)
 
         c_prime_i = C_prime.index_select(0, index_select_tensor).t()
         cumulator_i = cumulator.index_select(1, index_select_tensor)
         acc = torch.matmul(a_dense, c_prime_i)
         final_vec = (cumulator_i - acc) / C_prime_diag[None, index_select_tensor]
-        curr_frame = torch.squeeze(torch.index_select(a_dense, 1, index_select_tensor))
-        curr_frame += torch.squeeze(final_vec)
+        curr_frame = torch.index_select(a_dense, 1, index_select_tensor)
+        curr_frame += final_vec
         curr_frame *= mask_apply
         curr_frame = threshold_func(curr_frame)
         a_dense[:, index_select_tensor] = curr_frame
@@ -240,18 +240,16 @@ def temporal_update_hals(u_sparse, r, s, v, a_sparse, c, b, w=None, c_nonneg=Tru
         threshold_function = lambda x: x
 
     if blocks is None:
-        blocks = torch.arange(c.shape[1], device=device)
+        blocks = torch.arange(c.shape[1], device=device).unsqueeze(1)
     for index_to_select in blocks:
         a_ia = torch.index_select(ata, 0, index_to_select)
         a_iaC = torch.matmul(a_ia, c.t())
 
         curr_trace = torch.index_select(c, 1, index_to_select)
-        # import pdb
-        # pdb.set_trace()
         curr_trace += (
             (torch.index_select(cumulator, 0, index_to_select) - a_iaC) / torch.unsqueeze(diagonals[index_to_select], -1)
         ).t()
         curr_trace = threshold_function(curr_trace)
-        c[:, index_to_select] = torch.squeeze(curr_trace)
+        c[:, index_to_select] = curr_trace
 
     return c
