@@ -2165,7 +2165,6 @@ class SignalDemixer:
 
     def initialize_signals_superpixels(
         self,
-        num_plane,
         cut_off_point,
         residual_cut,
         length_cut,
