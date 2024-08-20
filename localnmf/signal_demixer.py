@@ -1,3 +1,4 @@
+from abc import ABC, abstractmethod
 import torch
 import numpy as np
 import math
@@ -8,7 +9,6 @@ import scipy.ndimage
 import scipy.signal
 import scipy.sparse
 import scipy
-import logging
 from typing import *
 import networkx as nx
 from tqdm import tqdm
@@ -520,16 +520,16 @@ def get_total_edges(d1, d2):
 
 
 def get_local_correlation_structure(
-    U_sparse,
-    V,
-    dims,
-    th,
-    order="C",
-    batch_size=10000,
-    pseudo=0,
-    tol=0.000001,
-    a=None,
-    c=None,
+    U_sparse: torch.sparse_coo_tensor,
+    V: torch.tensor,
+    dims: tuple[int, int, int],
+    th: int,
+    order: str="C",
+    batch_size: int=10000,
+    pseudo: float=0,
+    tol: float=0.000001,
+    a: Optional[torch.sparse_coo_tensor]=None,
+    c: torch.tensor=None,
 ):
     """
     Computes a local correlation data structure, which describes the correlations between all neighboring pairs of pixels
@@ -1748,7 +1748,6 @@ def superpixel_init(
     pure_pix = np.unique(pure_pix)
 
     print("prepare iteration!")
-    mask_a = None  ## Disable the mask after first pass over data
     if not first_init_flag:
         a_newpass, c_newpass, brightness_rank = prepare_iteration_uv(
             pure_pix,
@@ -1810,7 +1809,7 @@ def superpixel_init(
         "brightness_rank_sup": brightness_rank_sup,
     }
 
-    return a, mask_a, c, b, superpixel_dict, superpixel_img
+    return a, a.bool(), c, b, superpixel_dict, superpixel_img
 
 
 def merge_components(
@@ -2057,10 +2056,42 @@ def spatial_comp_plot(a, corr_img_all_r, ini=False, order="C"):
     plt.show()
     return fig
 
+
+class SignalProcessingState(ABC):
+    def initialize_signals(self, **kwargs):
+        """Initialize signals based on provided parameters."""
+        raise NotImplementedError("This method is not implemented for the current state.")
+
+    @property
+    def state_description(self):
+        """Return a description of the current state."""
+        raise NotImplementedError("This is not implemented for the current state.")
+
+    def demix(self, **kwargs):
+        """Perform the demixing process based on provided parameters."""
+        raise NotImplementedError("This method is not implemented for the current state.")
+
+
+    @property
+    def results(self):
+        """Returns the results from any given state"""
+        raise NotImplementedError("This is not implemented for the current state.")
+
+    def lock_results_and_continue(self, context):
+        """Lock in the current results and transition context object to new state."""
+        raise NotImplementedError("This method is not implemented for the current state.")
+
+
 class SignalDemixer:
 
     def __init__(
-        self, u_sparse: scipy.sparse.coo_matrix, r, s, v, dimensions, data_order="F", device="cpu"):
+        self, u_sparse: scipy.sparse.coo_matrix,
+            r: np.ndarray,
+            s: np.ndarray,
+            v: np.ndarray,
+            dimensions: tuple[int, int, int],
+            data_order: str="F",
+            device: str="cpu"):
         """
         A class to manage the state and execution of the maskNMF demixing pipeline
 
@@ -2075,13 +2106,10 @@ class SignalDemixer:
             s (numpy.ndarray): Shape (PMD rank 2). Singular values for the pmd decomposition
             v (numpy.ndarray): Shape (pmd rank2, frames). Orthogonal temporal basis vectors for PMD rank.
             dimensions (tuple): (frames, fov dimension 1, fov dimension 2).
-            mean (numpy.ndarray): (fov dimension 1, fov dimension 2).
-            var (numpy.ndarray): (fov dimension 1, fov dimension 2)
             data_order (str): The order in which n-dimensional vectors are flattened to 1D
             device (str): Indicator for pytorch for which device to use ("cpu" or "cuda")
         """
         self.device = device
-        self.blocks = None
         self.data_order = data_order
         self.shape = dimensions
         self.r = torch.Tensor(r).float().to(self.device)
@@ -2099,165 +2127,169 @@ class SignalDemixer:
         self.d2 = dimensions[1]
         self.T = dimensions[2]
 
-        self.active_weights = None
-
-        self.demixing_state = False
-        self.precomputed = False
-
         self.u_sparse, self.r, self.s, self.v = PMD_setup_routine(
             self.u_sparse, self.r, self.s, self.v
         )
 
-        self.factorized_ring_term = torch.zeros([self.r.shape[1], self.v.shape[0]], device=self.device)
-        self.batch_size = 1000  # Change this long term
+        self._num_transitions = 0
 
-        ##These are the "signal" components
-        self.a = None
-        self.c = None
-        self.b = None
+        #Start with an initialization state
+        self._state = InitializingState(self.u_sparse, self.r, self.s, self.v,
+                                        (self.d1,self.d2,self.T),
+                                        data_order = self.data_order,
+                                        device = self.device,
+                                        a = None,
+                                        c = None)
+
+    @property
+    def state(self):
+        return self._state
+
+    @state.setter
+    def state(self, new_state: SignalProcessingState):
+        self._state = new_state
+
+    @property
+    def results(self):
+        return self.state.results
+
+    def initialize_signals(self, **kwargs):
+        return self._state.initialize_signals(**kwargs)
+
+    def demix(self, **kwargs):
+        self._state.demix(**kwargs)
+
+    def lock_results_and_continue(self):
+        """
+        The state initiates the transition to a new state, updating this object via its state setter
+        """
+        self._state.lock_results_and_continue(self)
+
+class InitializingState(SignalProcessingState):
+
+    def __init__(self, u_sparse: torch.sparse_coo_tensor, r: torch.tensor, s: torch.tensor, v: torch.tensor,
+                 dimensions: tuple[int, int, int], data_order: str = "F", device: str = "cpu",
+                 a: Optional[np.ndarray]=None, c: Optional[np.ndarray]=None, batch_size = 40000):
+        """
+        Class for initializing the signals
+        """
+        self.d1, self.d2, self.T = dimensions
+        self.shape = (self.d1, self.d2, self.T)
+        self.data_order = data_order
+        self.device = device
+
+        self.u_sparse = u_sparse.to(self.device)
+        self.r = r.to(self.device)
+        self.s = s.to(self.device)
+        self.v = v.to(self.device)
+
         self.a_init = None
         self.mask_a_init = None
         self.c_init = None
         self.b_init = None
-        self.num_passes_run = 0
+        self.diagnostic_image = None
 
-        self.superpixel_rlt_recent = None
-        self.superpixel_rlt = []
-        self.superpixel_image_recent = None
-        self.superpixel_image_list = []
 
-        # Reset the local pixelwise correlation connectivity data structure
-        self.dim1_coordinates = None
-        self.dim2_coordinates = None
-        self.correlations = None
-        self._th = None  # When we run superpixels, this variables stores most recently used MAD threshold value
-        self._robust_corr_term = None  # A noise robustness parameter for the pixelwise correlation during superpixels
+        self.a = a
+        self.c = c
 
-        ## Initialize ring model object for neuropil estimation
-        ring_placeholder = 5
-        self.W = RingModel(
-            self.d1,
-            self.d2,
-            ring_placeholder,
-            device=self.device,
-            order=self.data_order,
-            empty=True,
-        )
+        self._results = None
 
-    def finalize_initialization(self):
-        self.demixing_state = True
-        self.a = self.a_init
-        self.b = self.b_init
-        self.c = self.c_init
-        self.mask_a = self.mask_a_init
-
-        # Reset the local pixelwise correlation connectivity data structure
+        #Superpixel-specific initializers, move to new class
+        self._th = None
+        self._robust_corr_term = None
+        self.batch_size = batch_size
         self.dim1_coordinates = None
         self.dim2_coordinates = None
         self.correlations = None
 
-        if self.superpixel_rlt_recent is not None:
-            self.superpixel_rlt.append(self.superpixel_rlt_recent)
-            self.superpixel_image_list.append(self.superpixel_image_recent)
+    @property
+    def results(self):
+        return self.a_init, self.mask_a_init, self.c_init, self.b_init
 
-            self.superpixel_rlt_recent = None
-            self.superpixel_image_recent = None
+    def lock_results_and_continue(self, context: SignalDemixer):
+        if any(element is None for element in self.results):
+            raise ValueError("Results do not exist. Run initialize signals first.")
+        else: #Initiate state transition
+            context.state = DemixingState(self.u_sparse, self.r, self.s, self.v, self.a_init, self.b_init, self.c_init,
+                                          self.mask_a_init, (self.d1, self.d2, self.T), self.data_order, self.device,
+                                          self.batch_size)
+            print("Now in demixing state")
 
-    def initialize_signals_superpixels(
+    @property
+    def state_description(self):
+        return "Initialization state: identify initial estimates of the signals present in the data"
+
+    def _initialize_signals_superpixels(
         self,
-        cut_off_point,
-        residual_cut,
-        length_cut,
-        th,
-        robust_corr_term,
-        text=True,
-        plot_en=False,
-        patch_size=(100, 100),
+        cut_off_point: float=0.9,
+        residual_cut: float=0.3,
+        length_cut: int=3,
+        th: int=1,
+        robust_corr_term: float=0.03,
+        text: bool=True,
+        plot_en: bool=False,
+        patch_size: tuple[int, int]=(100, 100),
     ):
         """
         See superpixel_init function above for a clear explanation of what each of these parameters should be
         """
-
-        import time
-
-        if not self.demixing_state:
-            if th != self._th or self._robust_corr_term != robust_corr_term:
-                print(
-                    f"Computing correlation data structure with MAD threshold  {th}"
-                    f"and the robust corr term is {robust_corr_term}"
-                )
-                # This indicates that it is the first time we are running the superpixel init with this set of
-                # pre-existing self.a and self.c values, so we need to compute the local correlation data
-                start_time = time.time()
-                self.dim1_coordinates, self.dim2_coordinates, self.correlations = (
-                    get_local_correlation_structure(
-                        self.u_sparse,
-                        torch.matmul(self.r * self.s[None, :], self.v),
-                        self.shape,
-                        th,
-                        order=self.data_order,
-                        batch_size=self.batch_size,
-                        pseudo=robust_corr_term,
-                        a=self.a,
-                        c=self.c,
-                    )
-                )
-                self._th = th
-                self._robust_corr_term = robust_corr_term
-                print(
-                    "the time to run the one time only local corr data structure computation is {}".format(
-                        time.time() - start_time
-                    )
-                )
-
-            start_time = time.time()
-            (
-                self.a_init,
-                self.mask_a_init,
-                self.c_init,
-                self.b_init,
-                output_dictionary,
-                superpixel_image,
-            ) = superpixel_init(
-                self.u_sparse,
-                self.r,
-                self.s,
-                self.v,
-                patch_size,
-                self.data_order,
-                self.shape,
-                cut_off_point,
-                residual_cut,
-                length_cut,
-                self.device,
-                self.dim1_coordinates,
-                self.dim2_coordinates,
-                self.correlations,
-                text=text,
-                plot_en=plot_en,
-                a=self.a,
-                c=self.c,
-            )
+        if th != self._th or self._robust_corr_term != robust_corr_term:
             print(
-                "the time to run pure superpixelization is {}".format(
-                    time.time() - start_time
+                f"Computing correlation data structure with MAD threshold  {th}"
+                f"and the robust corr term is {robust_corr_term}"
+            )
+            # This indicates that it is the first time we are running the superpixel init with this set of
+            # pre-existing self.a and self.c values, so we need to compute the local correlation data
+            self.dim1_coordinates, self.dim2_coordinates, self.correlations = (
+                get_local_correlation_structure(
+                    self.u_sparse,
+                    torch.matmul(self.r * self.s[None, :], self.v),
+                    self.shape,
+                    th,
+                    order=self.data_order,
+                    batch_size=self.batch_size,
+                    pseudo=robust_corr_term,
+                    a=self.a,
+                    c=self.c,
                 )
             )
+            self._th = th
+            self._robust_corr_term = robust_corr_term
 
-            self.superpixel_rlt_recent = output_dictionary
-            self.superpixel_image_recent = superpixel_image
+        (
+            self.a_init,
+            self.mask_a_init,
+            self.c_init,
+            self.b_init,
+            output_dictionary,
+            self.diagnostic_image,
+        ) = superpixel_init(
+            self.u_sparse,
+            self.r,
+            self.s,
+            self.v,
+            patch_size,
+            self.data_order,
+            self.shape,
+            cut_off_point,
+            residual_cut,
+            length_cut,
+            self.device,
+            self.dim1_coordinates,
+            self.dim2_coordinates,
+            self.correlations,
+            text=text,
+            plot_en=plot_en,
+            a=self.a,
+            c=self.c,
+        )
 
-        else:
-            print("Cannot run initialization until current round of demixing is done")
+    def _initialize_signals_custom(self, custom_init):
+        if not custom_init["a"].shape[2] > 0:
+            raise ValueError("Must provide at least 1 spatial footprint")
 
-    def initialize_signals_custom(self, custom_init):
 
-        assert (
-            custom_init["a"].shape[2] > 0
-        ), "Must provide at least 1 spatial footprint"
-        assert (
-            self.a is None and self.c is None
-        ), "Custom init is only supported for the first initialization, not for subsequent initializations"
         self.a_init, self.mask_a_init, self.c_init, self.b_init = (
             process_custom_signals(
                 custom_init["a"].copy(),
@@ -2268,83 +2300,138 @@ class SignalDemixer:
                 order=self.data_order,
             )
         )
+        self.diagnostic_image = None
 
-    def precompute_quantities(self, ring_radius: int=15):
+    def initialize_signals(self, is_custom: bool=False, **init_kwargs: dict,
+    ):
         """
+        Runs an initialization algorithm
+
         Args:
-            maxiter (int): Number of iterations to be run (long term eliminate this)
-            ring_radius (int): int, default of 15
+            is_custom (bool): Indicates whether custom init or regular init is used
+            init_kwargs (dict): Dictionary of method-specific parameter values used in superpixel init
+
+
+        Generates the following:
+            tuple consisting of
+            - spatial footprints (torch.sparse_coo_tensor) of shape (pixels, signals)
+            - spatial masks (torch.sparse_coo_tensor) of shape (pixels, signals). The binary masks corresponding to the
+                spatial footprints
+            - temporal footprints (torch.tensor) of shape (timepoints, signals)
+            - baseline (torch.tensor) of shape (pixels, 1)
+            - diagnostic_image (Optional, np.ndarray): Diagnostic reference image
         """
-        self.finalize_initialization()
-        self.K = self.c.shape[1]
+        if is_custom:
+            self._initialize_signals_custom(**init_kwargs)
+        else:
+            self._initialize_signals_superpixels(**init_kwargs)
+
+class DemixingState(SignalProcessingState):
+
+    def __init__(self,  u_sparse: torch.sparse_coo_tensor, r: torch.tensor, s: torch.tensor, v: torch.tensor,
+                 a_init, b_init, c_init, mask_init,
+                 dimensions: tuple[int, int, int], data_order: str="F", device: str="cpu", batch_size: int = 1000):
+        #Define the data dimensions, data ordering scheme, and device
+        self.d1, self.d2, self.T = dimensions
+        self.shape = (self.d1, self.d2, self.T)
+        self.data_order = data_order
+        self.device = device
+
+        self.u_sparse = u_sparse.to(device)
+        self.r = r.to(device)
+        self.s = s.to(device)
+        self.v = v.to(device)
+
+        self._mask_a_init = mask_init
+        self._a_init = a_init.to(device)
+        self._b_init = b_init.to(device)
+        self._c_init = c_init.to(device)
+        self.batch_size = batch_size
+        self.a = None
+        self.b = None
+        self.c = None
+        self.factorized_ring_term = torch.zeros([self.r.shape[1], self.v.shape[0]], device=self.device)
+        self.mask_ab = None
+        self.standard_correlation_image = None
+        self.residual_correlation_image = None
         self.uv_mean = get_mean_data(self.u_sparse, self.r, self.s, self.v)
 
-        if self.mask_a is None:
-            self.mask_a = self.a.bool()
-        else:
-            print("MASK IS NOT NONE")
-        self.mask_ab = self.mask_a
-
+        ring_placeholder = 10
         self.W = RingModel(
             self.d1,
             self.d2,
-            ring_radius,
+            ring_placeholder,
             device=self.device,
             order=self.data_order,
             empty=True,
         )
+
+
         self.a_summand = torch.ones((self.d1 * self.d2, 1)).to(self.device)
+        self.blocks = None
 
-        # Initialize correlation image fields here
-        self.standard_correlation_image = None
-        self.residual_correlation_image = None
-        self.precomputed = True
 
-    def _assert_initialization(self):
-        assert self.a is not None and self.c is not None, "Initialization was not run"
+    @property
+    def state_description(self):
+        return ("Demixing state: Given initial estimates of the signals, this state is designed to run the "
+                "NMF demixing algorithm to get refined source extractions")
 
-    def _assert_ready_to_demix(self):
-        assert self.precomputed, "The values were precomputed"
-        assert self.demixing_state, "Not ready to demix"
 
-    def delete_precomputed(self):
+    @property
+    def results(self):
+        return (self.a, self.c, self.b, self.factorized_ring_term,
+                self.residual_correlation_image, self.standard_correlation_image)
+
+    def lock_results_and_continue(self, context):
+        if any(element is None for element in self.results):
+            raise ValueError("Results do not exist. Run initialize signals first.")
+        else:
+            context.state = InitializingState(self.u_sparse, self.r, self.s, self.v, (self.d1, self.d2, self.T),
+                                              self.data_order, self.device, self.a, self.c, self.batch_size)
+            print("Now in the initialization state")
+
+    def precompute_quantities(self):
+        self.a = self._a_init
+        self.b = self._b_init
+        self.c = self._c_init
+        self.mask_ab = self._mask_a_init
+        if self.mask_ab is None:
+            self.mask_ab = self.a.bool()
+
+
+    def compute_standard_correlation_image(self):
+        self.standard_correlation_image = vcorrcoef_UV_noise(
+            self.u_sparse,
+            self.r * self.s[None, :],
+            self.v,
+            self.c,
+            batch_size=self.batch_size,
+            device=self.device,
+        )
+
+    def compute_residual_correlation_image(self):
+        self.residual_correlation_image = vcorrcoef_resid(
+            self.u_sparse,
+            self.r * self.s[None, :],
+            self.v,
+            self.a,
+            self.c,
+            batch_size=self.batch_size,
+        )
+
+    def update_hals_scheduler(self):
         """
-        For now, this is a memory-saving technique: we delete the precomputed quantities which actually
-        can occupy significant space on GPU
+        Lots of HALS updates can be done in parallel because the underlying signals don't overlap
         """
-        self.precomputed = False
+        adjacency_mat = torch.sparse.mm(self.a.t(), self.a)
+        graph = construct_graph_from_sparse_tensor(adjacency_mat)
+        self.blocks = color_and_get_tensors(graph, self.device)
 
-    def halt_demixing(self):
-        self._delete_precomputed()
-        self.demixing_state = False
+    def update_ring_model_support(self):
+        ones_vec = torch.ones((self.a.shape[1], 1), device=self.a.device)
+        indicator = (torch.sparse.mm(self.a, ones_vec).squeeze() == 0).to(torch.float32)
+        self.W.support = indicator
 
-    def static_baseline_update(self):
-        self._assert_initialization()
-        self._assert_ready_to_demix()
-        self.b = regression_update.baseline_update(self.uv_mean, self.a, self.c)
-
-    def fluctuating_baseline_update(self, ring_radius):
-        """
-        Performs a fluctuating baseline update
-        Args:
-            ring_radius (int): If the ring matrix has not been constructed yet (ie it is empty), then this is the
-                radius value used for the new ring model.
-        """
-        self._assert_initialization()
-        self._assert_ready_to_demix()
-
-        if self.W.empty:
-            # This means we need to create the actual W matrix (i.e. it can't just be empty)
-            self.W = RingModel(
-                self.d1,
-                self.d2,
-                ring_radius,
-                empty=False,
-                device=self.device,
-                order=self.data_order,
-            )
-        self.update_ring_model_support()
-        self.ring_model_weight_update()
 
     def ring_model_weight_update(self, num_samples=1000):
         batches = math.ceil(self.r.shape[1] / num_samples)
@@ -2376,23 +2463,61 @@ class SignalDemixer:
         values = threshold_function(values)
         self.W.weights = values
 
-    def update_ring_model_support(self):
-        ones_vec = torch.ones((self.a.shape[1], 1), device=self.a.device)
-        indicator = (torch.sparse.mm(self.a, ones_vec).squeeze() == 0).to(torch.float32)
-        self.W.support = indicator
+    def static_baseline_update(self):
+        self.b = regression_update.baseline_update(self.uv_mean, self.a, self.c)
 
+    def fluctuating_baseline_update(self, ring_radius):
+        """
+        Performs a fluctuating baseline update
+        Args:
+            ring_radius (int): If the ring matrix has not been constructed yet (ie it is empty), then this is the
+                radius value used for the new ring model.
+        """
+        if self.W.empty:
+            # This means we need to create the actual W matrix (i.e. it can't just be empty)
+            self.W = RingModel(
+                self.d1,
+                self.d2,
+                ring_radius,
+                empty=False,
+                device=self.device,
+                order=self.data_order,
+            )
+        self.update_ring_model_support()
+        self.ring_model_weight_update()
 
-    def update_hals_scheduler(self):
-        """
-        Lots of HALS updates can be done in parallel because the underlying signals don't overlap
-        """
-        adjacency_mat = torch.sparse.mm(self.a.t(), self.a)
-        graph = construct_graph_from_sparse_tensor(adjacency_mat)
-        self.blocks = color_and_get_tensors(graph, self.device)
+    def spatial_update(self, plot_en=False):
+        self.a = regression_update.spatial_update_hals(self.u_sparse, self.r, self.s, self.v, self.a, self.c,
+                                                       self.b,
+                                                       w=self.W, mask_ab=self.mask_ab, blocks=self.blocks)
+
+        ## Delete Bad Components
+        temp = (
+                torch.sparse.mm(self.a.t(), self.a_summand).t() == 0
+        )  # Identify which columns of 'a' are all zeros
+        if torch.sum(temp):
+            (
+                self.a,
+                self.c,
+                self.standard_correlation_image,
+                self.residual_correlation_image,
+                self.mask_ab,
+            ) = delete_comp(
+                self.a,
+                self.c,
+                self.standard_correlation_image,
+                self.residual_correlation_image,
+                self.mask_ab,
+                temp,
+                "zero a!",
+                plot_en,
+                (self.d1, self.d2),
+                order=self.data_order,
+            )
+            self.update_hals_scheduler()
+
 
     def temporal_update(self, denoise=False, plot_en=False, c_nonneg=True):
-        self._assert_initialization()
-        self._assert_ready_to_demix()
         self.c = regression_update.temporal_update_hals(self.u_sparse, self.r, self.s, self.v, self.a, self.c, self.b,
                                                         self.W, c_nonneg=c_nonneg, blocks=self.blocks)
 
@@ -2429,120 +2554,6 @@ class SignalDemixer:
                 order=self.data_order,
             )
             self.update_hals_scheduler()
-
-
-    def spatial_update(self, plot_en=False):
-        self.a = regression_update.spatial_update_hals(self.u_sparse, self.r, self.s, self.v, self.a, self.c, self.b,
-                                                       w=self.W, mask_ab=self.mask_ab, blocks=self.blocks)
-
-
-        ## Delete Bad Components
-        temp = (
-            torch.sparse.mm(self.a.t(), self.a_summand).t() == 0
-        )  # Identify which columns of 'a' are all zeros
-        if torch.sum(temp):
-            (
-                self.a,
-                self.c,
-                self.standard_correlation_image,
-                self.residual_correlation_image,
-                self.mask_ab,
-            ) = delete_comp(
-                self.a,
-                self.c,
-                self.standard_correlation_image,
-                self.residual_correlation_image,
-                self.mask_ab,
-                temp,
-                "zero a!",
-                plot_en,
-                (self.d1, self.d2),
-                order=self.data_order,
-            )
-            self.update_hals_scheduler()
-
-    def compute_local_correlation_image(self, pseudo):
-        ##Long term: the currently initialized "a" and "c" should just be on the same device as U_sparse,R,V
-        a_sp = scipy.sparse.coo_matrix(self.a)
-        a_device = (
-            torch.sparse_coo_tensor(np.array(a_sp.nonzero()), a_sp.data, a_sp.shape)
-            .coalesce()
-            .float()
-            .to(self.device)
-        )
-        c_device = torch.from_numpy(self.c).float().to(self.device)
-        return local_correlation_mat(
-            self.u_sparse,
-            self.r * self.s[None, :],
-            self.v,
-            self.shape,
-            pseudo,
-            a=a_device,
-            c=c_device,
-            order=self.data_order,
-            batch_size=self.batch_size,
-        )
-
-    def compute_single_pixel_correlation_image(self, row_index, residual=True):
-        """
-        Calculates the residual correlation image
-        """
-        if self.a is not None and self.c is not None and residual:
-            a_sp = scipy.sparse.coo_matrix(self.a)
-            a_device = (
-                torch.sparse_coo_tensor(np.array(a_sp.nonzero()), a_sp.data, a_sp.shape)
-                .coalesce()
-                .float()
-                .to(self.device)
-            )
-            c_device = torch.from_numpy(self.c).float().to(self.device)
-        else:
-            a_device = None
-            c_device = None
-        return single_pixel_correlation_image(
-            row_index,
-            self.u_sparse,
-            self.r * self.s[None, :],
-            self.v,
-            a=a_device,
-            c=c_device,
-            batch_size=self.batch_size,
-        )
-
-    def compute_standard_correlation_image(self):
-        self.standard_correlation_image = vcorrcoef_UV_noise(
-            self.u_sparse,
-            self.r * self.s[None, :],
-            self.v,
-            self.c,
-            batch_size=self.batch_size,
-            device=self.device,
-        )
-
-    # TODO: Profile this to see if you can precompute some quantities ahead of time
-    def compute_residual_correlation_image(self):
-        self.residual_correlation_image = vcorrcoef_resid(
-            self.u_sparse,
-            self.r * self.s[None, :],
-            self.v,
-            self.a,
-            self.c,
-            batch_size=self.batch_size,
-        )
-
-    def merge_signals(self, merge_corr_thr, merge_overlap_thr, plot_en, data_order):
-        self.a, self.c, self.mask_ab = merge_components(
-            self.a,
-            self.c,
-            self.standard_correlation_image,
-            self.shape,
-            merge_corr_thr=merge_corr_thr,
-            merge_overlap_thr=merge_overlap_thr,
-            plot_en=plot_en,
-            data_order=self.data_order,
-        )
-
-
 
     def support_update_prune_elements_apply_mask(
         self, corr_th_fix, corr_th_del, plot_en
@@ -2618,43 +2629,30 @@ class SignalDemixer:
         )
 
 
-    def reset(self):
-        """
-        Generic reset to "initial" state of PMD demixing object
-        """
-        self.a = None
-        self.c = None
-        self.mask_a = None
-        self.b = None
-        self.a_init = None
-        self.c_init = None
-        self.mask_a_init = None
-        self.b_init = None
-        self.active_weights = None
-
-        self.superpixel_rlt_recent = None
-        self.superpixel_rlt = []
-        self.superpixel_image_recent = None
-        self.superpixel_image_list = []
-        self.dim1_coordinates = None
-        self.dim2_coordinates = None
-        self.correlations = None
-        self._th = None
-        self._robust_corr_term = None
-
+    def merge_signals(self, merge_corr_thr, merge_overlap_thr, plot_en, data_order):
+        self.a, self.c, self.mask_ab = merge_components(
+            self.a,
+            self.c,
+            self.standard_correlation_image,
+            self.shape,
+            merge_corr_thr=merge_corr_thr,
+            merge_overlap_thr=merge_overlap_thr,
+            plot_en=plot_en,
+            data_order=self.data_order,
+        )
 
     def export_factorized_ring_model(self):
         sparse_component = torch.sparse.mm(self.u_sparse.T, self.W.weights)
         sparse_component = torch.sparse.mm(sparse_component, self.W.ring_mat)
         sparse_component = torch.sparse.mm(sparse_component, self.W.support)
 
-        sparse_component_U = torch.sparse.mm(sparse_component, self.u_sparse)
-        sparse_component_URs = torch.sparse.mm(sparse_component_U, self.r) * self.s[None, :]
+        sparse_component_u = torch.sparse.mm(sparse_component, self.u_sparse)
+        sparse_component_u_rs = torch.sparse.mm(sparse_component_u, self.r) * self.s[None, :]
 
         e = torch.matmul(torch.ones([1, self.v.shape[1]], device=self.device), self.v.t())
         sparse_component_be = torch.sparse.mm(sparse_component, self.b) @ e
 
-        self.factorized_ring_term = torch.matmul(self.r.T, sparse_component_URs - sparse_component_be)
+        self.factorized_ring_term = torch.matmul(self.r.T, sparse_component_u_rs - sparse_component_be)
 
 
     def brightness_order_and_return_state(self):
@@ -2664,21 +2662,17 @@ class SignalDemixer:
         """
         self.export_factorized_ring_model()
 
-        a_sum_vec = torch.ones((self.a.shape[1], 1), device=self.device)
-        self.active_weights = (
-            (torch.sparse.mm(self.a, a_sum_vec) == 0).float().cpu().numpy()
-        )
+        a = self.a.cpu().to_dense().numpy()
+        c = self.c.cpu().numpy()
+        b = self.b.cpu().numpy()
+        factorized_ring_term = self.factorized_ring_term.cpu().numpy()
 
-        self.a = self.a.cpu().to_dense().numpy()
-        self.c = self.c.cpu().numpy()
-        self.b = self.b.cpu().numpy()
-
-        a_max = self.a.max(axis=0)
-        c_max = self.c.max(axis=0)
+        a_max = a.max(axis=0)
+        c_max = c.max(axis=0)
         brightness = a_max * c_max
         brightness_rank = np.argsort(-brightness)
-        self.a = self.a[:, brightness_rank]
-        self.c = self.c[:, brightness_rank]
+        a = a[:, brightness_rank]
+        c = c[:, brightness_rank]
         residual_correlation_image_2d = self.residual_correlation_image.reshape(
             (self.d1, self.d2, -1), order=self.data_order
         )[:, :, brightness_rank]
@@ -2686,27 +2680,16 @@ class SignalDemixer:
             (self.d1, self.d2, -1), order=self.data_order
         )[:, :, brightness_rank]
 
-
-
-        self.demixing_state = False
-        self.precomputed = False
-
-        # Reset the local pixelwise correlation connectivity data structure
-        self.dim1_coordinates = None
-        self.dim2_coordinates = None
-        self.correlations = None
-        self._th = None
-        self._robust_corr_term = None
-        self.blocks = None
-
-
-        return (self.a, self.c, self.b, self.factorized_ring_term,
+        return (a, c, b, factorized_ring_term,
                 residual_correlation_image_2d, standard_correlation_image_2d)
 
-    def demix(self, maxiter, corr_th_fix, corr_th_fix_sec, corr_th_del, switch_point,
-                                       skips,
-                                       merge_corr_thr, merge_overlap_thr, ring_radius, denoise=None, plot_en=False,
-                                       update_after=4, c_nonneg=True):
+
+
+    def demix(self, maxiter: int=25, corr_th_fix: float=0.9, corr_th_fix_sec: float=0.7, corr_th_del: float=0.2,
+              switch_point: int= 5, skips: int= 5,
+              merge_corr_thr: float = 0.8, merge_overlap_thr: float=0.4, ring_radius: int = 10,
+              denoise: Union[list, bool] =None, plot_en: bool=False,
+              update_after: int=4, c_nonneg: bool=True):
         """
         Function for computing background, spatial and temporal components of neurons. Uses HALS updates to iteratively
         refine spatial and temporal estimates.
@@ -2714,7 +2697,7 @@ class SignalDemixer:
 
         data_order = self.data_order
 
-        self.precompute_quantities(ring_radius)
+        self.precompute_quantities()
         self.compute_standard_correlation_image()
         self.compute_residual_correlation_image()
         self.update_hals_scheduler()
@@ -2722,6 +2705,8 @@ class SignalDemixer:
 
         if denoise is None:
             denoise = [False for i in range(maxiter)]
+        elif isinstance(denoise, bool):
+            denoise = [denoise for i in range(maxiter)]
         elif len(denoise) != maxiter:
             print("Length of denoise list is not consistent, setting all denoise values to false for this pass of NMF")
             denoise = [False for i in range(maxiter)]
@@ -2755,7 +2740,10 @@ class SignalDemixer:
                 self.update_ring_model_support()
                 self.update_hals_scheduler()
 
-        self.delete_precomputed()
-        a, c, b, factorized_ring_term, residual_corr_img, standard_corr_img = self.brightness_order_and_return_state()
+        (self.a, self.c, self.b, self.factorized_ring_term,
+         self.residual_correlation_image, self.standard_correlation_image) = self.brightness_order_and_return_state()
 
-        return a, c, b, factorized_ring_term, residual_corr_img, standard_corr_img
+
+
+
+
