@@ -5,7 +5,7 @@ from localnmf.factorized_video import FactorizedVideo
 import torch
 
 
-class ACVideo(FactorizedVideo):
+class ACArray(FactorizedVideo):
     """
     Factorized video for the spatial and temporal extracted sources from the data
     Computations happen transparently on GPU, if device = 'cuda' is specified
@@ -161,7 +161,187 @@ class ACVideo(FactorizedVideo):
 
         return product.squeeze()
 
-class FluctuatingBkgdVideo(FactorizedVideo):
+
+class PMDArray(FactorizedVideo):
+    """
+    Factorized demixing array for PMD movie
+    """
+
+    def __init__(self, fov_shape: tuple[int, int], order: str, u: scipy.sparse.coo_matrix,
+                 r: np.ndarray, s: np.ndarray, v: np.ndarray, device: str='cpu'):
+        """
+        The background movie can be factorized as as the matrix product (u)(r)(s)(v),
+        where u, r, s, v are the standard matrices from the pmd decomposition
+        Args:
+            fov_shape (tuple): (fov_dim1, fov_dim2)
+            order (str): Order to reshape arrays from 1D to 2D
+            u (scipy.sparse.coo_matrix): shape (pixels, rank1)
+            r (np.ndarray): shape (rank1, rank2)
+            s (np.ndarray): shape (rank 2,)
+            v (np.ndarray): shape (rank2, frames)
+            device (str): which device the computations take place on (cuda or cpu)
+        """
+        self._device = device
+        t = v.shape[1]
+        self._shape = (t,) + fov_shape
+        self._u_orig = u
+        self._v_orig = v
+        self._r_orig = r
+        self._s_orig = s
+
+        self._u = torch.sparse_coo_tensor(np.array(u.nonzero()), u.data, u.shape).coalesce().float().to(device)
+        self._v = torch.from_numpy(v).float().to(device)
+        self._r = torch.from_numpy(r).float().to(device)
+        self._s = torch.from_numpy(s).float().to(device)
+        self.pixel_mat = np.arange(np.prod(self.shape[1:])).reshape([self.shape[1], self.shape[2]], order=order)
+        self.pixel_mat = torch.from_numpy(self.pixel_mat).long().to(self.device)
+        self._order = order
+
+    @property
+    def device(self) -> str:
+        return self._device
+
+    @property
+    def u(self) -> scipy.sparse.coo_matrix:
+        return self._u_orig
+
+    @property
+    def r(self) -> np.ndarray:
+        return self._r_orig
+
+    @property
+    def s(self) -> np.ndarray:
+        return self._s_orig
+
+    @property
+    def v(self) -> np.ndarray:
+        return self._v_orig
+
+
+    @property
+    def dtype(self) -> str:
+        """
+        data type, default np.float32
+        """
+        return np.float32
+
+    @property
+    def shape(self) -> Tuple[int, int, int]:
+        """
+        Array shape (n_frames, dims_x, dims_y)
+        """
+        return self._shape
+
+    @property
+    def order(self) -> str:
+        """
+        The spatial data is "flattened" from 2D into 1D. This specifies the order ("F" for column-major or "C" for row-major) in which reshaping happened.
+        """
+        return self._order
+
+    @property
+    def ndim(self) -> int:
+        """
+        Number of dimensions
+        """
+        return len(self.shape)
+
+    def __getitem__(
+            self,
+            item: Union[int, list, np.ndarray, Tuple[Union[int, np.ndarray, slice, range]]]
+    ):
+        # Step 1: index the frames (dimension 0)
+
+        if isinstance(item, tuple):
+            if len(item) > len(self.shape):
+                raise IndexError(
+                    f"Cannot index more dimensions than exist in the array. "
+                    f"You have tried to index with <{len(item)}> dimensions, "
+                    f"only <{len(self.shape)}> dimensions exist in the array"
+                )
+            frame_indexer = item[0]
+        else:
+            frame_indexer = item
+
+        # Step 2: Do some basic error handling for frame_indexer before using it to slice
+
+        if isinstance(frame_indexer, np.ndarray):
+            frame_indexer = torch.from_numpy(frame_indexer).long().to(self.device)
+
+        if isinstance(frame_indexer, list):
+            pass
+
+        elif isinstance(frame_indexer, int):
+            pass
+
+        # numpy int scalar
+        elif isinstance(frame_indexer, np.integer):
+            frame_indexer = frame_indexer.item()
+
+        # treat slice and range the same
+        elif isinstance(frame_indexer, (slice, range)):
+            start = frame_indexer.start
+            stop = frame_indexer.stop
+            step = frame_indexer.step
+
+            if start is not None:
+                if start > self.shape[0]:
+                    raise IndexError(f"Cannot index beyond `n_frames`.\n"
+                                     f"Desired frame start index of <{start}> "
+                                     f"lies beyond `n_frames` <{self.shape[0]}>")
+            if stop is not None:
+                if stop > self.shape[0]:
+                    raise IndexError(f"Cannot index beyond `n_frames`.\n"
+                                     f"Desired frame stop index of <{stop}> "
+                                     f"lies beyond `n_frames` <{self.shape[0]}>")
+
+            if step is None:
+                step = 1
+
+            # convert indexer to slice if it was a range, allows things like decord.VideoReader slicing
+            frame_indexer = slice(start, stop, step)  # in case it was a range object
+
+        else:
+            raise IndexError(
+                f"Invalid indexing method, "
+                f"you have passed a: <{type(item)}>"
+            )
+
+        # Step 3: Now slice the data with frame_indexer (careful: if the ndims has shrunk, add a dim)
+        v_crop = self._v[:, frame_indexer]
+        if v_crop.ndim < self._v.ndim:
+            v_crop = v_crop.unsqueeze(1)
+
+        # Step 4: Deal with remaining indices after lazy computing the frame(s)
+        if isinstance(item, tuple):
+            pixel_space_crop = self.pixel_mat[item[1:]]
+            u_indices = pixel_space_crop.flatten()
+            u_crop = torch.index_select(self._u, 0, u_indices)
+            implied_fov = pixel_space_crop.shape
+        else:
+            u_crop = self._u
+            implied_fov = self.shape[1], self.shape[2]
+
+        # Temporal term is guaranteed to have nonzero "T" dimension below
+        if np.prod(implied_fov) <= v_crop.shape[1]:
+            product = torch.sparse.mm(u_crop, self._r)
+            product *= self._s.unsqueeze(0)
+            product  = torch.matmul(product, v_crop)
+
+        else:
+            product = self._s.unsqueeze(1) * v_crop
+            product = torch.matmul(self._r, product)
+            product = torch.matmul(self._u, product)
+
+        product = product.reshape(implied_fov + (-1,))
+        product = product.permute(-1, *range(product.ndim - 1))
+        product = product.cpu().numpy().astype(self.dtype)
+        return product.squeeze()
+
+
+
+
+class FluctuatingBackgroundArray(FactorizedVideo):
     """
     Factorized video for the spatial and temporal extracted sources from the data
 
@@ -213,7 +393,7 @@ class FluctuatingBkgdVideo(FactorizedVideo):
 
     @property
     def q(self) -> np.ndarray:
-        return self._s_orig
+        return self._q_orig
 
     @property
     def v(self) -> np.ndarray:
