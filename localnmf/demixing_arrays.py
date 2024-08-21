@@ -3,7 +3,61 @@ import numpy as np
 import scipy.sparse
 from localnmf.factorized_video import FactorizedVideo
 import torch
+import functools
 
+global_lru_cache_maxsize = 1
+
+
+def test_slice_effect(my_slice: slice, spatial_dim: int) -> bool:
+    """
+    Returns True if slice will actually have an effect
+    """
+
+    if not ((isinstance(my_slice.start, int) and my_slice.start == 0) or my_slice.start is None):
+        return True
+    elif not ((isinstance(my_slice.stop, int) and my_slice.stop >= spatial_dim) or my_slice.stop is None):
+        return True
+    elif not (my_slice.step is None or (isinstance(my_slice.step, int) and my_slice.step == 1)):
+        return True
+    return False
+
+
+def test_range_effect(my_range: range, spatial_dim: int) -> bool:
+    """
+    Returns True if the range will actually have an effect.
+
+    Parameters:
+    my_range (range): The range object to test.
+    spatial_dim (int): The size of the dimension that the range is applied to.
+
+    Returns:
+    bool: True if the range will affect the selection; False otherwise.
+    """
+    # Check if the range starts from the beginning
+    if my_range.start != 0:
+        return True
+    # Check if the range stops at the end of the dimension
+    elif my_range.stop != spatial_dim:
+        return True
+    # Check if the range step is not 1
+    elif my_range.step != 1:
+        return True
+    return False
+
+
+def test_spatial_crop_effect(my_tuple, spatial_dims) -> bool:
+    """
+    Returns true if the tuple used for spatial cropping actually has an effect on the underlying data. Otherwise
+    cropping can be an expensive and avoidable operation.
+    """
+    for k in range(len(my_tuple)):
+        if isinstance(my_tuple[k], slice):
+            if test_slice_effect(my_tuple[k], spatial_dims[k]):
+                return True
+        if isinstance(my_tuple[k], range):
+            if test_range_effect(my_tuple[k], spatial_dims[k]):
+                return True
+    return False
 
 class ACArray(FactorizedVideo):
     """
@@ -11,7 +65,7 @@ class ACArray(FactorizedVideo):
     Computations happen transparently on GPU, if device = 'cuda' is specified
     """
 
-    def __init__(self, fov_shape: tuple[int, int, int], order: str,
+    def __init__(self, fov_shape: tuple[int, int], order: str,
                  a: scipy.sparse.coo_matrix, c: np.ndarray,
                  device: str='cpu'):
         """
@@ -80,12 +134,12 @@ class ACArray(FactorizedVideo):
         """
         return len(self.shape)
 
-    def __getitem__(
+    # @functools.lru_cache(maxsize=global_lru_cache_maxsize)
+    def getitem_tensor(
             self,
             item: Union[int, list, np.ndarray, Tuple[Union[int, np.ndarray, slice, range]]]
-    ):
+    ) -> torch.tensor:
         # Step 1: index the frames (dimension 0)
-
         if isinstance(item, tuple):
             if len(item) > len(self.shape):
                 raise IndexError(
@@ -145,20 +199,33 @@ class ACArray(FactorizedVideo):
             c_crop = c_crop.unsqueeze(0)
 
         # Step 4: First do spatial subselection before multiplying by c
-        if isinstance(item, tuple):
+        if isinstance(item, tuple) and test_spatial_crop_effect(item[1:], self.shape[1:]):
             pixel_space_crop = self.pixel_mat[item[1:]]
             a_indices = pixel_space_crop.flatten()
             implied_fov = pixel_space_crop.shape
             a_crop = torch.index_select(self._a, 0, a_indices)
+            product = torch.sparse.mm(a_crop, c_crop.T)
+            product = product.reshape(implied_fov + (-1,))
+            product = product.permute(-1, *range(product.ndim - 1))
         else:
             a_crop = self._a
             implied_fov = self.shape[1], self.shape[2]
+            product = torch.sparse.mm(a_crop, c_crop.T)
+            if self.order == "F":
+                product = product.T.reshape((-1, implied_fov[1], implied_fov[0]))
+                product = product.permute((0, 2, 1))
+            else: #order is "C"
+                product = product.reshape((implied_fov[0], implied_fov[1], -1))
+                product = product.permute(2, 0, 1)
 
-        product = torch.sparse.mm(a_crop, c_crop.T)
-        product = product.reshape(implied_fov +  (-1,))
-        product = product.permute(-1, *range(product.ndim - 1))
+        return product
+
+    def __getitem__(
+            self,
+            item: Union[int, list, np.ndarray, Tuple[Union[int, np.ndarray, slice, range]]]
+    ) -> np.ndarray:
+        product = self.getitem_tensor(item)
         product = product.cpu().numpy().astype(self.dtype)
-
         return product.squeeze()
 
 
@@ -246,10 +313,11 @@ class PMDArray(FactorizedVideo):
         """
         return len(self.shape)
 
-    def __getitem__(
+    # @functools.lru_cache(maxsize=global_lru_cache_maxsize)
+    def getitem_tensor(
             self,
             item: Union[int, list, np.ndarray, Tuple[Union[int, np.ndarray, slice, range]]]
-    ):
+    ) -> torch.tensor:
         # Step 1: index the frames (dimension 0)
 
         if isinstance(item, tuple):
@@ -266,7 +334,7 @@ class PMDArray(FactorizedVideo):
         # Step 2: Do some basic error handling for frame_indexer before using it to slice
 
         if isinstance(frame_indexer, np.ndarray):
-            frame_indexer = torch.from_numpy(frame_indexer).long().to(self.device)
+            frame_indexer = frame_indexer
 
         if isinstance(frame_indexer, list):
             pass
@@ -298,7 +366,6 @@ class PMDArray(FactorizedVideo):
             if step is None:
                 step = 1
 
-            # convert indexer to slice if it was a range, allows things like decord.VideoReader slicing
             frame_indexer = slice(start, stop, step)  # in case it was a range object
 
         else:
@@ -313,14 +380,16 @@ class PMDArray(FactorizedVideo):
             v_crop = v_crop.unsqueeze(1)
 
         # Step 4: Deal with remaining indices after lazy computing the frame(s)
-        if isinstance(item, tuple):
+        if isinstance(item, tuple) and test_spatial_crop_effect(item[1:], self.shape[1:]):
             pixel_space_crop = self.pixel_mat[item[1:]]
             u_indices = pixel_space_crop.flatten()
             u_crop = torch.index_select(self._u, 0, u_indices)
             implied_fov = pixel_space_crop.shape
+            used_order = "C" #The crop from pixel mat and flattening means we are now using default torch order
         else:
             u_crop = self._u
             implied_fov = self.shape[1], self.shape[2]
+            used_order = self.order
 
         # Temporal term is guaranteed to have nonzero "T" dimension below
         if np.prod(implied_fov) <= v_crop.shape[1]:
@@ -331,13 +400,24 @@ class PMDArray(FactorizedVideo):
         else:
             product = self._s.unsqueeze(1) * v_crop
             product = torch.matmul(self._r, product)
-            product = torch.matmul(self._u, product)
+            product = torch.sparse.mm(u_crop, product)
 
-        product = product.reshape(implied_fov + (-1,))
-        product = product.permute(-1, *range(product.ndim - 1))
-        product = product.cpu().numpy().astype(self.dtype)
-        return product.squeeze()
+        if used_order == "F":
+            product = product.T.reshape((-1, implied_fov[1], implied_fov[0]))
+            product = product.permute((0, 2, 1))
+        else:  # order is "C"
+            product = product.reshape((implied_fov[0], implied_fov[1], -1))
+            product = product.permute(2, 0, 1)
 
+        return product
+
+    def __getitem__(
+            self,
+            item: Union[int, list, np.ndarray, Tuple[Union[int, np.ndarray, slice, range]]]
+    ) -> np.ndarray:
+        product = self.getitem_tensor(item)
+        product = product.cpu().numpy().astype(self.dtype).squeeze()
+        return product
 
 
 
@@ -428,7 +508,8 @@ class FluctuatingBackgroundArray(FactorizedVideo):
         """
         return len(self.shape)
 
-    def __getitem__(
+    # @functools.lru_cache(maxsize=global_lru_cache_maxsize)
+    def getitem_tensor(
             self,
             item: Union[int, list, np.ndarray, Tuple[Union[int, np.ndarray, slice, range]]]
     ):
@@ -448,7 +529,7 @@ class FluctuatingBackgroundArray(FactorizedVideo):
         # Step 2: Do some basic error handling for frame_indexer before using it to slice
 
         if isinstance(frame_indexer, np.ndarray):
-            frame_indexer = torch.from_numpy(frame_indexer).long().to(self.device)
+            frame_indexer = frame_indexer
 
         if isinstance(frame_indexer, list):
             pass
@@ -495,14 +576,16 @@ class FluctuatingBackgroundArray(FactorizedVideo):
             v_crop = v_crop.unsqueeze(1)
 
         # Step 4: Deal with remaining indices after lazy computing the frame(s)
-        if isinstance(item, tuple):
+        if isinstance(item, tuple) and test_spatial_crop_effect(item[1:], self.shape[1:]):
             pixel_space_crop = self.pixel_mat[item[1:]]
             u_indices = pixel_space_crop.flatten()
             u_crop = torch.index_select(self._u, 0, u_indices)
             implied_fov = pixel_space_crop.shape
+            used_order = "C" #Torch order here by default is C
         else:
             u_crop = self._u
             implied_fov = self.shape[1], self.shape[2]
+            used_order = "F"
 
         # Temporal term is guaranteed to have nonzero "T" dimension below
         if np.prod(implied_fov) <= v_crop.shape[1]:
@@ -513,39 +596,51 @@ class FluctuatingBackgroundArray(FactorizedVideo):
         else:
             product = torch.matmul(self._q, v_crop)
             product = torch.matmul(self._r, product)
-            product = torch.matmul(self._u, product)
+            product = torch.sparse.mm(u_crop, product)
 
-        product = product.reshape(implied_fov + (-1,))
-        product = product.permute(-1, *range(product.ndim - 1))
+        if used_order == "F":
+            product = product.T.reshape((-1, implied_fov[1], implied_fov[0]))
+            product = product.permute((0, 2, 1))
+        else:  # order is "C"
+            product = product.reshape((implied_fov[0], implied_fov[1], -1))
+            product = product.permute(2, 0, 1)
+
+        return product
+
+    def __getitem__(
+            self,
+            item: Union[int, list, np.ndarray, Tuple[Union[int, np.ndarray, slice, range]]]
+    ) -> np.ndarray:
+        product = self.getitem_tensor(item)
         product = product.cpu().numpy().astype(self.dtype)
         return product.squeeze()
 
-class ResidualVideo(FactorizedVideo):
+class ResidualArray(FactorizedVideo):
     """
     Factorized video for the spatial and temporal extracted sources from the data
     """
 
-    def __init__(self, pmd_video: FactorizedVideo, fluctuating_bg_video: FactorizedVideo,
-                 ac_video: FactorizedVideo, static_bg: np.ndarray):
+    def __init__(self, pmd_arr: PMDArray, ac_arr: ACArray,
+                 fluctuating_arr: FluctuatingBackgroundArray, baseline: torch.tensor):
         """
         Args:
-            pmd_video (FactorizedVideo): a pmd video object (mean zero, noise normalized)
-            fluctuating_bg_video (FactorizedVideo): a fluctuating bg video object
-            ac_video (FactorizedVideo): spatial * temporal video object (captures the sources we extracted)
-            static_bg (np.ndarray): A static background term for the spatial support
+            pmd_arr (PMDArray)
+            ac_arr (ACArray)
+            fluctuating_arr (FluctuatingBackgroundArray)
+            baseline (torch.tensor): Shape (fov dim 1, fov dim 2)
         """
-        self.pmd_video = pmd_video
-        self.fluctuating_bg_video = fluctuating_bg_video
-        self.ac_video = ac_video
-        self._shape = pmd_video.shape
-        self.static_background = static_bg
+        self.pmd_arr = pmd_arr
+        self.ac_arr = ac_arr
+        self.baseline = baseline
+        self.fluctuating_arr = fluctuating_arr
+        self._shape = self.pmd_arr.shape
 
     @property
     def dtype(self) -> str:
         """
         data type, default np.float32
         """
-        return self.pmd_video.dtype
+        return self.pmd_arr.dtype
 
     @property
     def shape(self) -> Tuple[int, int, int]:
@@ -565,12 +660,15 @@ class ResidualVideo(FactorizedVideo):
             self,
             item: Union[int, list, np.ndarray, Tuple[Union[int, np.ndarray, slice, range]]]
     ):
-        if isinstance(item, tuple):
-            if len(item) > 1:
-                return (self.pmd_video[item] - self.fluctuating_bg_video[item]
-                        - self.ac_video[item] - self.static_background[item[1:]][None, :])
-        return (self.pmd_video[item] - self.fluctuating_bg_video[item] - self.ac_video[item]
-                - self.static_background[None, :])
+        #In this case there is spatial cropping
+        if isinstance(item, tuple) and len(item) > 1:
+            output = (self.pmd_arr.getitem_tensor(item) - self.fluctuating_arr.getitem_tensor(item)
+                    - self.ac_arr.getitem_tensor(item) - self.baseline[item[1:]][None, :])
+        else:
+            output = (self.pmd_arr.getitem_tensor(item) - self.fluctuating_arr.getitem_tensor(item)
+                      - self.ac_arr.getitem_tensor(item) - self.baseline[None, :])
+
+        return output.cpu().numpy().squeeze()
 
 
 class ColorfulACVideo(FactorizedVideo):
