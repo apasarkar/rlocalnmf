@@ -8,6 +8,9 @@ import functools
 global_lru_cache_maxsize = 1
 
 
+
+
+
 def test_slice_effect(my_slice: slice, spatial_dim: int) -> bool:
     """
     Returns True if slice will actually have an effect
@@ -671,52 +674,67 @@ class ResidualArray(FactorizedVideo):
         return output.cpu().numpy().squeeze()
 
 
-class ColorfulACVideo(FactorizedVideo):
+class ColorfulACArray(FactorizedVideo):
     """
     Factorized video for the spatial and temporal extracted sources from the data
-
-    "a" is the matrix of spatial profiles
-    "c" is the matrix of temporal profiles
     """
 
-    def __init__(self, fov_shape: tuple[int, int, int], order: str, a: scipy.sparse.coo_matrix, c: np.ndarray,
-                 min_color: int = 30, max_color: int = 255):
+    def __init__(self, fov_shape: tuple[int, int], order: str, a: scipy.sparse.coo_matrix, c: np.ndarray,
+                 min_color: int = 30, max_color: int = 255, device = 'cpu'):
         """
         Args:
             fov_shape (tuple): (fov_dim1, fov_dim2)
             order (str): Order to reshape arrays from 1D to 2D
             a (scipy.sparse.coo_matrix): Shape (pixels, components)
             c (np.ndarray). Shape (frames, components)
+            device (str): The device used by torch tensors for the computations
         """
+        self.device = device
         t = c.shape[0]
         self._shape = (t,) + fov_shape + (3,)
         self.pixel_mat = np.arange(np.prod(self.shape[1:3])).reshape([self.shape[1], self.shape[2]], order=order)
-        self.a = a.tocsr()
+        self.pixel_mat = torch.from_numpy(self.pixel_mat).long().to(self.device)
+        self._a = torch.sparse_coo_tensor(np.array(a.nonzero()), a.data, a.shape).coalesce().float().to(self.device)
+        self._c = torch.from_numpy(c).to(self.device).float()
 
         ## Establish the coloring scheme
         num_neurons = c.shape[1]
         colors = np.random.uniform(low=min_color, high=max_color, size=num_neurons * 3)
         colors = colors.reshape((num_neurons, 3))
         color_sum = np.sum(colors, axis=1, keepdims=True)
-        self.final_colors = colors / color_sum
+        self._colors = torch.from_numpy(colors / color_sum).to(self.device).float()
 
-        updated_c = np.zeros((c.shape[0], c.shape[1], 3))
-
-        for i in range(3):
-            updated_c[:, :, i] = c * colors[:, [i]].T
-
-        self.c = updated_c  # Shape (T, K, 3)
-        self.order = order
+        if order == "F" or order == "C":
+            self._order = order
+        else:
+            raise ValueError(f"order can only be F or C")
 
     @property
-    def colors(self) -> np.ndarray:
+    def a(self) -> torch.sparse_coo_tensor:
+        return self._a
+
+    @property
+    def c(self) -> torch.sparse_coo_tensor:
+        return self._c
+
+    @property
+    def colors(self) -> torch.tensor:
         """
         Colors used for each neuron
 
         Returns:
             colors (np.ndarray): Shape (number_of_neurons, 3). RGB colors of each neuron
         """
-        return self.final_colors
+        return self._colors
+
+    @colors.setter
+    def colors(self, new_colors: torch.tensor):
+        """
+        Updates the colors used here
+        Args:
+            new_colors (torch.tensor): Shape (num_neurons, 3)
+        """
+        self._colors = new_colors.to(self.device)
 
     @property
     def dtype(self) -> str:
@@ -739,10 +757,14 @@ class ColorfulACVideo(FactorizedVideo):
         """
         return len(self.shape)
 
-    def _getitem(
+    @property
+    def order(self):
+        return self._order
+
+    def getitem_tensor(
             self,
             item: Union[int, list, np.ndarray, Tuple[Union[int, np.ndarray, slice, range]]]
-    ):
+    ) -> torch.tensor:
         # Step 1: index the frames (dimension 0)
 
         if isinstance(item, tuple):
@@ -759,7 +781,7 @@ class ColorfulACVideo(FactorizedVideo):
         # Step 2: Do some basic error handling for frame_indexer before using it to slice
 
         if isinstance(frame_indexer, np.ndarray):
-            frame_indexer = frame_indexer.tolist()
+            pass
 
         if isinstance(frame_indexer, list):
             pass
@@ -801,48 +823,50 @@ class ColorfulACVideo(FactorizedVideo):
             )
 
         # Step 3: Now slice the data with frame_indexer (careful: if the ndims has shrunk, add a dim)
-        c_crop = self.c[frame_indexer, :, :]
+        c_crop = self.c[frame_indexer, :]
         if c_crop.ndim < self.c.ndim:
-            c_crop = c_crop[None, :, :]
+            c_crop = c_crop[None, :]
 
-        c_crop = np.transpose(c_crop, axes=(1, 0, 2))
+        c_crop = c_crop.T
+
 
         # Step 4: Deal with remaining indices after lazy computing the frame(s)
-        if isinstance(item, tuple):
-            #Note the size of the tuple is one larger due to RGB
-            if len(item) == 3:
-                pixel_space_crop = self.pixel_mat[item[1], :]
-                a_indices = pixel_space_crop.reshape((-1), order=self.order)
-                implied_fov = pixel_space_crop.shape
-            elif len(item) == 4:
-                pixel_space_crop = self.pixel_mat[item[1], item[2]]
-                a_indices = pixel_space_crop.reshape((-1), order=self.order)
-                implied_fov = pixel_space_crop.shape
-            else:
-                raise ValueError("Too many elements in getitem tuple")
+        if isinstance(item, tuple) and test_spatial_crop_effect(item[1:3], self.shape[1:3]):
 
-            a_crop = self.a[a_indices, :]
+            pixel_space_crop = self.pixel_mat[item[1:3]]
+            a_indices = pixel_space_crop.flatten()
+            a_crop = torch.index_select(self._a, 0, a_indices)
+            implied_fov = pixel_space_crop.shape
+            product_list = []
+            for k in range(3):
+                product_list.append(torch.sparse.mm(a_crop, c_crop * self.colors[:, [k]]))
+            product = torch.stack(product_list, dim = 2)
+            product = product.reshape(implied_fov + (c_crop.shape[1],) + (3,))
+            product = product.permute(product.ndim - 2, *range(product.ndim - 2), 3)
         else:
-            a_crop = self.a
+            a_crop = self._a
             implied_fov = self.shape[1], self.shape[2]
 
-        productR = a_crop.dot(c_crop[:, :, 0])
-        productG = a_crop.dot(c_crop[:, :, 1])
-        productB = a_crop.dot(c_crop[:, :, 2])
-        product = np.stack([productR, productG, productB], axis = 2)
-        product = product.reshape(implied_fov + (c_crop.shape[1],) + (3,), order=self.order)
+            product_list = []
+            for k in range(3):
+                curr_product = torch.sparse.mm(a_crop, c_crop * self.colors[:, [k]])
+                if self.order == "F":
+                    curr_product = curr_product.T.reshape((-1, implied_fov[1], implied_fov[0]))
+                    curr_product = curr_product.permute((0, 2, 1))
+                elif self.order == "C":  # order is "C"
+                    curr_product = curr_product.reshape((implied_fov[0], implied_fov[1], -1))
+                    curr_product = curr_product.permute(2, 0, 1)
+                product_list.append(curr_product)
 
-        num_dims = product.ndim
-        # Create a tuple that represents the new order of dimensions
-        # This will put the last dimension first, followed by the remaining dimensions in order
-        new_order = (num_dims - 2,) + tuple(range(num_dims - 2)) + (3,)
-        product = np.transpose(product, axes=new_order)
-        return product.squeeze()
+            product = torch.stack(product_list, dim = 3)
+
+        return product
 
     def __getitem__(
             self,
             item: Union[int, list, np.ndarray, Tuple[Union[int, np.ndarray, slice, range]]]
-    ):
+    ) -> np.ndarray:
 
-        output = self._getitem(item)
-        return np.array(output)
+        product = self.getitem_tensor(item)
+        product = product.cpu().numpy().squeeze()
+        return product
