@@ -2449,8 +2449,9 @@ class DemixingState(SignalProcessingState):
             R_crop = torch.index_select(self.r, 1, indices)
             X_crop = torch.index_select(X, 1, indices)
             e_crop = torch.index_select(e, 1, indices)
+            s_crop = torch.index_select(self.s, 0, indices).unsqueeze(0)
 
-            resid_V_basis = (torch.sparse.mm(self.u_sparse, R_crop) * self.s[None, :] -
+            resid_V_basis = (torch.sparse.mm(self.u_sparse, R_crop) * s_crop -
                              torch.sparse.mm(self.a, X_crop) - torch.matmul(self.b, e_crop))
 
             W_residual = self.W.apply_model_right(resid_V_basis)
