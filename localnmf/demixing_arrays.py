@@ -1,14 +1,10 @@
 from typing import *
 import numpy as np
 import scipy.sparse
+from wgpu.structs import Color
+
 from localnmf.factorized_video import FactorizedVideo
 import torch
-import functools
-
-global_lru_cache_maxsize = 1
-
-
-
 
 
 def test_slice_effect(my_slice: slice, spatial_dim: int) -> bool:
@@ -69,25 +65,24 @@ class ACArray(FactorizedVideo):
     """
 
     def __init__(self, fov_shape: tuple[int, int], order: str,
-                 a: scipy.sparse.coo_matrix, c: np.ndarray,
-                 device: str='cpu'):
+                 a: torch.sparse_coo_tensor, c: torch.tensor):
         """
         Args:
             fov_shape (tuple): (fov_dim1, fov_dim2)
             order (str): Order to reshape arrays from 1D to 2D
-            a (scipy.sparse.coo_matrix): Shape (pixels, components)
-            c (np.ndarray). Shape (frames, components)
-            device (str): The device on which the factrized matrices are processed
+            a (torch.sparse_coo_tensor): Shape (pixels, components)
+            c (torch.tensor). Shape (frames, components)
         """
+        self._a = a
+        self._c = c
+        # Check that both objects are on same device
+        if self._a.device != self._c.device:
+            raise ValueError(f"Spatial and Temporal matrices are not on same device")
+        self._device = self._a.device
         t = c.shape[0]
-        self._device = device
         self._shape = (t,) + fov_shape
         self.pixel_mat = np.arange(np.prod(self.shape[1:])).reshape([self.shape[1], self.shape[2]], order=order)
-        self.pixel_mat = torch.from_numpy(self.pixel_mat).long().to(device)
-        self._a_orig = a
-        self._c_orig = c
-        self._a = torch.sparse_coo_tensor(np.array(a.nonzero()), a.data, a.shape).coalesce().float().to(device)
-        self._c = torch.from_numpy(c).float().to(device)
+        self.pixel_mat = torch.from_numpy(self.pixel_mat).long().to(self.device)
         self._order = order
 
 
@@ -96,18 +91,18 @@ class ACArray(FactorizedVideo):
         return self._device
 
     @property
-    def c(self) -> np.ndarray:
+    def c(self) -> torch.tensor:
         """
         return temporal time courses of all signals, shape (frames, components)
         """
-        return self._c_orig
+        return self._c
 
     @property
-    def a(self) -> scipy.sparse.coo_matrix:
+    def a(self) -> torch.sparse_coo_tensor:
         """
         return spatial profiles of all signals as sparse matrix, shape (pixels, components)
         """
-        return self._a_orig
+        return self._a
 
     @property
     def order(self) -> str:
@@ -155,7 +150,7 @@ class ACArray(FactorizedVideo):
             frame_indexer = item
 
         if isinstance(frame_indexer, np.ndarray):
-            frame_indexer = torch.from_numpy(frame_indexer).long().to(self.device)
+            pass
 
         if isinstance(frame_indexer, list):
             pass
@@ -237,32 +232,33 @@ class PMDArray(FactorizedVideo):
     Factorized demixing array for PMD movie
     """
 
-    def __init__(self, fov_shape: tuple[int, int], order: str, u: scipy.sparse.coo_matrix,
-                 r: np.ndarray, s: np.ndarray, v: np.ndarray, device: str='cpu'):
+    def __init__(self,
+                 fov_shape: tuple[int, int],
+                 order: str,
+                 u: torch.sparse_coo_tensor,
+                 r: torch.tensor,
+                 s: torch.tensor,
+                 v: torch.tensor):
         """
         The background movie can be factorized as as the matrix product (u)(r)(s)(v),
         where u, r, s, v are the standard matrices from the pmd decomposition
         Args:
             fov_shape (tuple): (fov_dim1, fov_dim2)
             order (str): Order to reshape arrays from 1D to 2D
-            u (scipy.sparse.coo_matrix): shape (pixels, rank1)
-            r (np.ndarray): shape (rank1, rank2)
-            s (np.ndarray): shape (rank 2,)
-            v (np.ndarray): shape (rank2, frames)
-            device (str): which device the computations take place on (cuda or cpu)
+            u (torch.sparse_coo_tensor): shape (pixels, rank1)
+            r (torch.tensor): shape (rank1, rank2)
+            s (torch.tensor): shape (rank 2)
+            v (torch.tensor): shape (rank2, frames)
         """
-        self._device = device
+        self._u = u
+        self._r = r
+        self._s = s
+        self._v = v
+        if not (self.u.device == self.r.device == self.s.device == self.v.device):
+            raise ValueError(f"Input tensors are not on the same device")
+        self._device = self.u.device
         t = v.shape[1]
         self._shape = (t,) + fov_shape
-        self._u_orig = u
-        self._v_orig = v
-        self._r_orig = r
-        self._s_orig = s
-
-        self._u = torch.sparse_coo_tensor(np.array(u.nonzero()), u.data, u.shape).coalesce().float().to(device)
-        self._v = torch.from_numpy(v).float().to(device)
-        self._r = torch.from_numpy(r).float().to(device)
-        self._s = torch.from_numpy(s).float().to(device)
         self.pixel_mat = np.arange(np.prod(self.shape[1:])).reshape([self.shape[1], self.shape[2]], order=order)
         self.pixel_mat = torch.from_numpy(self.pixel_mat).long().to(self.device)
         self._order = order
@@ -272,20 +268,20 @@ class PMDArray(FactorizedVideo):
         return self._device
 
     @property
-    def u(self) -> scipy.sparse.coo_matrix:
-        return self._u_orig
+    def u(self) -> torch.sparse_coo_tensor:
+        return self._u
 
     @property
-    def r(self) -> np.ndarray:
-        return self._r_orig
+    def r(self) -> torch.tensor:
+        return self._r
 
     @property
-    def s(self) -> np.ndarray:
-        return self._s_orig
+    def s(self) -> torch.tensor:
+        return self._s
 
     @property
-    def v(self) -> np.ndarray:
-        return self._v_orig
+    def v(self) -> torch.tensor:
+        return self._v
 
 
     @property
@@ -432,32 +428,35 @@ class FluctuatingBackgroundArray(FactorizedVideo):
     "c" is the matrix of temporal profiles
     """
 
-    def __init__(self, fov_shape: tuple[int, int], order: str, u: scipy.sparse.coo_matrix,
-                 r: np.ndarray, q: np.ndarray, v: np.ndarray, device: str='cpu'):
+    def __init__(self,
+                 fov_shape: tuple[int, int],
+                 order: str,
+                 u: torch.sparse_coo_tensor,
+                 r: torch.tensor,
+                 q: torch.tensor,
+                 v: torch.tensor):
         """
-        The background movie can be factorized as as the matrix product (u)(r)(q)(v),
+        The background movie can be factorized as the matrix product (u)(r)(q)(v),
         where u, r, and v are the standard matrices from the pmd decomposition,
         Args:
             fov_shape (tuple): (fov_dim1, fov_dim2)
             order (str): Order to reshape arrays from 1D to 2D
-            u (scipy.sparse.coo_matrix): shape (pixels, rank1)
-            r (np.ndarray): shape (rank1, rank2)
-            q (np.ndarray): shape (rank 2, rank 2)
-            v (np.ndarray): shape (rank2, frames)
-            device (str): which device the computations take place on (cuda or cpu)
+            u (torch.sparse_coo_tensor): shape (pixels, rank1)
+            r (torch.tensor): shape (rank1, rank2)
+            q (torch.tensor): shape (rank 2, rank 2)
+            v (torch.tensor): shape (rank2, frames)
         """
-        self._device = device
         t = v.shape[1]
         self._shape = (t,) + fov_shape
-        self._u_orig = u
-        self._v_orig = v
-        self._r_orig = r
-        self._q_orig = q
 
-        self._u = torch.sparse_coo_tensor(np.array(u.nonzero()), u.data, u.shape).coalesce().float().to(device)
-        self._v = torch.from_numpy(v).float().to(device)
-        self._r = torch.from_numpy(r).float().to(device)
-        self._q = torch.from_numpy(q).float().to(device)
+        self._u = u
+        self._v = v
+        self._r = r
+        self._q = q
+
+        if not (self.u.device == self.v.device == self.r.device == self.q.device):
+            raise ValueError(f"Some input tensors are not on the same device")
+        self._device = self.u.device
         self.pixel_mat = np.arange(np.prod(self.shape[1:])).reshape([self.shape[1], self.shape[2]], order=order)
         self.pixel_mat = torch.from_numpy(self.pixel_mat).long().to(self.device)
         self._order = order
@@ -467,21 +466,20 @@ class FluctuatingBackgroundArray(FactorizedVideo):
         return self._device
 
     @property
-    def u(self) -> scipy.sparse.coo_matrix:
-        return self._u_orig
+    def u(self) -> torch.sparse_coo_tensor:
+        return self._u
 
     @property
-    def r(self) -> np.ndarray:
-        return self._r_orig
+    def r(self) -> torch.tensor:
+        return self._r
 
     @property
-    def q(self) -> np.ndarray:
-        return self._q_orig
+    def q(self) -> torch.tensor:
+        return self._q
 
     @property
-    def v(self) -> np.ndarray:
-        return self._v_orig
-
+    def v(self) -> torch.tensor:
+        return self._v
 
     @property
     def dtype(self) -> str:
@@ -623,8 +621,11 @@ class ResidualArray(FactorizedVideo):
     Factorized video for the spatial and temporal extracted sources from the data
     """
 
-    def __init__(self, pmd_arr: PMDArray, ac_arr: ACArray,
-                 fluctuating_arr: FluctuatingBackgroundArray, baseline: torch.tensor):
+    def __init__(self,
+                 pmd_arr: PMDArray,
+                 ac_arr: ACArray,
+                 fluctuating_arr: FluctuatingBackgroundArray,
+                 baseline: torch.tensor):
         """
         Args:
             pmd_arr (PMDArray)
@@ -636,6 +637,10 @@ class ResidualArray(FactorizedVideo):
         self.ac_arr = ac_arr
         self.baseline = baseline
         self.fluctuating_arr = fluctuating_arr
+
+        if not (self.pmd_arr.device == self.ac_arr.device == self.baseline.device == self.fluctuating_arr.device):
+            raise ValueError(f"Input arrays not all on same device")
+        self._device = self.pmd_arr.device
         self._shape = self.pmd_arr.shape
 
     @property
@@ -644,6 +649,13 @@ class ResidualArray(FactorizedVideo):
         data type, default np.float32
         """
         return self.pmd_arr.dtype
+
+    @property
+    def device(self) -> str:
+        """
+        Returns the device that all the internal tensors are on at init time
+        """
+        return self._device
 
     @property
     def shape(self) -> Tuple[int, int, int]:
@@ -679,23 +691,32 @@ class ColorfulACArray(FactorizedVideo):
     Factorized video for the spatial and temporal extracted sources from the data
     """
 
-    def __init__(self, fov_shape: tuple[int, int], order: str, a: scipy.sparse.coo_matrix, c: np.ndarray,
-                 min_color: int = 30, max_color: int = 255, device = 'cpu'):
+    def __init__(self,
+                 fov_shape: tuple[int, int],
+                 order: str,
+                 a: torch.sparse_coo_tensor,
+                 c: torch.tensor,
+                 min_color: int = 30,
+                 max_color: int = 255):
         """
         Args:
             fov_shape (tuple): (fov_dim1, fov_dim2)
             order (str): Order to reshape arrays from 1D to 2D
-            a (scipy.sparse.coo_matrix): Shape (pixels, components)
-            c (np.ndarray). Shape (frames, components)
-            device (str): The device used by torch tensors for the computations
+            a (torch.sparse_coo_tensor): Shape (pixels, components)
+            c (torch.tensor). Shape (frames, components)
+            min_color (int): Minimum RGB value (from 0 to 255)
+            max_color (int): Maximum RGB value (from 0 to 255)
         """
-        self.device = device
         t = c.shape[0]
+        self._a = a
+        self._c = c
+        if not (self.a.device == self.c.device):
+            raise ValueError(f"Input tensors not on same device")
+        self._device = self.a.device
         self._shape = (t,) + fov_shape + (3,)
         self.pixel_mat = np.arange(np.prod(self.shape[1:3])).reshape([self.shape[1], self.shape[2]], order=order)
         self.pixel_mat = torch.from_numpy(self.pixel_mat).long().to(self.device)
-        self._a = torch.sparse_coo_tensor(np.array(a.nonzero()), a.data, a.shape).coalesce().float().to(self.device)
-        self._c = torch.from_numpy(c).to(self.device).float()
+
 
         ## Establish the coloring scheme
         num_neurons = c.shape[1]
@@ -714,8 +735,12 @@ class ColorfulACArray(FactorizedVideo):
         return self._a
 
     @property
-    def c(self) -> torch.sparse_coo_tensor:
+    def c(self) -> torch.tensor:
         return self._c
+
+    @property
+    def device(self) -> str:
+        return self._device
 
     @property
     def colors(self) -> torch.tensor:
@@ -870,3 +895,153 @@ class ColorfulACArray(FactorizedVideo):
         product = self.getitem_tensor(item)
         product = product.cpu().numpy().squeeze()
         return product
+
+
+
+
+class DemixingResults:
+
+    def __init__(self,
+                 u_sparse: torch.sparse_coo_tensor,
+                 r: torch.tensor,
+                 s: torch.tensor,
+                 q: torch.tensor,
+                 v: torch.tensor,
+                 a: torch.sparse_coo_tensor,
+                 c: torch.tensor,
+                 b: torch.tensor,
+                 order: str,
+                 data_shape: tuple[int, int, int],
+                 device = 'cpu'):
+        """
+        Args:
+            u_sparse (torch.sparse_coo_tensor): shape (pixels, rank 1)
+            r (torch.tensor): shape (rank 1, rank 2)
+            s (torch.tensor): shape (rank 2)
+            q (torch.tensor): shape (rank 2, rank 2)
+            v (torch.tensor): shape (rank 2, num_frames)
+            a (torch.sparse_coo_tensor): shape (pixels, number of neural signals)
+            c (torch.tensor): shape (number of frames, number of neural signals)
+            b (torch.tensor): shape (pixels)
+            order (str): order used to reshape data from 2D to 1D
+            data_shape (tuple): (number of frames, field of view dimension 1, field of view dimension 2)
+            device (str): 'cpu' or 'cuda'. used to manage where the tensors reside
+        """
+        self._device = device
+        self._order = order
+        self._shape = data_shape
+        self._u_sparse = u_sparse.to(device)
+        self._r = r.to(device)
+        self._s = s.to(device)
+        self._q = q.to(device)
+        self._v = v.to(device)
+        self._a = a.to(device)
+        self._c = c.to(device)
+        if self.order == "C":
+            self._baseline = b.reshape((self.shape[1], self.shape[2])).to(self.device)
+        elif self.order == "F":
+            #Note we swap 1 and 2 here
+            self._baseline = b.reshape((self.shape[2], self.shape[1])).T.to(self.device)
+
+
+    @property
+    def shape(self):
+        return self._shape
+
+    @property
+    def order(self):
+        return self._order
+
+    @property
+    def device(self):
+        return self._device
+
+    def to(self, new_device):
+        self._device = new_device
+        self._u_sparse = self._u_sparse.to(self.device)
+        self._r = self._r.to(self.device)
+        self._s = self._s.to(self.device)
+        self._q = self._q.to(self.device)
+        self._v = self._v.to(self.device)
+        self._a = self._a.to(self.device)
+        self._c = self._c.to(self.device)
+        self._baseline = self.baseline.to(self.device)
+
+    @property
+    def fov_shape(self) -> tuple[int, int]:
+        return self.shape[1:3]
+
+    @property
+    def num_frames(self) -> int:
+        return self.shape[0]
+
+    @property
+    def u(self) -> torch.sparse_coo_tensor:
+        return self._u_sparse
+
+    @property
+    def r(self) -> torch.tensor:
+        return self._r
+
+    @property
+    def baseline(self) -> torch.tensor:
+        return self._baseline
+
+    @property
+    def s(self) -> torch.tensor:
+        return self._s
+
+    @property
+    def q(self) -> torch.tensor:
+        return self._q
+
+    @property
+    def v(self) -> torch.tensor:
+        return self._v
+
+    @property
+    def a(self) -> torch.sparse_coo_tensor:
+        return self._a
+
+    @property
+    def c(self) -> torch.tensor:
+        return self._c
+
+    @property
+    def ac_array(self) -> ACArray:
+        """
+        Returns an ACArray using the tensors stored in this object
+        """
+        return ACArray(self.fov_shape, self.order, self.a, self.c)
+
+    @property
+    def pmd_array(self) -> PMDArray:
+        """
+        Returns a PMDArray using the tensors stored in this object
+        """
+        return PMDArray(self.fov_shape,
+                        self.order,
+                        self.u,
+                        self.r,
+                        self.s,
+                        self.v)
+
+    @property
+    def fluctuating_background_array(self) -> FluctuatingBackgroundArray:
+        """
+        Returns a FluctuatingBackgroundArray using the tensors stored in this object
+        """
+        return FluctuatingBackgroundArray(self.fov_shape,
+                                          self.order,
+                                          self.u,
+                                          self.r,
+                                          self.q,
+                                          self.v)
+
+    @property
+    def residual_array(self) -> ResidualArray:
+        return ResidualArray(self.pmd_array, self.ac_array, self.fluctuating_background_array, self.baseline)
+
+    @property
+    def colorful_ac_array(self) -> ColorfulACArray:
+        return ColorfulACArray(self.fov_shape, self.order, self.a, self.c)
