@@ -15,6 +15,7 @@ from tqdm import tqdm
 
 from mpl_toolkits.axes_grid1 import make_axes_locatable
 
+from .demixing_arrays import DemixingResults
 from localnmf import ca_utils
 from localnmf.ca_utils import add_1s_to_rowspan, denoise, construct_graph_from_sparse_tensor, color_and_get_tensors
 from localnmf import regression_update
@@ -551,9 +552,9 @@ def get_local_correlation_structure(
             This is useful for GPU memory management, especially on small graphics cards.
         pseudo: float >= 0. a robust correlation parameter, used in the robust correlation calculation between every pair of neighboring pixels.
             In general, a higher value of pseudo will reduce the compute correlation between two pixels.
-        tol: float. A tolerance parameter used when normalizing time series (to avoid divide by "close to 0" issues).
-        (Optional) a: numpy.ndarray. A (d1*d2, K)-shaped ndarray whose columns describe the correlation structure of the data.
-        (Optional) c: numpy.ndarray. A (T, K)-shaped array whose columns describe the estimated fluorescence time course of each signal.
+        tol: float: A tolerance parameter used when normalizing time series (to avoid divide by "close to 0" issues).
+        a Optional[torch.sparse_coo_tensor]: A (d1*d2, K)-shaped ndarray whose columns describe the correlation structure of the data.
+        c Optional[torch.tensor]: A (T, K)-shaped array whose columns describe the estimated fluorescence time course of each signal.
 
     Returns:
     The following correlation Data Structure:
@@ -571,15 +572,6 @@ def get_local_correlation_structure(
         resid_flag = True
     else:
         resid_flag = False
-
-    if resid_flag:
-        c = torch.Tensor(c).t().to(device)
-        a_sp = scipy.sparse.csr_matrix(a)
-        a_sparse = (
-            torch.sparse_coo_tensor(np.array(a_sp.nonzero()), a_sp.data, a_sp.shape)
-            .coalesce()
-            .to(device)
-        )
 
     dims = (dims[0], dims[1], V.shape[1])
 
@@ -631,14 +623,14 @@ def get_local_correlation_structure(
                     torch.sparse.mm(U_sparse_crop, V), (x_interval, y_interval, -1)
                 )
             if resid_flag:
-                a_sparse_crop = torch.index_select(a_sparse, 0, indices_curr)
+                a_sparse_crop = torch.index_select(a, 0, indices_curr)
                 if order == "F":
                     ac_mov = reshape_fortran(
-                        torch.sparse.mm(a_sparse_crop, c), (x_interval, y_interval, -1)
+                        torch.sparse.mm(a_sparse_crop, c.T), (x_interval, y_interval, -1)
                     )
                 else:
                     ac_mov = reshape_c(
-                        torch.sparse.mm(a_sparse_crop, c), (x_interval, y_interval, -1)
+                        torch.sparse.mm(a_sparse_crop, c.T), (x_interval, y_interval, -1)
                     )
                 Yd = torch.sub(Yd, ac_mov)
 
@@ -1640,8 +1632,8 @@ def superpixel_init(
     correlations: torch.Tensor,
     text: bool = True,
     plot_en: bool = False,
-    a: Optional[np.ndarray] = None,
-    c: Optional[np.ndarray] = None,
+    a: Optional[torch.sparse_coo_tensor] = None,
+    c: Optional[torch.tensor] = None,
 ) -> Tuple[
     torch.sparse_coo_tensor,
     Optional[torch.sparse_coo_tensor],
@@ -1668,8 +1660,8 @@ def superpixel_init(
         correlations (torch.tensor):
         text (bool): Whether or not to overlay text onto correlation plots (when plotting is enabled)
         plot_en (bool) : Whether or not plotting is enabled (for diagnostic purposes)
-        a (numpy.ndarray): shape (d1*d2, K) where K is the number of neurons
-        c (numpy.ndarray): shape (T, K) where T is the number of time points, K is number of neurons
+        a (torch.sparse_coo_tensor): shape (d1*d2, K) where K is the number of neurons
+        c (torch.tensor): shape (T, K) where T is the number of time points, K is number of neurons
 
     Returns:
         a (torch.sparse_coo_tensor): Shape (d1*d2, K) where d1, d2 are the FOV dimensions and K is the number of signals identified
@@ -1686,14 +1678,6 @@ def superpixel_init(
         first_init_flag = True
     elif a is not None and c is not None:
         first_init_flag = False
-        a_sp = scipy.sparse.csr_matrix(a)
-        a = (
-            torch.sparse_coo_tensor(np.array(a_sp.nonzero()), a_sp.data, a_sp.shape)
-            .coalesce()
-            .float()
-            .to(device)
-        )
-        c = torch.from_numpy(c).float().to(device)
     else:
         raise ValueError("Invalid configuration of c and a values were provided")
 
@@ -2169,7 +2153,7 @@ class InitializingState(SignalProcessingState):
 
     def __init__(self, u_sparse: torch.sparse_coo_tensor, r: torch.tensor, s: torch.tensor, v: torch.tensor,
                  dimensions: tuple[int, int, int], data_order: str = "F", device: str = "cpu",
-                 a: Optional[np.ndarray]=None, c: Optional[np.ndarray]=None, batch_size = 40000):
+                 a: Optional[torch.sparse_coo_tensor]=None, c: Optional[torch.tensor]=None, batch_size = 40000):
         """
         Class for initializing the signals
         """
@@ -2190,8 +2174,15 @@ class InitializingState(SignalProcessingState):
         self.diagnostic_image = None
 
 
-        self.a = a
-        self.c = c
+        if a is not None:
+            self.a = a.to(self.device)
+        else:
+            self.a = None
+
+        if c is not None:
+            self.c = c.to(self.device)
+        else:
+            self.c = None
 
         self._results = None
 
@@ -2336,6 +2327,7 @@ class DemixingState(SignalProcessingState):
         self.shape = (self.d1, self.d2, self.T)
         self.data_order = data_order
         self.device = device
+        self._results = None
 
         self.u_sparse = u_sparse.to(device)
         self.r = r.to(device)
@@ -2379,12 +2371,11 @@ class DemixingState(SignalProcessingState):
 
     @property
     def results(self):
-        return (self.a, self.c, self.b, self.factorized_ring_term,
-                self.residual_correlation_image, self.standard_correlation_image)
+        return self._results
 
     def lock_results_and_continue(self, context):
-        if any(element is None for element in self.results):
-            raise ValueError("Results do not exist. Run initialize signals first.")
+        if self.results is None:
+            raise ValueError("Results do not exist. Run demixing signals before moving to next step.")
         else:
             context.state = InitializingState(self.u_sparse, self.r, self.s, self.v, (self.d1, self.d2, self.T),
                                               self.data_order, self.device, self.a, self.c, self.batch_size)
@@ -2741,8 +2732,13 @@ class DemixingState(SignalProcessingState):
                 self.update_ring_model_support()
                 self.update_hals_scheduler()
 
-        (self.a, self.c, self.b, self.factorized_ring_term,
-         self.residual_correlation_image, self.standard_correlation_image) = self.brightness_order_and_return_state()
+        self._results = DemixingResults(self.u_sparse, self.r, self.s, self.factorized_ring_term, self.v,
+                               self.a, self.c, self.b.squeeze(), self.residual_correlation_image,
+                                        self.standard_correlation_image, self.data_order,
+                               (self.T, self.d1, self.d2), 'cpu')
+        
+        return self.results
+
 
 
 

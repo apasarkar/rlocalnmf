@@ -240,7 +240,7 @@ class PMDArray(FactorizedVideo):
                  s: torch.tensor,
                  v: torch.tensor):
         """
-        The background movie can be factorized as as the matrix product (u)(r)(s)(v),
+        The background movie can be factorized as the matrix product (u)(r)(s)(v),
         where u, r, s, v are the standard matrices from the pmd decomposition
         Args:
             fov_shape (tuple): (fov_dim1, fov_dim2)
@@ -249,6 +249,7 @@ class PMDArray(FactorizedVideo):
             r (torch.tensor): shape (rank1, rank2)
             s (torch.tensor): shape (rank 2)
             v (torch.tensor): shape (rank2, frames)
+            residual_correlation_image (torch.tensor):
         """
         self._u = u
         self._r = r
@@ -910,6 +911,8 @@ class DemixingResults:
                  a: torch.sparse_coo_tensor,
                  c: torch.tensor,
                  b: torch.tensor,
+                 residual_correlation_image: np.ndarray,
+                 standard_correlation_image: np.ndarray,
                  order: str,
                  data_shape: tuple[int, int, int],
                  device = 'cpu'):
@@ -937,12 +940,21 @@ class DemixingResults:
         self._v = v.to(device)
         self._a = a.to(device)
         self._c = c.to(device)
+        self._residual_correlation_image = residual_correlation_image
+        self._standard_correlation_image = standard_correlation_image
         if self.order == "C":
             self._baseline = b.reshape((self.shape[1], self.shape[2])).to(self.device)
         elif self.order == "F":
             #Note we swap 1 and 2 here
             self._baseline = b.reshape((self.shape[2], self.shape[1])).T.to(self.device)
 
+    @property
+    def standard_correlation_image(self) -> np.ndarray:
+        return self._standard_correlation_image
+
+    @property
+    def residual_correlation_image(self) -> np.ndarray:
+        return self._residual_correlation_image
 
     @property
     def shape(self):
