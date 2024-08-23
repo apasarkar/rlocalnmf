@@ -2389,6 +2389,17 @@ class DemixingState(SignalProcessingState):
         if self.mask_ab is None:
             self.mask_ab = self.a.bool()
 
+        #At the start of every demixing routine, we reset the W matrix
+        ring_placeholder = 10
+        self.W = RingModel(
+            self.d1,
+            self.d2,
+            ring_placeholder,
+            device=self.device,
+            order=self.data_order,
+            empty=True,
+        )
+
 
     def compute_standard_correlation_image(self):
         self.standard_correlation_image = vcorrcoef_UV_noise(
@@ -2736,7 +2747,7 @@ class DemixingState(SignalProcessingState):
                                self.a, self.c, self.b.squeeze(), self.residual_correlation_image,
                                         self.standard_correlation_image, self.data_order,
                                (self.T, self.d1, self.d2), 'cpu')
-        
+
         return self.results
 
 
