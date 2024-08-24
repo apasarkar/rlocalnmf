@@ -97,22 +97,7 @@ class RingModel:
         self._support = torch.sparse_coo_tensor(torch.stack([index_values, index_values]), new_mask,
                                                 (net_pixels, net_pixels)).coalesce()
 
-    def _construct_init_values(self, batchsize = 100000):
-        num_rows = self.shape[0]*self.shape[1]
-        num_iterations = math.ceil(num_rows / batchsize)
-        net_rowcol = [] #Store the results of torch.stack([curr_rows, curr_columns])
-        net_values = []
-        for ind in range(num_iterations):
-            start_value = batchsize * ind
-            end_value = min(num_rows, start_value + batchsize)
-            rows_to_process = torch.arange(start_value, end_value, device=self.device, dtype=torch.long)
-            curr_rowcol, curr_values = self._construct_at_indices(rows_to_process)
-            net_rowcol.append(curr_rowcol)
-            net_values.append(curr_values)
-
-        return torch.cat(net_rowcol, dim=1), torch.cat(net_values)
-
-    def _construct_at_indices(self, rows_to_process):
+    def construct_ring_matrix(self, rows_to_generate):
         d1, d2 = self.shape
         dim1_spread = torch.arange(-(self.radius + 1), (self.radius + 2), device=self.device)
         dim2_spread = torch.arange(-(self.radius + 1), (self.radius + 2), device=self.device)
@@ -133,9 +118,9 @@ class RingModel:
         logging.debug("number of elts in ring is {}".format(outputs.shape[0]))
 
         #Define the "column indices" of the (d1*d2, d1*d2) sparse matrix (every row is a ring) in 1D representation.
-        column_indices = rows_to_process.unsqueeze(1) + ring_indices.unsqueeze(0)
-        row_indices = rows_to_process.unsqueeze(1) + torch.zeros((1, ring_indices.shape[0]),
-                                                                 device=self.device, dtype=torch.long)
+        column_indices = rows_to_generate.unsqueeze(1) + ring_indices.unsqueeze(0)
+        row_indices = rows_to_generate.unsqueeze(1) + torch.zeros((1, ring_indices.shape[0]),
+                                                                  device=self.device, dtype=torch.long)
 
         #preliminary filter
         good_components = torch.logical_and(column_indices >= 0, column_indices < d1 * d2)
@@ -143,22 +128,22 @@ class RingModel:
             '''
             We get rid of values that are out of bounds
             '''
-            twod_column_indices = (rows_to_process % d2).unsqueeze(1) + dim2_ring.unsqueeze(0)
+            twod_column_indices = (rows_to_generate % d2).unsqueeze(1) + dim2_ring.unsqueeze(0)
             good_components = torch.logical_and(good_components, twod_column_indices >= 0)
             good_components = torch.logical_and(good_components, twod_column_indices < d2)
 
-            twod_row_indices = (rows_to_process // d2).unsqueeze(1) + dim1_ring.unsqueeze(0)
+            twod_row_indices = (rows_to_generate // d2).unsqueeze(1) + dim1_ring.unsqueeze(0)
             good_components = torch.logical_and(good_components, twod_row_indices >= 0)
             good_components = torch.logical_and(good_components, twod_row_indices < d1)
         elif self.order == "F": #Make sure the vertical indices do not shift by columns
             '''
             good_components, as defined above, will filter out columns that are out of bounds, now we filter out rows
             '''
-            twod_column_indices = (rows_to_process // d1).unsqueeze(1) + dim2_ring.unsqueeze(0)
+            twod_column_indices = (rows_to_generate // d1).unsqueeze(1) + dim2_ring.unsqueeze(0)
             good_components = torch.logical_and(good_components, twod_column_indices >= 0)
             good_components = torch.logical_and(good_components, twod_column_indices < d2)
 
-            twod_row_indices = (rows_to_process % d1).unsqueeze(1) + dim1_ring.unsqueeze(0)
+            twod_row_indices = (rows_to_generate % d1).unsqueeze(1) + dim1_ring.unsqueeze(0)
             good_components = torch.logical_and(good_components, twod_row_indices >= 0)
             good_components = torch.logical_and(good_components, twod_row_indices < d1)
 
@@ -166,7 +151,8 @@ class RingModel:
         row_indices = row_indices[good_components]
         values = torch.ones(row_indices.shape, device=self.device, dtype=torch.float32)
 
-        return torch.stack([row_indices, column_indices]), values
+        return  torch.sparse_coo_tensor(torch.stack([row_indices, column_indices]), values,
+                                        (rows_to_generate.shape[0], self.shape[0]*self.shape[1])).coalesce()
 
     def zero_weights(self):
         self.weights = torch.zeros((self.shape[0]*self.shape[1]), device=self.device)

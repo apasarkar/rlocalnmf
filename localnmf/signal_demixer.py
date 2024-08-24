@@ -2448,8 +2448,7 @@ class DemixingState(SignalProcessingState):
             start = self.batch_size * k
             end = min(num_pixels, start + self.batch_size)
             curr_indices = torch.arange(start, end, dtype = torch.long, device = self.device)
-            curr_w_mat_rowcol, curr_w_mat_values = self.W._construct_at_indices(curr_indices)
-            curr_w_mat = torch.sparse_coo_tensor(curr_w_mat_rowcol, curr_w_mat_values, (end - start, num_pixels)).coalesce()
+            curr_w_mat = self.W.construct_ring_matrix(curr_indices)
 
             u_curr = torch.index_select(self.u_sparse, 0, curr_indices)
             a_curr = torch.index_select(self.a, 0, curr_indices)
