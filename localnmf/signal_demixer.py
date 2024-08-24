@@ -2319,7 +2319,7 @@ class DemixingState(SignalProcessingState):
 
     def __init__(self,  u_sparse: torch.sparse_coo_tensor, r: torch.tensor, s: torch.tensor, v: torch.tensor,
                  a_init, b_init, c_init, mask_init,
-                 dimensions: tuple[int, int, int], data_order: str="F", device: str="cpu", batch_size: int = 5000):
+                 dimensions: tuple[int, int, int], data_order: str="F", device: str="cpu", batch_size: int = 50000):
         #Define the data dimensions, data ordering scheme, and device
         self.d1, self.d2, self.T = dimensions
         self.shape = (self.d1, self.d2, self.T)
@@ -2340,22 +2340,13 @@ class DemixingState(SignalProcessingState):
         self.a = None
         self.b = None
         self.c = None
-        self.factorized_ring_term = torch.zeros([self.r.shape[1], self.v.shape[0]], device=self.device)
         self.mask_ab = None
         self.standard_correlation_image = None
         self.residual_correlation_image = None
         self.uv_mean = get_mean_data(self.u_sparse, self.r, self.s, self.v)
 
-        ring_placeholder = 10
-        self.W = RingModel(
-            self.d1,
-            self.d2,
-            ring_placeholder,
-            device=self.device,
-            order=self.data_order,
-            empty=True,
-        )
-
+        self.factorized_ring_term = torch.zeros([self.r.shape[1], self.v.shape[0]], device=self.device)
+        self.W = None
 
         self.a_summand = torch.ones((self.d1 * self.d2, 1)).to(self.device)
         self.blocks = None
@@ -2380,6 +2371,9 @@ class DemixingState(SignalProcessingState):
             print("Now in the initialization state")
 
     def precompute_quantities(self):
+        """
+        Radius of the ring model being used
+        """
         self.a = self._a_init
         self.b = self._b_init
         self.c = self._c_init
@@ -2387,16 +2381,6 @@ class DemixingState(SignalProcessingState):
         if self.mask_ab is None:
             self.mask_ab = self.a.bool()
 
-        #At the start of every demixing routine, we reset the W matrix
-        ring_placeholder = 10
-        self.W = RingModel(
-            self.d1,
-            self.d2,
-            ring_placeholder,
-            device=self.device,
-            order=self.data_order,
-            empty=True,
-        )
         self.factorized_ring_term = torch.zeros((self.r.shape[1], self.r.shape[1]),
                                                 device=self.device, dtype=torch.float32)
 
@@ -2475,23 +2459,10 @@ class DemixingState(SignalProcessingState):
     def static_baseline_update(self):
         self.b = regression_update.baseline_update(self.uv_mean, self.a, self.c)
 
-    def fluctuating_baseline_update(self, ring_radius):
+    def fluctuating_baseline_update(self):
         """
         Performs a fluctuating baseline update
-        Args:
-            ring_radius (int): If the ring matrix has not been constructed yet (ie it is empty), then this is the
-                radius value used for the new ring model.
         """
-        if self.W.empty:
-            # This means we need to create the actual W matrix (i.e. it can't just be empty)
-            self.W = RingModel(
-                self.d1,
-                self.d2,
-                ring_radius,
-                empty=False,
-                device=self.device,
-                order=self.data_order,
-            )
         self.update_ring_model_support()
         self.ring_model_weight_update()
 
@@ -2665,10 +2636,10 @@ class DemixingState(SignalProcessingState):
         data_order = self.data_order
 
         self.precompute_quantities()
+        self.W = RingModel(self.shape[0], self.shape[1], ring_radius, self.device, self.data_order)
         self.compute_standard_correlation_image()
         self.compute_residual_correlation_image()
         self.update_hals_scheduler()
-        self.update_ring_model_support()
 
         if denoise is None:
             denoise = [False for i in range(maxiter)]
@@ -2685,7 +2656,7 @@ class DemixingState(SignalProcessingState):
             self.static_baseline_update()
 
             if iters >= skips:
-                self.fluctuating_baseline_update(ring_radius)
+                self.fluctuating_baseline_update()
             else:
                 pass
 
@@ -2704,7 +2675,6 @@ class DemixingState(SignalProcessingState):
 
                 # TODO: Eliminate the need for moving a and c off GPU
                 self.merge_signals(merge_corr_thr, merge_overlap_thr, plot_en, data_order)
-                self.update_ring_model_support()
                 self.update_hals_scheduler()
 
         self._results = DemixingResults(self.u_sparse, self.r, self.s, self.factorized_ring_term, self.v,
