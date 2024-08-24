@@ -1,9 +1,7 @@
 import torch
-import scipy
-from localnmf import ca_utils
 import logging
 import math
-from typing import *
+
 
 class RingModel:
 
@@ -27,15 +25,8 @@ class RingModel:
         self._device = device
         self._order = order
         if self.empty:
-            row = torch.Tensor([]).to(device).long()
-            col = torch.Tensor([]).to(device).long()
-            value = torch.Tensor([]).to(device).float()
-            self.ring_mat = torch.sparse_coo_tensor(torch.stack([row, col]), value, (d1 * d2, d1 * d2)).coalesce()
             self.weights = torch.zeros((d1 * d2), device=device)
         else:
-            rowcol_stacked, values = self._construct_init_values(batchsize=batchsize)
-            torch.cuda.empty_cache()
-            self.ring_mat = torch.sparse_coo_tensor(rowcol_stacked, values, (d1 * d2, d1 * d2)).coalesce()
             self.weights = torch.ones((d1 * d2), device=device)
 
         self.support = torch.ones((self.shape[0]*self.shape[1]), device=self.device, dtype=torch.float32)
@@ -177,76 +168,8 @@ class RingModel:
 
         return torch.stack([row_indices, column_indices]), values
 
-
-    def apply_model_right(self, tensor: Union[torch.tensor, torch.sparse_coo_tensor]) -> Union[torch.tensor, torch.sparse_coo_tensor]:
-        """
-        Applies the model, d_weights @ Ring @ d_mask @ tensor
-
-        Returns sparse or dense tensor
-        """
-        output = torch.sparse.mm(self.support, tensor)
-        output = torch.sparse.mm(self.ring_mat, output)
-        return  torch.sparse.mm(self.weights, output)
-
-    def apply_model_left(self, tensor):
-        """
-        Applies the model, tensor @ d_weights @ Ring @ d_mask
-
-        Returns sparse or dense tensor
-        """
-        output = torch.sparse.mm(self.weights, tensor.T)
-        output = torch.sparse.mm(self.ring_mat.T, output)
-        output = torch.sparse.mm(self.support, output)
-        return output.T
-
-    def compute_fluctuating_background_row(self, U_sparse, R, s, V, active_weights, b, row_index):
-        """
-        TODO: Remove this
-        Computes a specific row of W(URsV - ac - b), which is the fluctuating background.
-        Recall  we enforce that column i of W contains all zeros whenever row 'i' of a contains nonzero entries. So W*a will always be zero, and the above expression becomes:
-        W(URV - b)
-        Parameters:
-            U_sparse. torch.sparse_coo_tensor. Tensor. Dimensions (d, K)
-            R: torch.Tensor. Dimensions (K x K)
-            s: torch.Tensor of shape (K)
-            V: torch.Tensor. Dimensions (K x T)
-            active_weights: np.ndarray of shape (d, 1). Describes, for each pixel, whether its ring weight should be active or not.
-            b: np.ndarray. Dimensions (d,1). Describes, for each pixel, its static background estimate.
-
-        TODO: When the entire demixing procedure manages all objects directly on the device, we can avoid the awkward convention where some inputs are on "device" and others are definitely on cpu.
-        """
-        device = R.device
-        b = torch.Tensor(b).float().to(device)
-        active_weights = torch.Tensor(active_weights).float().to(device)
-
-        row_index_tensor = torch.arange(row_index, row_index + 1, device=device)
-        W_selected = torch.index_select(self.ring_mat, 0, row_index_tensor).coalesce().to_dense().float()
-
-        W_selected = W_selected * active_weights.t()
-
-        # Apply unweighted ring model to W(URV - b)
-        WU = torch.sparse.mm(U_sparse.t(), W_selected.t()).t()
-        WUR = torch.matmul(WU, R)
-        WURs = WUR * s[None, :]
-        WURsV = torch.matmul(WURs, V)
-        Wb = torch.matmul(W_selected, b)
-
-        difference = WURsV - Wb
-
-        # Apply weight at end
-        weighted_row = self.weights[row_index_tensor] * difference
-        return weighted_row
-
     def zero_weights(self):
         self.weights = torch.zeros((self.shape[0]*self.shape[1]), device=self.device)
 
     def reset_weights(self):
         self.weights = torch.ones((self.shape[0]*self.shape[1]), device=self.device)
-
-    def export_to_scipy(self) -> scipy.sparse.coo_matrix:
-        """
-        Temporary code to export the ring model to a scipy sparse matrix
-        """
-        output = torch.sparse.mm(self.weights, self.ring_mat)
-        output = torch.sparse.mm(output, self.support)
-        return ca_utils.torch_sparse_to_scipy_coo(output)

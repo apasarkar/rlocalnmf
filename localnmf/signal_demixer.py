@@ -444,13 +444,12 @@ def process_custom_signals(a_init, U_sparse, R, s, V, order="C", c_nonneg=True, 
         .to(device)
     )
     c = torch.zeros([dims[2], a_init.shape[2]], device=device, dtype=torch.float)
-    W = RingModel(dims[0], dims[1], 1, device=device, order=order, empty=True)
 
     uv_mean = get_mean_data(U_sparse, R, s, V)
 
     # Baseline update followed by 'c' update:
     b = regression_update.baseline_update(uv_mean, a, c)
-    c = regression_update.temporal_update_hals(U_sparse, R, s, V, a, c, b, w=W, c_nonneg=c_nonneg, blocks=blocks)
+    c = regression_update.temporal_update_hals(U_sparse, R, s, V, a, c, b, c_nonneg=c_nonneg, blocks=blocks)
 
     c_norm = torch.linalg.norm(c, dim=0)
     nonzero_dim1 = torch.nonzero(c_norm).squeeze()
@@ -886,16 +885,15 @@ def spatial_temporal_ini_UV(
     uv_mean = get_mean_data(u_sparse, r, s, v)
     mean_ac = torch.sparse.mm(a_sparse, torch.mean(c_final.t(), dim=1, keepdim=True))
     uv_mean -= mean_ac
-    w = RingModel(dims[0], dims[1], 1, device=device, empty=True)
 
     for _ in range(1):
         b_torch = regression_update.baseline_update(uv_mean, a_sparse, c_final)
-        c_final = regression_update.temporal_update_hals(u_sparse, r, s, v, a_sparse, c_final, b_torch, w=w)
+        c_final = regression_update.temporal_update_hals(u_sparse, r, s, v, a_sparse, c_final, b_torch)
 
         b_torch = regression_update.baseline_update(
             uv_mean.to(device), a_sparse, c_final
         )
-        a_sparse = regression_update.spatial_update_hals(u_sparse, r, s, v, a_sparse, c_final, b_torch, w=w)
+        a_sparse = regression_update.spatial_update_hals(u_sparse, r, s, v, a_sparse, c_final, b_torch)
 
     # Now return only the newly initialized components
     col_index_tensor = torch.arange(start=k, end=k + len(comps), step=1, device=device)
@@ -2321,7 +2319,7 @@ class DemixingState(SignalProcessingState):
 
     def __init__(self,  u_sparse: torch.sparse_coo_tensor, r: torch.tensor, s: torch.tensor, v: torch.tensor,
                  a_init, b_init, c_init, mask_init,
-                 dimensions: tuple[int, int, int], data_order: str="F", device: str="cpu", batch_size: int = 1000):
+                 dimensions: tuple[int, int, int], data_order: str="F", device: str="cpu", batch_size: int = 5000):
         #Define the data dimensions, data ordering scheme, and device
         self.d1, self.d2, self.T = dimensions
         self.shape = (self.d1, self.d2, self.T)
@@ -2399,6 +2397,8 @@ class DemixingState(SignalProcessingState):
             order=self.data_order,
             empty=True,
         )
+        self.factorized_ring_term = torch.zeros((self.r.shape[1], self.r.shape[1]),
+                                                device=self.device, dtype=torch.float32)
 
 
     def compute_standard_correlation_image(self):
@@ -2434,37 +2434,44 @@ class DemixingState(SignalProcessingState):
         indicator = (torch.sparse.mm(self.a, ones_vec).squeeze() == 0).to(torch.float32)
         self.W.support = indicator
 
-
-    def ring_model_weight_update(self, num_samples=1000):
-        batches = math.ceil(self.r.shape[1] / num_samples)
-        denominator = 0
-        numerator = 0
-        self.W.reset_weights()
-
-        X = torch.matmul(self.c.t(), self.v.t())
+    def ring_model_weight_update(self):
+        num_pixels = self.shape[0] * self.shape[1]
+        batches = math.ceil(num_pixels / self.batch_size)
+        self.factorized_ring_term *= 0 #Reset the factorized ring term
         e = torch.matmul(torch.ones([1, self.v.shape[1]], device=self.device), self.v.t())
+        x = torch.matmul(self.c.t(), self.v.t())
 
+        support_u = torch.sparse.mm(self.W.support, self.u_sparse)
+        support_b = torch.sparse.mm(self.W.support, self.b)
+        weights = torch.zeros(num_pixels, device = self.device)
         for k in range(batches):
-            start = num_samples * k
-            end = min(self.r.shape[1], start + num_samples)
-            indices = torch.arange(start, end, device=self.device)
-            R_crop = torch.index_select(self.r, 1, indices)
-            X_crop = torch.index_select(X, 1, indices)
-            e_crop = torch.index_select(e, 1, indices)
-            s_crop = torch.index_select(self.s, 0, indices).unsqueeze(0)
+            start = self.batch_size * k
+            end = min(num_pixels, start + self.batch_size)
+            curr_indices = torch.arange(start, end, dtype = torch.long, device = self.device)
+            curr_w_mat_rowcol, curr_w_mat_values = self.W._construct_at_indices(curr_indices)
+            curr_w_mat = torch.sparse_coo_tensor(curr_w_mat_rowcol, curr_w_mat_values, (end - start, num_pixels)).coalesce()
 
-            resid_V_basis = (torch.sparse.mm(self.u_sparse, R_crop) * s_crop -
-                             torch.sparse.mm(self.a, X_crop) - torch.matmul(self.b, e_crop))
+            u_curr = torch.index_select(self.u_sparse, 0, curr_indices)
+            a_curr = torch.index_select(self.a, 0, curr_indices)
+            ur_curr = torch.sparse.mm(u_curr, self.r)
+            urs_curr = ur_curr * self.s.unsqueeze(0)
+            ac_curr = torch.sparse.mm(a_curr, x)
 
-            W_residual = self.W.apply_model_right(resid_V_basis)
+            be_curr = torch.index_select(self.b, 0, curr_indices) @ e
 
-            denominator += torch.sum(W_residual * W_residual, dim=1)
-            numerator += torch.sum(W_residual * resid_V_basis, dim=1)
+            term1 = urs_curr - ac_curr - be_curr
+            term2 = (torch.sparse.mm(torch.sparse.mm(curr_w_mat, support_u), self.r) * self.s.unsqueeze(0) -
+                     torch.sparse.mm(curr_w_mat, support_b) @ e)
 
-        values = torch.nan_to_num(numerator / denominator, nan=0.0, posinf=0.0, neginf=0.0)
-        threshold_function = torch.nn.ReLU()
-        values = threshold_function(values)
-        self.W.weights = values
+            curr_weights = torch.sum(term1 * term2, dim = 1) / torch.square(torch.linalg.norm(term2, dim = 1))
+            curr_weights = torch.nan_to_num(curr_weights, nan=0.0, posinf=0.0, neginf=0.0)
+            threshold_function = torch.nn.ReLU()
+            curr_weights = threshold_function(curr_weights)
+            weights[start:end] = curr_weights
+
+            self.factorized_ring_term += (ur_curr * curr_weights.unsqueeze(1)).T @ term2
+
+        self.W.weights = weights
 
     def static_baseline_update(self):
         self.b = regression_update.baseline_update(self.uv_mean, self.a, self.c)
@@ -2491,8 +2498,8 @@ class DemixingState(SignalProcessingState):
 
     def spatial_update(self, plot_en=False):
         self.a = regression_update.spatial_update_hals(self.u_sparse, self.r, self.s, self.v, self.a, self.c,
-                                                       self.b,
-                                                       w=self.W, mask_ab=self.mask_ab, blocks=self.blocks)
+                                                       self.b, q = self.factorized_ring_term,
+                                                       mask_ab=self.mask_ab, blocks=self.blocks)
 
         ## Delete Bad Components
         temp = (
@@ -2521,8 +2528,9 @@ class DemixingState(SignalProcessingState):
 
 
     def temporal_update(self, denoise=False, plot_en=False, c_nonneg=True):
-        self.c = regression_update.temporal_update_hals(self.u_sparse, self.r, self.s, self.v, self.a, self.c, self.b,
-                                                        self.W, c_nonneg=c_nonneg, blocks=self.blocks)
+        self.c = regression_update.temporal_update_hals(self.u_sparse, self.r, self.s,
+                                                        self.v, self.a, self.c, self.b, q = self.factorized_ring_term,
+                                                        c_nonneg=c_nonneg, blocks=self.blocks)
 
         # Denoise 'c' components if desired
         if denoise:
@@ -2643,49 +2651,6 @@ class DemixingState(SignalProcessingState):
             plot_en=plot_en,
             data_order=self.data_order,
         )
-
-    def export_factorized_ring_model(self):
-        sparse_component = torch.sparse.mm(self.u_sparse.T, self.W.weights)
-        sparse_component = torch.sparse.mm(sparse_component, self.W.ring_mat)
-        sparse_component = torch.sparse.mm(sparse_component, self.W.support)
-
-        sparse_component_u = torch.sparse.mm(sparse_component, self.u_sparse)
-        sparse_component_u_rs = torch.sparse.mm(sparse_component_u, self.r) * self.s[None, :]
-
-        e = torch.matmul(torch.ones([1, self.v.shape[1]], device=self.device), self.v.t())
-        sparse_component_be = torch.sparse.mm(sparse_component, self.b) @ e
-
-        self.factorized_ring_term = torch.matmul(self.r.T, sparse_component_u_rs - sparse_component_be)
-
-
-    def brightness_order_and_return_state(self):
-        """
-        This is a compatibility function. Long term the api for this should change.
-        Assumption here is that before running this function, the data is on the "device" in "demixing" state. After, it will not be.
-        """
-        self.export_factorized_ring_model()
-
-        a = self.a.cpu().to_dense().numpy()
-        c = self.c.cpu().numpy()
-        b = self.b.cpu().numpy()
-        factorized_ring_term = self.factorized_ring_term.cpu().numpy()
-
-        a_max = a.max(axis=0)
-        c_max = c.max(axis=0)
-        brightness = a_max * c_max
-        brightness_rank = np.argsort(-brightness)
-        a = a[:, brightness_rank]
-        c = c[:, brightness_rank]
-        residual_correlation_image_2d = self.residual_correlation_image.reshape(
-            (self.d1, self.d2, -1), order=self.data_order
-        )[:, :, brightness_rank]
-        standard_correlation_image_2d = self.standard_correlation_image.reshape(
-            (self.d1, self.d2, -1), order=self.data_order
-        )[:, :, brightness_rank]
-
-        return (a, c, b, factorized_ring_term,
-                residual_correlation_image_2d, standard_correlation_image_2d)
-
 
 
     def demix(self, maxiter: int=25, corr_th_fix: float=0.9, corr_th_fix_sec: float=0.7, corr_th_del: float=0.2,

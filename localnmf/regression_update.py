@@ -33,54 +33,34 @@ def baseline_update(uv_mean, a, c, to_torch=False):
         return b
 
 
-def project_U_HALS(
-    U_sparse, R, W, vector, a_sparse, selected_indices: Optional[torch.tensor] = None
-):
-    """
-    Commonly used routine to project background term (W) onto U basis in HALS calculations.
-    We exploit the fact that the product UR has orthonormal columns
-    Note that we multiple W by v first (before doing any other matmul) because that collapses to a single vector. Then
-    all subsequent matmuls are very fast
-    Inputs:
-        U_sparse: torch.sparse_coo_tensor. object. Dimensions d x r where d is number of pixels, r is rank
-        R: torch.Tensor object. Shape r x r' (where r may be equal to r'). UR is the orthonormal left basis term for the SVD of the PMD movie (recall the SVD decomposition is URsV where UR
-            is the left set of orthonormal col vectors, is the diagonal matrix, and V contains the right orthonormal row vectors.
-        W: ring model object. Represents a (d, d)-shaped sparse tensor
-        vector: torch.Tensor. Dimensions (d, k) for some value k
-        a_sparse. torch.sparse_coo_tensor object, with shape (d, k)
-    """
-    Wv = W.apply_model_right(vector)
-    UtWv = torch.sparse.mm(U_sparse.t(), Wv)
-    RRt = torch.matmul(R, R.t())
-    RRtUtWv = torch.matmul(RRt, UtWv)
-
-    if selected_indices is None:
-        final_projection = torch.sparse.mm(U_sparse, RRtUtWv)
-    else:
-        u_subset = torch.index_select(U_sparse, 0, selected_indices)
-        final_projection = torch.sparse.mm(u_subset, RRtUtWv)
-
-    return final_projection
-
-
 def spatial_update_hals(
-    u_sparse, r, s, v, a_sparse, c, b, w=None, blocks=None, mask_ab=None
+        u_sparse: torch.tensor,
+        r: torch.tensor,
+        s: torch.tensor,
+        v: torch.tensor,
+        a_sparse: torch.sparse_coo_tensor,
+        c: torch.tensor,
+        b: torch.tensor,
+        q: Optional[torch.tensor] = None,
+        blocks: Optional[Union[torch.tensor, list]]=None,
+        mask_ab: Optional[torch.sparse_coo_tensor]=None
 ):
     """
     Computes a spatial HALS updates:
     Params:
 
         Note: The first four parameters are the "PMD" representation of the data: it is given in a traditional SVD form: URsV, where UR is the left orthogonal basis, 's' represents the diagonal matrix, and V is the right orthogonal basis.
-        u_sparse: torch.sparse_coo_tensor. Sparse matrix, with dimensions (d x R)
-        r: torch.Tensor. Dimensions (R, R') where R' is roughly equal to R (it may be equal to R+1)
-        s: torch.Tensor. This is the diagonal of a R' x R' matrix (so it is represented by a R' shaped tensor)
-        v: torch.Tensor. Dimensions R' x T. Dimensions R' x T, where T is the number of frames, where all rows are orthonormal.
+        u_sparse (torch.sparse_coo_tensor): Sparse matrix, with dimensions (d x R)
+        r (torch.Tensor): Dimensions (R, R') where R' is roughly equal to R (it may be equal to R+1)
+        s (torch.Tensor): This is the diagonal of a R' x R' matrix (so it is represented by a R' shaped tensor)
+        v (torch.Tensor): Dimensions R' x T. Dimensions R' x T, where T is the number of frames, where all rows are orthonormal.
             Note:  V must contain the 1 x T vector of all 1's in its rowspan.
-        a_sparse: torch.sparse_coo_tensor. dimensions d x k, where k represents the number of neural signals.
-        c: torch.Tensor. Dimensions T x k
-        b: torch.Tensor. Dimensions d x 1. Represents static background
-        W: ring_model object. Describes a sparse matrix with dimensions (d x d)
-        mask_ab: torch.sparse_coo_tensor. Dimensions (d x k). For each neuron, indicates the allowed support of neuron
+        a_sparse (torch.sparse_coo_tensor): dimensions d x k, where k represents the number of neural signals.
+        c (torch.Tensor): Dimensions T x k
+        b (torch.Tensor): Dimensions d x 1. Represents static background
+        q (torch.tensor): This is the factorized ring model term; u@r@q@v gives you the full ring model movie
+        blocks Optional[Union[torch.tensor, list]]: Describes which components can be updated in parallel. Typically a list of 1D tensors, each describing indices
+        mask_ab (torch.sparse_coo_tensor): Dimensions (d x k). For each neuron, indicates the allowed support of neuron
 
     Returns:
         a_sparse: torch.sparse_coo_tensor. Dimensions d x k, containing updated spatial matrix
@@ -107,35 +87,24 @@ def spatial_update_hals(
     C_prime_diag = torch.diag(C_prime)
     C_prime_diag[C_prime_diag == 0] = 1  # For division safety
     """
-    We will now compute the TRANSPOSE of the following expression: 
+    We will now compute the following expression: 
     
-    [URs - be - Proj(W)(URS -be - aX)]Vc
+    [UR(diag(s) - q)Vc - beVc]
     
-    The result (after the transpose) is a N x d sized matrix, where N is the number of neural signals
+    This is part of the 'residual video' that we regress onto the spatial components below
     """
 
-    ### TODO: Optimize this later to avoid computing D x r matrices...?
-    URsVc = torch.sparse.mm(u_sparse, torch.matmul(r, s[:, None] * Vc))
-    beVc = torch.matmul(b, torch.matmul(e, Vc))
+    u_subset = torch.index_select(u_sparse, 0, nonzero_row_indices)
 
+    if q is not None:
+        background_subtracted_projection = torch.sparse.mm(u_subset,
+                                                           torch.matmul(r, torch.matmul((torch.diag(s) - q), Vc)))
+    else:
+        background_subtracted_projection = torch.sparse.mm(u_subset,
+                                                           torch.matmul(r * s.unsqueeze(0), Vc))
+    baseline_projection = torch.matmul(torch.index_select(b, 0, nonzero_row_indices), torch.matmul(e, Vc))
 
-    cumulator = (
-        torch.index_select(URsVc, 0, nonzero_row_indices)
-        - torch.index_select(beVc, 0, nonzero_row_indices)
-    )
-
-    if w is not None and not w.empty:
-        residual_term = URsVc - beVc
-
-        ring_term = project_U_HALS(
-            u_sparse,
-            r,
-            w,
-            residual_term,
-            a_sparse,
-            selected_indices=nonzero_row_indices,
-        )
-        cumulator -= ring_term
+    cumulator = background_subtracted_projection - baseline_projection
 
     threshold_func = torch.nn.ReLU(0)
     if blocks is None:
@@ -164,32 +133,25 @@ def spatial_update_hals(
     return a_sparse
 
 
-##Compute the projection matrix:
-def get_projection_matrix_temporal_HALS_routine(U_sparse, R, W, a_sparse):
-    aU = torch.sparse.mm(a_sparse.t(), U_sparse)
-    aUR = torch.sparse.mm(aU, R)
-    aURRt = torch.matmul(aUR, R.t())
-    aURRtUt = torch.sparse.mm(U_sparse, aURRt.t()).t()  # Shape here is N x d
-    projector = W.apply_model_left(aURRtUt)
-
-    return projector
-
-
-def temporal_update_hals(u_sparse, r, s, v, a_sparse, c, b, w=None, c_nonneg=True, blocks=None):
+def temporal_update_hals(u_sparse: torch.sparse_coo_tensor, r: torch.tensor, s: torch.tensor,
+                         v: torch.tensor, a_sparse: torch.sparse_coo_tensor,
+                         c: torch.tensor,
+                         b: torch.tensor, q: Optional[torch.tensor] = None,
+                         c_nonneg: bool=True, blocks: Optional[Union[torch.tensor, list]]=None):
     """
     Inputs:
          Note: The first four parameters are the "PMD" representation of the data: it is given in a traditional SVD form: URsV, where UR is the left orthogonal basis, 's' represents the diagonal matrix, and V is the right orthogonal basis.
         u_sparse: torch.sparse_coo_tensor. Sparse matrix, with dimensions (d x R)
         r: torch.Tensor. Dimensions (R, R') where R' is roughly equal to R (it may be equal to R+1)
-        s: torch.Tensor. This is the diagonal of a R' x R' matrix (so it is represented by a R' shaped tensor)
+        s: torch.Tensor. This is the diagonal of R' x R' matrix (so it is represented by a R' shaped tensor)
         v: torch.Tensor. Dimensions R' x T. Dimensions R' x T, where T is the number of frames, where all rows are orthonormal.
             Note:  V must contain the 1 x T vector of all 1's in its rowspan.
-
         a: (d1*d2, k)-shaped torch.sparse_coo_tensor
         c: (T, k)-shaped torch.Tensor
         b: (d1*d2, 1)-shaped torch.Tensor
-        w: (d1*d2, d1*d2)-shaped ring model object
+        q Optional[torch.tensor]: This is the factorized ring model term; u@r@q@v gives you the full ring model movie
         c_nonneg (bool): Indicates whether "c" should be nonnegative or fully unconstrained. For voltage data, it should be unconstrained; for calcium it should be constrained.
+        blocks Optional[Union[torch.tensor, list]]: Describes which components can be updated in parallel. Typically a list of 1D tensors, each describing indices
 
     Returns:
         c: (T, k)-shaped np.ndarray. Updated temporal components
@@ -203,30 +165,18 @@ def temporal_update_hals(u_sparse, r, s, v, a_sparse, c, b, w=None, c_nonneg=Tru
 
     # Step 1: Get aTURs
     aTU = torch.sparse.mm(a_sparse.t(), u_sparse)
-    aTUR = torch.matmul(aTU, r)
-    aTURs = aTUR * s[None, :]
+    aTUR = torch.sparse.mm(aTU, r)
+    if q is not None:
+        fluctuating_background_subtracted_projection = aTUR @ (torch.diag(s) - q)
+    else:
+        fluctuating_background_subtracted_projection = aTUR * s.unsqueeze(0)
 
     # Step 2: Get aTbe
     aTb = torch.matmul(a_sparse.t(), b)
-    aTbe = torch.matmul(aTb, e)
+    static_background_projection = torch.matmul(aTb, e)
 
     # Step 3:
-    cumulator = aTURs - aTbe
-
-    if w is not None and not w.empty:
-        projector = get_projection_matrix_temporal_HALS_routine(
-            u_sparse, r, w, a_sparse
-        )
-        PU = torch.sparse.mm(u_sparse.t(), projector.t()).t()
-        PUR = torch.matmul(PU, r)
-        PURs = PUR * s[None, :]
-
-        Pb = torch.matmul(projector, b)
-        Pbe = torch.matmul(Pb, e)
-
-        ring_term = PURs - Pbe
-
-        cumulator -= ring_term
+    cumulator = fluctuating_background_subtracted_projection - static_background_projection
 
     cumulator = torch.matmul(cumulator, v)
 
