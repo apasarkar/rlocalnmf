@@ -50,8 +50,110 @@ def make_mask_dynamic(corr_img_all_r: np.ndarray,
 
     return mask_a.reshape((-1, mask_a.shape[2]), order=data_order)
 
+def _compute_residual_correlation_image(u_sparse: torch.sparse_coo_tensor,
+                                        r: torch.tensor,
+                                        s: torch.tensor,
+                                        v: torch.tensor,
+                                        spatial_comps: torch.sparse_coo_tensor,
+                                        temporal_comps: torch.tensor,
+                                        blocks: Optional[Union[torch.tensor, list]] = None,
+                                        batch_size: int=1000,
+                                        device: str = 'cpu') -> np.ndarray:
+    """
+    The residual correlation image for each neuron "i" can be broken up into two parts: the pixels that do
+    not currently belong to the spatial support of neuron "i" and the pixels that do. For the former, we can compute
+    the correlation image via ((URs - AX^T)Vc_norm) and then divide each pixel by the norm of URs - AX^T
 
-def _compute_residual_correlation_image(U_sparse, R, V, a_sparse, c_orig, batch_size=10000, tol=0.000001):
+    For the latter, we need to compute (URs - AX + A_iX_i^T)(Vc_norm) and then divide each pixel by the norm of
+    URs - AX^T. Note that here we are only interested in the correlation values on the pixels belonging to support
+    of A_i.
+    """
+
+    residual_movie_norms = torch.zeros((u_sparse.shape[0], 1), device=device, dtype=torch.float32)
+    c = temporal_comps - torch.mean(temporal_comps, dim = 1, keepdim=True)
+    c /= torch.linalg.norm(c, dim = 0, keepdim=True)
+    c = torch.nan_to_num(c, nan=0, posinf=0, neginf=0)
+
+    v_mean = torch.mean(v, dim = 1, keepdim = True)
+    e = torch.ones((1, v.shape[1]), device = device, dtype = torch.float32) @ v.T
+
+    x = c.T @ v.T
+
+    m_baseline = (torch.sparse.mm(u_sparse, (r @ (s.unsqueeze(1) * v_mean))) -
+                  torch.sparse.mm(spatial_comps, (x @ v_mean)))
+
+    num_iters = math.ceil(r.shape[1] / batch_size)
+    for k in range(num_iters):
+        start = k * batch_size
+        end = min(start + batch_size, r.shape[1])
+        temp = (torch.sparse.mm(u_sparse, r[:, start:end]) * s.unsqueeze(0) -
+                torch.matmul(spatial_comps, x[:, start:end]) -
+                m_baseline @ e[:, start:end])
+        residual_movie_norms += torch.square(torch.linalg.norm(temp, dim=1, keepdim=True))
+    residual_movie_norms = torch.sqrt(residual_movie_norms)
+
+    '''
+    Now we compute a matrix with the same sparsity as "spatial_comps" describing the residual corr image for each 
+    neuron on its support
+    '''
+    final_rows = []
+    final_cols = []
+    final_values = []
+
+    if blocks is None:
+        blocks = torch.arange(c.shape[1], device=device).unsqueeze(1)
+    for index_select_tensor in blocks:
+        a_subset = torch.index_select(spatial_comps, 1, index_select_tensor).coalesce()
+        rows_to_keep = torch.sparse.mm(a_subset,
+                                       torch.ones((a_subset.shape[1], 1), device=device)).squeeze().nonzero().squeeze()
+
+        a_subset_rowcrop = torch.index_select(a_subset, 0, rows_to_keep).coalesce()
+        a_rowcrop = torch.index_select(spatial_comps, 0, rows_to_keep)
+        x_crop = torch.index_select(x, 0, index_select_tensor)
+        u_rowcrop = torch.index_select(u_sparse, 0, rows_to_keep)
+        m_rowcrop = (torch.index_select(m_baseline, 0, rows_to_keep) +
+                  torch.sparse.mm(a_subset_rowcrop, x_crop) @ v_mean)
+
+        urs_term = torch.sparse.mm(u_rowcrop, r)*s.unsqueeze(0)
+        ax_term = torch.sparse.mm(a_rowcrop, x)
+        ax_keep_term = torch.sparse.mm(a_subset_rowcrop, x_crop)
+        mean_sub_term = m_rowcrop @ e
+        net_spatial_basis = urs_term - ax_term + ax_keep_term - mean_sub_term
+        curr_norm = torch.linalg.norm(net_spatial_basis, dim = 1, keepdim=True)
+        corr_img = net_spatial_basis @ (v @ torch.index_select(c, 1, index_select_tensor))
+        corr_img /= curr_norm
+        corr_img = torch.nan_to_num(corr_img, nan = 0.0, posinf = 0.0, neginf = 0.0)
+
+        local_rows, local_cols = a_subset_rowcrop.indices()
+        local_values = corr_img[(local_rows, local_cols)]
+        real_rows = rows_to_keep[local_rows]
+        real_cols = index_select_tensor[local_cols]
+        final_rows.append(real_rows)
+        final_cols.append(real_cols)
+        final_values.append(local_values)
+
+
+    final_rows = torch.cat(final_rows, 0)
+    final_cols = torch.cat(final_cols, 0)
+    final_values = torch.cat(final_values, 0)
+    resid_corr_on_support = torch.sparse_coo_tensor(torch.stack([final_rows, final_cols]), final_values,
+                            spatial_comps.shape).coalesce()
+
+    ## TODO: Replace the below full expansion of the residual corr image with an array that lazily returns images
+    vc = v @ c
+    final_corr_img = (torch.sparse.mm(u_sparse, (r @ (s.unsqueeze(1) * vc))) -
+                      torch.sparse.mm(spatial_comps, (x @ vc)) -
+                      m_baseline @ (e @ vc))
+
+    final_corr_img /= residual_movie_norms
+
+    final_corr_img[(final_rows, final_cols)] = final_values
+
+    return final_corr_img.cpu().numpy()
+
+
+
+def _oldcompute_residual_correlation_image(U_sparse, R, V, a_sparse, c_orig, batch_size=10000, tol=0.000001):
     """
     Residual correlation image calculation. Expectation is that there are at least two neurons (otherwise residual corr image is not meaningful)
     Params:
@@ -2386,11 +2488,14 @@ class DemixingState(SignalProcessingState):
     def compute_residual_correlation_image(self):
         self.residual_correlation_image = _compute_residual_correlation_image(
             self.u_sparse,
-            self.r * self.s[None, :],
+            self.r,
+            self.s,
             self.v,
             self.a,
             self.c,
+            blocks=self.blocks,
             batch_size=self.batch_size,
+            device=self.device
         )
 
     def update_hals_scheduler(self):
@@ -2620,14 +2725,15 @@ class DemixingState(SignalProcessingState):
         Function for computing background, spatial and temporal components of neurons. Uses HALS updates to iteratively
         refine spatial and temporal estimates.
         """
+        #Key: precompute_quantities is a setup function which must be run first in this routine
+        self.precompute_quantities()
 
         data_order = self.data_order
-
-        self.precompute_quantities()
         self.W = RingModel(self.shape[0], self.shape[1], ring_radius, self.device, self.data_order)
+        self.update_hals_scheduler()
         self.compute_standard_correlation_image()
         self.compute_residual_correlation_image()
-        self.update_hals_scheduler()
+
 
         if denoise is None:
             denoise = [False for i in range(maxiter)]
