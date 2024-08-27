@@ -15,7 +15,7 @@ from tqdm import tqdm
 
 from mpl_toolkits.axes_grid1 import make_axes_locatable
 
-from .demixing_arrays import DemixingResults
+from .demixing_arrays import DemixingResults, StandardCorrelationImages
 from localnmf import ca_utils
 from localnmf.ca_utils import add_1s_to_rowspan, denoise, construct_graph_from_sparse_tensor, color_and_get_tensors
 from localnmf import regression_update
@@ -158,13 +158,14 @@ def _compute_standard_correlation_image(
         s: torch.tensor,
         v: torch.tensor,
         temporal_traces: torch.tensor,
+        fov_dims: tuple[int, int],
+        data_order: str="F",
         batch_size: int=1000,
         device: str="cpu"
-) -> np.ndarray:
+) -> StandardCorrelationImages:
     """
     Correlation image calculation using u, r, s, v
 
-    TODO: Add robust statistic support (i.e. make pseudo do something)
     Args:
         u_sparse (torch.sparse_coo_tensor): dims (d x r), where the FOV has d pixels
         r (torch.tensor) dims (rank1 x rank2), where rank1 is the (overall) rank of the PMD decomposition and rank2 is the
@@ -178,7 +179,8 @@ def _compute_standard_correlation_image(
         device (str): The device on which computations occur (given to pytorch to move tensors around).
 
     Returns:
-        correlation_images (np.ndarray): Shape (pixels, number of neural signals). The correlation images
+        corr_array (StandardCorrelationImages): A FactorizedVideo object that can lazily compute correlation images.
+
     """
 
     # Step 1: Standardize c
@@ -210,23 +212,9 @@ def _compute_standard_correlation_image(
         data_norms += torch.square(torch.linalg.norm(data_chunk, dim = 1, keepdim=True))
     data_norms = torch.sqrt(data_norms)
 
-    # First precompute Vc:
-    vc = torch.matmul(v, c)
-
-    # Find (URs - me)Vcc
-    rsvc = torch.matmul(r, s.unsqueeze(1)*vc)
-    ursvc = torch.sparse.mm(u_sparse, rsvc)
-
-    evc = torch.matmul(e, vc)
-    mevc = torch.matmul(m, evc)
-
-    fin_corr = ursvc - mevc
-
-    # Step 6: Divide by pixelwise norm from step 4
-    fin_corr /= data_norms
-
-    fin_corr = torch.nan_to_num(fin_corr, nan=0, posinf=0, neginf=0)
-    return fin_corr.cpu().numpy()
+    corr_array = StandardCorrelationImages(u_sparse, r, s, v, c, m.squeeze(),
+                                           data_norms.squeeze(), fov_dims, data_order)
+    return corr_array
 
 
 def get_mean_data(U_sparse, R, s, V):
@@ -841,13 +829,12 @@ def spatial_temporal_ini_UV(
 def delete_comp(
     spatial_components,
     temporal_components,
-    standard_correlation_image,
+    standard_correlation_image: StandardCorrelationImages,
     residual_correlation_image,
     spatial_masks,
     components_to_delete,
     reasoning_message,
     plot_en,
-    fov_dims,
     order="C",
 ):
     """
@@ -857,7 +844,7 @@ def delete_comp(
         spatial_components (torch.sparse_coo_tensor): Dimensions (d, K), d = number of pixels in movie,
             K = number of neurons
         temporal_components (torch.Tensor): Dimensions (T, K), K = number of neurons in movie
-        standard_correlation_image (np.ndarray): Dimensions (d, K). d = number of pixels in movie, K = number of neurons
+        standard_correlation_image (StandardCorrelationImages): Dimensions (d, K). d = number of pixels in movie, K = number of neurons
         residual_correlation_image (np.ndarray): Dimensions (d, K). d = number of pixels in movie, K = number of neurons
         spatial_masks (torch.sparse_coo_tensor): Dimensions (d, K). Dtype bool. d = number of pixels in movie, K = number of neurons
         components_to_delete (torch.tensor): 1D tensor indicating which components to delete
@@ -871,7 +858,7 @@ def delete_comp(
               containing the spatial components after deletion, where K' is the new number of remaining neurons.
             - temporal_components (torch.Tensor): Updated tensor of dimensions (T, K')
               containing the temporal components after deletion.
-            - standard_correlation_image (np.ndarray): Updated array of dimensions (d, K')
+            - standard_correlation_image (StandardCorrelationImages): Updated array of dimensions (d, K')
               containing the standard correlation images after deletion.
             - residual_correlation_image (np.ndarray): Updated array of dimensions (d, K')
               containing the residual correlation images after deletion.
@@ -885,16 +872,16 @@ def delete_comp(
         raise ValueError("All Components are slated to be deleted")
 
     pos_for_cpu = pos.cpu().numpy()
-    standard_correlation_image_2d = standard_correlation_image.reshape((fov_dims[0], fov_dims[1], -1), order=order)
     if plot_en:
         a_used = spatial_components.cpu().to_dense().numpy()
         spatial_comp_plot(
             a_used[:, pos_for_cpu],
-            standard_correlation_image_2d[:, :, pos_for_cpu],
+            standard_correlation_image[pos_for_cpu].numpy(),
             ini=False,
             order=order,
         )
-    standard_correlation_image = np.delete(standard_correlation_image, pos_for_cpu, axis=1)
+
+    standard_correlation_image.c = torch.index_select(standard_correlation_image.c, 1, neg)
     residual_correlation_image = np.delete(residual_correlation_image, pos_for_cpu, axis=1)
     spatial_masks = torch.index_select(spatial_masks, 1, neg)
     spatial_components = torch.index_select(spatial_components, 1, neg)
@@ -1730,7 +1717,6 @@ def merge_components(
     a,
     c,
     standard_correlation_image,
-    fov_dims,
     merge_corr_thr=0.6,
     merge_overlap_thr=0.6,
     plot_en=False,
@@ -1760,23 +1746,23 @@ def merge_components(
             is the number of neural signals after this merging procedure (entirely possible no merge happens and K' = K)
     c_pri: torch.Tensor.
         torch Tensor of merged temporal components, shape (T,K')
+    standard_correlation_image (StandardCorrelationImages): Updated correlation image data
     """
     device = c.device
-    standard_correlation_image = torch.from_numpy(standard_correlation_image).to(
-        device
-    )
+    num_corr_signals = standard_correlation_image.shape[0]
+    standard_correlation_image_full = standard_correlation_image.getitem_tensor(slice(0, num_corr_signals, 1))
     ############ calculate overlap area ###########
 
     a_corr = torch.sparse.mm(a.t(), a).to_dense()
     a_corr = torch.triu(a_corr, diagonal=1)
-    cor = ((standard_correlation_image > merge_corr_thr) * 1).float()
-    temp = torch.sum(cor, dim=0)
+    cor = ((standard_correlation_image_full > merge_corr_thr) * 1).float()
+    temp = torch.sum(cor, dim=[1, 2])
     temp[temp == 0] = 1 # For division safety
-    cor_corr = torch.matmul(cor.t(), cor)
+    cor_corr = torch.tensordot(standard_correlation_image_full, standard_correlation_image_full, dims=([1, 2], [1, 2]))
     cor_corr = torch.triu(cor_corr, diagonal=1)
 
     # Test to see for each pair of neurons (a, b) whether overlap(a, b) / support_size(corr_img(a)) > merge_overlap_thres
-    condition1 = ((cor_corr / temp.t()) > merge_overlap_thr)
+    condition1 = ((cor_corr / temp.unsqueeze(1)) > merge_overlap_thr)
 
     # Test to see for each pair of neurons (a, b) whether overlap(a, b) / support_size(corr_img(b)) > merge_overlap_thres
     condition2 =  ((cor_corr / temp.unsqueeze(0)) > merge_overlap_thr)
@@ -1827,10 +1813,7 @@ def merge_components(
             if plot_en:
                 spatial_comp_plot(
                     a_merge.cpu().to_dense().numpy(),
-                    standard_correlation_image[:, comp]
-                    .cpu()
-                    .numpy()
-                    .reshape(fov_dims[0], fov_dims[1], -1, order=data_order),
+                    standard_correlation_image_full[comp].cpu().numpy(),
                     ini=False,
                     order=data_order,
                 )
@@ -1857,7 +1840,12 @@ def merge_components(
             value_indices_net,
             (a.shape[0], c.shape[1]),
         ).coalesce()
-    return a, c, a.bool()
+
+        c_norm = c - torch.mean(c, dim = 0)
+        c_norm /= torch.linalg.norm(c_norm, dim = 0)
+        c_norm = torch.nan_to_num(c_norm, nan = 0.0, neginf = 0.0, posinf = 0.0)
+        standard_correlation_image.c = c_norm
+    return a, c, a.bool(), standard_correlation_image
 
 
 def rank_1_NMF_fit(a_merge, c_merge):
@@ -2324,6 +2312,8 @@ class DemixingState(SignalProcessingState):
             self.s,
             self.v,
             self.c,
+            (self.shape[0], self.shape[1]),
+            self.data_order,
             batch_size=self.batch_size,
             device=self.device,
         )
@@ -2427,7 +2417,6 @@ class DemixingState(SignalProcessingState):
                 temp,
                 "zero a!",
                 plot_en,
-                (self.d1, self.d2),
                 order=self.data_order,
             )
             self.update_hals_scheduler()
@@ -2467,7 +2456,6 @@ class DemixingState(SignalProcessingState):
                 temp,
                 "zero c!",
                 plot_en,
-                (self.d1, self.d2),
                 order=self.data_order,
             )
             self.update_hals_scheduler()
@@ -2526,7 +2514,6 @@ class DemixingState(SignalProcessingState):
                 temp,
                 "zero mask!",
                 plot_en,
-                (self.d1, self.d2),
                 order=self.data_order,
             )
             self.update_hals_scheduler()
@@ -2546,12 +2533,11 @@ class DemixingState(SignalProcessingState):
         )
 
 
-    def merge_signals(self, merge_corr_thr, merge_overlap_thr, plot_en, data_order):
-        self.a, self.c, self.mask_ab = merge_components(
+    def merge_signals(self, merge_corr_thr, merge_overlap_thr, plot_en):
+        self.a, self.c, self.mask_ab, self.standard_correlation_image = merge_components(
             self.a,
             self.c,
             self.standard_correlation_image,
-            self.shape,
             merge_corr_thr=merge_corr_thr,
             merge_overlap_thr=merge_overlap_thr,
             plot_en=plot_en,
@@ -2570,8 +2556,6 @@ class DemixingState(SignalProcessingState):
         """
         #Key: precompute_quantities is a setup function which must be run first in this routine
         self.precompute_quantities()
-
-        data_order = self.data_order
         self.W = RingModel(self.shape[0], self.shape[1], ring_radius, self.device, self.data_order)
         self.update_hals_scheduler()
         self.compute_standard_correlation_image()
@@ -2611,7 +2595,7 @@ class DemixingState(SignalProcessingState):
                 self.support_update_prune_elements_apply_mask(corr_th_fix, corr_th_del, plot_en)
 
                 # TODO: Eliminate the need for moving a and c off GPU
-                self.merge_signals(merge_corr_thr, merge_overlap_thr, plot_en, data_order)
+                self.merge_signals(merge_corr_thr, merge_overlap_thr, plot_en)
                 self.update_hals_scheduler()
 
         self._results = DemixingResults(self.u_sparse, self.r, self.s, self.factorized_ring_term, self.v,
