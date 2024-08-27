@@ -1714,39 +1714,36 @@ def superpixel_init(
 
 
 def merge_components(
-    a,
-    c,
-    standard_correlation_image,
+    a: torch.sparse_coo_tensor,
+    c: torch.tensor,
+    standard_correlation_image: StandardCorrelationImages,
     merge_corr_thr=0.6,
     merge_overlap_thr=0.6,
     plot_en=False,
     data_order="C",
-):
-    """want to merge components whose correlation images are highly overlapped,
+) -> tuple[torch.sparse_coo_tensor, torch.tensor, torch.sparse_coo_tensor, StandardCorrelationImages]:
+    """
+    We want to merge components whose correlation images are highly overlapped,
     and update a and c after merge with region constraint
-    Parameters:
-    -----------
-    a: torch.sparse_coo_tensor
-         sparse matrix describing the spatial supports of all signals. Shape (d, K) where d is the number of pixels in the movie and K is the number of neural signals
-    c: torch.Tensor
-         torch Tensor describing the temporal profiles of all signals. Shape (T, K), where T is the number of frames in the movie
-    corr_img_all_r: np.ndarray (TODO: for now...)
-         corr image
-    patch_size: (list-like) dimensions for data
-    merge_corr_thr: scalar between 0 and 1
-        temporal correlation threshold for truncating corr image (corr(Y,c)) (default 0.6)
-    merge_overlap_thr: scalar between 0 and 1
-        overlap ratio threshold for two corr images (default 0.6)
-    plot_en: Boolean. Whether or not to plot the results. This is useful for development, not production (TODO: Check what things need to be moved to CPU for this)
-    data_order: string. Either "C" or "F".
+
+    Args:
+        a: torch.sparse_coo_tensor
+             sparse matrix describing the spatial supports of all signals. Shape (d, K) where d is the number of pixels in the movie and K is the number of neural signals
+        c: torch.Tensor
+             torch Tensor describing the temporal profiles of all signals. Shape (T, K), where T is the number of frames in the movie
+        standard_correlation_image (StandardCorrelationImages): The object which stores the standard correlation images as
+            a (number of neurons, fov dim 1, fov fim 2) array-like object.
+        merge_corr_thr (float): scalar between 0 and 1
+            temporal correlation threshold for truncating corr image (corr(Y,c)) (default 0.6)
+        merge_overlap_thr (float): :scalar between 0 and 1
+            overlap ratio threshold for two corr images (default 0.6)
+        plot_en (bool) Whether or not to plot the results. This is useful for development, not production (TODO: Check what things need to be moved to CPU for this)
+        data_order: string. Either "C" or "F".
     Returns:
-    --------
-    a_pri: torch.sparse_coo_tensor.
-        sparse matrix describing the spatial supports of all signals. Shape (d, K') where d is the number of pixels in the movie and K'
-            is the number of neural signals after this merging procedure (entirely possible no merge happens and K' = K)
-    c_pri: torch.Tensor.
-        torch Tensor of merged temporal components, shape (T,K')
-    standard_correlation_image (StandardCorrelationImages): Updated correlation image data
+        a (torch.sparse_coo_tensor). Shape (pixels, number of signals). New spatial components for demixing
+        c (torch.tensor): Shape (frames, number of signals). New temporal components for demixing
+        a_bool (torch.sparse_coo_tensor): The updated masks of the spatial components
+        standard_correlation_image (StandardCorrelationImages): Updated correlation images
     """
     device = c.device
     num_corr_signals = standard_correlation_image.shape[0]
