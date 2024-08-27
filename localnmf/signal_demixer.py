@@ -22,7 +22,10 @@ from localnmf import regression_update
 from localnmf.constrained_ring.cnmf_e import RingModel
 
 
-def make_mask_dynamic(corr_img_all_r, corr_percent, mask_a, data_order="C"):
+def make_mask_dynamic(corr_img_all_r: np.ndarray,
+                      corr_percent: np.ndarray,
+                      mask_a: np.ndarray,
+                      data_order: str="C"):
     """
     update the spatial support: connected region in corr_img(corr(Y,c)) which is connected with previous spatial support
     """
@@ -48,7 +51,7 @@ def make_mask_dynamic(corr_img_all_r, corr_percent, mask_a, data_order="C"):
     return mask_a.reshape((-1, mask_a.shape[2]), order=data_order)
 
 
-def vcorrcoef_resid(U_sparse, R, V, a_sparse, c_orig, batch_size=10000, tol=0.000001):
+def _compute_residual_correlation_image(U_sparse, R, V, a_sparse, c_orig, batch_size=10000, tol=0.000001):
     """
     Residual correlation image calculation. Expectation is that there are at least two neurons (otherwise residual corr image is not meaningful)
     Params:
@@ -60,9 +63,8 @@ def vcorrcoef_resid(U_sparse, R, V, a_sparse, c_orig, batch_size=10000, tol=0.00
         c_orig: numpy.ndaray. Dimensions (T x k)
         batch_size: number of pixels to process at once. Limits matrix sizes to O((batch_size+T)*r)
     """
-    assert (
-        c_orig.shape[1] > 1
-    ), "Need at least 2 components to meaningfully calculate residual corr image"
+    if not (c_orig.shape[1] > 1):
+        raise ValueError("Need at least 2 components to meaningfully calculate residual corr image")
 
     device = R.device
     d = U_sparse.shape[0]
@@ -205,93 +207,78 @@ def vcorrcoef_resid(U_sparse, R, V, a_sparse, c_orig, batch_size=10000, tol=0.00
     return corr_img.cpu().numpy()
 
 
-def vcorrcoef_UV_noise(
-    U_sparse, R, V, c_orig, pseudo=0, batch_size=1000, tol=0.000001, device="cpu"
-):
+def _compute_standard_correlation_image(
+        u_sparse: torch.sparse_coo_tensor,
+        r: torch.tensor,
+        s: torch.tensor,
+        v: torch.tensor,
+        temporal_traces: torch.tensor,
+        batch_size: int=1000,
+        device: str="cpu"
+) -> np.ndarray:
     """
-    New standard correlation calculation. Finds the correlation image of each neuron in 'c'
-    with the denoised movie URV
+    Correlation image calculation using u, r, s, v
 
     TODO: Add robust statistic support (i.e. make pseudo do something)
-    Params:
-        U_sparse: scipy.sparse.coo_matrix. dims (d x r), where the FOV has d pixels
-        R: np.ndarray. dims (r x r), where r is the rank of the PMD decomposition
-        V: np.ndarray. dims (r x T), where T is the number of frames in the movie
-        c_orig: np.ndarray. dims (T x k), where k is the number of neurons
-        pseudo: nonnegative integer
-        batch_size: maximum number of pixels to process at a time. (batch_size x R)-sized matrices will be constructed
+    Args:
+        u_sparse (torch.sparse_coo_tensor): dims (d x r), where the FOV has d pixels
+        r (torch.tensor) dims (rank1 x rank2), where rank1 is the (overall) rank of the PMD decomposition and rank2 is the
+            pruned rank
+        s (torch.tensor): dims (rank 2). Singular values of the PMD decomposition
+        v (torch.tensor): dims (rank 2, number of frames): The temporal basis (right singular vectors of the PMD
+            decomposition.
+        temporal_traces (torch.tensor): shape (number of frames, number of neural signals). Temporal traces currently
+            extracted
+        batch_size (int): The number of frames we expand at any given time (pixels x frames) to avoid OOM errors
+        device (str): The device on which computations occur (given to pytorch to move tensors around).
+
+    Returns:
+        correlation_images (np.ndarray): Shape (pixels, number of neural signals). The correlation images
     """
-    d = U_sparse.shape[0]
-    # Load pytorch objects
 
     # Step 1: Standardize c
-    c = c_orig - torch.mean(c_orig, dim=0, keepdim=True)
+    c = temporal_traces - torch.mean(temporal_traces, dim=0, keepdim=True)
     c_norm = torch.sqrt(torch.sum(c * c, dim=0, keepdim=True))
     c /= c_norm
 
     ##Step 2:
-    V_mean = torch.mean(V, dim=1, keepdim=True)
-    RV_mean = torch.matmul(R, V_mean)
-    m = torch.sparse.mm(U_sparse, RV_mean)  # Dims: d x 1
+    v_mean = torch.mean(v, dim=1, keepdim=True)
+    rv_mean = torch.matmul(r, s.unsqueeze(1) * v_mean)
+    m = torch.sparse.mm(u_sparse, rv_mean)  # Dims: d x 1
 
     ##Step 3:
-    s = torch.matmul(torch.ones([1, V.shape[1]], device=device), V.t())
+    e = torch.matmul(torch.ones([1, v.shape[1]], device=device), v.t())
 
-    ##Step 4: Find the pixelwise norm: sqrt(diag((U*R - m*s)*V*V^t*(U*R - m*s)^t))
-    ## diag((U*R - mov_mean*S)*V*V^t*(U*R - mov_mean*S)^t) = diag((U*R - m*s)*(U*R - m*s)^t) since V orthogonal
-    ## diag((U*R - m*s)*(U*R - m*s)^t) = diag(U*R*R^t*U^t - U*R*s^t*m^t - m*s*R^t*U^t + m*s*s^t*m^t)
-    ## diag(U*R*R^t*U^t - U*R*s^t*m^t - m*s*R^t*U^t + m*s*s^t*m^t) = diag(U*R*R^t*U^t) - diag(U*R*s^t*m^t) - diag(m*s*R^t*U^t) + diag(m*s*s^t*m^t)
-
-    ##Step 4a: Get diag(U*R*s^t*m^t) and diag(m*s*R^t*U^t)
-    # These are easy because U*R*s^t and s*R^t*U^t are 1-dimensional and transposes of each other:
-
-    Rst = torch.matmul(R, s.t())
-    URst = torch.sparse.mm(U_sparse, Rst)
-
-    # Now diag(U*R*s^t*m^t) is easy:
-    diag_URstmt = URst * m  # Element-wise product
-
-    # Now diag(m*s*R^t*U^t) is easy:
-    diag_msRtUt = m * URst
-
-    ##Step 4b: Get diag(m*s*s^t*m^t)
-    # Note that s*s^t just a dot product
-    s_dot = torch.matmul(s, s.t())
-    diag_msstmt = s_dot * (m * m)
+    '''
+    Step 4: Get the pixelwise norm of (UR - me)V. Since V has orthonormal rows, this amounts to finding the row-wise
+    norm of (UR - me)
+    '''
 
     ## Step 4c: Get diag(U*R*R^t*U^t)
-    diag_URRtUt = torch.zeros([U_sparse.shape[0], 1], device=device)
+    data_norms = torch.zeros([u_sparse.shape[0], 1], device=device)
 
-    batch_iters = math.ceil(d / batch_size)
+    batch_iters = math.ceil(r.shape[1] / batch_size)
     for k in range(batch_iters):
         start = batch_size * k
-        end = min(batch_size * (k + 1), U_sparse.shape[0])
-        ind_torch = torch.arange(start, end, step=1, device=device)
-        U_crop = torch.index_select(U_sparse, 0, ind_torch)
-        UR_crop = torch.sparse.mm(U_crop, R)
-        UR_crop = UR_crop * UR_crop
-        UR_crop = torch.sum(UR_crop, dim=1)
-        diag_URRtUt[start:end, 0] = UR_crop
-
-    norm_sqrd = diag_URRtUt - diag_msRtUt - diag_URstmt + diag_msstmt
-    norm = torch.sqrt(norm_sqrd)
-    threshold_func = torch.nn.ReLU()
-    norm = threshold_func(norm)
+        end = min(start + batch_size, u_sparse.shape[0])
+        data_chunk = torch.sparse.mm(u_sparse, r[:, start:end])*s.unsqueeze(0) - m@e[:, start:end]
+        data_norms += torch.square(torch.linalg.norm(data_chunk, dim = 1, keepdim=True))
+    data_norms = torch.sqrt(data_norms)
 
     # First precompute Vc:
-    Vc = torch.matmul(V, c)
+    vc = torch.matmul(v, c)
 
-    # Find (UR - ms)V*c
-    RVc = torch.matmul(R, Vc)
-    URVc = torch.sparse.mm(U_sparse, RVc)
+    # Find (URs - me)Vcc
+    rsvc = torch.matmul(r, s.unsqueeze(1)*vc)
+    ursvc = torch.sparse.mm(u_sparse, rsvc)
 
-    sVc = torch.matmul(s, Vc)
-    msVc = torch.matmul(m, sVc)
+    evc = torch.matmul(e, vc)
+    mevc = torch.matmul(m, evc)
 
-    fin_corr = URVc - msVc
+    fin_corr = ursvc - mevc
 
     # Step 6: Divide by pixelwise norm from step 4
-    fin_corr /= norm
+    fin_corr /= data_norms
 
     fin_corr = torch.nan_to_num(fin_corr, nan=0, posinf=0, neginf=0)
     return fin_corr.cpu().numpy()
@@ -2386,9 +2373,10 @@ class DemixingState(SignalProcessingState):
 
 
     def compute_standard_correlation_image(self):
-        self.standard_correlation_image = vcorrcoef_UV_noise(
+        self.standard_correlation_image = _compute_standard_correlation_image(
             self.u_sparse,
-            self.r * self.s[None, :],
+            self.r,
+            self.s,
             self.v,
             self.c,
             batch_size=self.batch_size,
@@ -2396,7 +2384,7 @@ class DemixingState(SignalProcessingState):
         )
 
     def compute_residual_correlation_image(self):
-        self.residual_correlation_image = vcorrcoef_resid(
+        self.residual_correlation_image = _compute_residual_correlation_image(
             self.u_sparse,
             self.r * self.s[None, :],
             self.v,
