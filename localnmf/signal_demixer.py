@@ -145,18 +145,6 @@ def _compute_residual_correlation_image(u_sparse: torch.sparse_coo_tensor,
                                                c, x, resid_corr_on_support, m_baseline.squeeze(),
                                                residual_movie_norms.squeeze(), fov_dims, zero_support = False, order = data_order)
     return residual_array
-    #
-    # ## TODO: Replace the below full expansion of the residual corr image with an array that lazily returns images
-    # vc = v @ c
-    # final_corr_img = (torch.sparse.mm(u_sparse, (r @ (s.unsqueeze(1) * vc))) -
-    #                   torch.sparse.mm(spatial_comps, (x @ vc)) -
-    #                   m_baseline @ (e @ vc))
-    #
-    # final_corr_img /= residual_movie_norms
-    #
-    # final_corr_img[(final_rows, final_cols)] = final_values
-    #
-    # return final_corr_img.cpu().numpy()
 
 
 def _compute_standard_correlation_image(
@@ -2460,6 +2448,8 @@ class DemixingState(SignalProcessingState):
         self, corr_th_fix, corr_th_del, plot_en
     ):
 
+        if self.residual_correlation_image is None:
+            raise ValueError("Residual Correlation Image must be defined in order to perform support updates")
         # Currently using rigid mask
         self.mask_ab = self.a.bool()
         residual_corr_img_3_d = self.residual_correlation_image[:].transpose(1,2,0)
@@ -2588,6 +2578,10 @@ class DemixingState(SignalProcessingState):
 
                 self.support_update_prune_elements_apply_mask(corr_th_fix, corr_th_del, plot_en)
 
+
+                #Once the signal estimates are modified, the residual corr image is no longer well defined
+                self.residual_correlation_image = None
+
                 # TODO: Eliminate the need for moving a and c off GPU
                 self.merge_signals(merge_corr_thr, merge_overlap_thr, plot_en)
                 self.update_hals_scheduler()
@@ -2600,9 +2594,3 @@ class DemixingState(SignalProcessingState):
                                (self.T, self.d1, self.d2), 'cpu')
 
         return self.results
-
-
-
-
-
-
