@@ -15,7 +15,7 @@ from tqdm import tqdm
 
 from mpl_toolkits.axes_grid1 import make_axes_locatable
 
-from .demixing_arrays import DemixingResults, StandardCorrelationImages
+from .demixing_arrays import DemixingResults, StandardCorrelationImages, ResidualCorrelationImages
 from localnmf import ca_utils
 from localnmf.ca_utils import add_1s_to_rowspan, denoise, construct_graph_from_sparse_tensor, color_and_get_tensors
 from localnmf import regression_update
@@ -56,9 +56,11 @@ def _compute_residual_correlation_image(u_sparse: torch.sparse_coo_tensor,
                                         v: torch.tensor,
                                         spatial_comps: torch.sparse_coo_tensor,
                                         temporal_comps: torch.tensor,
+                                        fov_dims: tuple[int, int],
                                         blocks: Optional[Union[torch.tensor, list]] = None,
+                                        data_order: str = "F",
                                         batch_size: int=1000,
-                                        device: str = 'cpu') -> np.ndarray:
+                                        device: str = 'cpu') -> ResidualCorrelationImages:
     """
     The residual correlation image for each neuron "i" can be broken up into two parts: the pixels that do
     not currently belong to the spatial support of neuron "i" and the pixels that do. For the former, we can compute
@@ -139,17 +141,22 @@ def _compute_residual_correlation_image(u_sparse: torch.sparse_coo_tensor,
     resid_corr_on_support = torch.sparse_coo_tensor(torch.stack([final_rows, final_cols]), final_values,
                             spatial_comps.shape).coalesce()
 
-    ## TODO: Replace the below full expansion of the residual corr image with an array that lazily returns images
-    vc = v @ c
-    final_corr_img = (torch.sparse.mm(u_sparse, (r @ (s.unsqueeze(1) * vc))) -
-                      torch.sparse.mm(spatial_comps, (x @ vc)) -
-                      m_baseline @ (e @ vc))
-
-    final_corr_img /= residual_movie_norms
-
-    final_corr_img[(final_rows, final_cols)] = final_values
-
-    return final_corr_img.cpu().numpy()
+    residual_array = ResidualCorrelationImages(u_sparse, r, s, v, spatial_comps,
+                                               c, x, resid_corr_on_support, m_baseline.squeeze(),
+                                               residual_movie_norms.squeeze(), fov_dims, zero_support = False, order = data_order)
+    return residual_array
+    #
+    # ## TODO: Replace the below full expansion of the residual corr image with an array that lazily returns images
+    # vc = v @ c
+    # final_corr_img = (torch.sparse.mm(u_sparse, (r @ (s.unsqueeze(1) * vc))) -
+    #                   torch.sparse.mm(spatial_comps, (x @ vc)) -
+    #                   m_baseline @ (e @ vc))
+    #
+    # final_corr_img /= residual_movie_norms
+    #
+    # final_corr_img[(final_rows, final_cols)] = final_values
+    #
+    # return final_corr_img.cpu().numpy()
 
 
 def _compute_standard_correlation_image(
@@ -830,7 +837,6 @@ def delete_comp(
     spatial_components,
     temporal_components,
     standard_correlation_image: StandardCorrelationImages,
-    residual_correlation_image,
     spatial_masks,
     components_to_delete,
     reasoning_message,
@@ -845,12 +851,10 @@ def delete_comp(
             K = number of neurons
         temporal_components (torch.Tensor): Dimensions (T, K), K = number of neurons in movie
         standard_correlation_image (StandardCorrelationImages): Dimensions (d, K). d = number of pixels in movie, K = number of neurons
-        residual_correlation_image (np.ndarray): Dimensions (d, K). d = number of pixels in movie, K = number of neurons
         spatial_masks (torch.sparse_coo_tensor): Dimensions (d, K). Dtype bool. d = number of pixels in movie, K = number of neurons
         components_to_delete (torch.tensor): 1D tensor indicating which components to delete
         reasoning_message (str): An option to provide a reason for why deletion is happening
         plot_en (bool): Indicates whether plotting is enabled
-        fov_dims (tuple): Tuple (fov dimension 1, fov dimension 2) describing field of view dimensions.
         order (str): "C" or "F" depending on how we flatten 2D spatial data into 1D vectors (and vice versa)
     Returns:
         Tuple: A tuple containing the following elements:
@@ -860,8 +864,6 @@ def delete_comp(
               containing the temporal components after deletion.
             - standard_correlation_image (StandardCorrelationImages): Updated array of dimensions (d, K')
               containing the standard correlation images after deletion.
-            - residual_correlation_image (np.ndarray): Updated array of dimensions (d, K')
-              containing the residual correlation images after deletion.
             - spatial_masks (torch.sparse_coo_tensor): Updated sparse tensor of dimensions (d, K')
               containing the spatial masks after deletion.
     """
@@ -882,11 +884,10 @@ def delete_comp(
         )
 
     standard_correlation_image.c = torch.index_select(standard_correlation_image.c, 1, neg)
-    residual_correlation_image = np.delete(residual_correlation_image, pos_for_cpu, axis=1)
     spatial_masks = torch.index_select(spatial_masks, 1, neg)
     spatial_components = torch.index_select(spatial_components, 1, neg)
     temporal_components = torch.index_select(temporal_components, 1, neg)
-    return spatial_components, temporal_components, standard_correlation_image, residual_correlation_image, spatial_masks
+    return spatial_components, temporal_components, standard_correlation_image, spatial_masks
 
 
 def order_superpixels(c_mat: torch.tensor) -> np.ndarray:
@@ -2323,7 +2324,9 @@ class DemixingState(SignalProcessingState):
             self.v,
             self.a,
             self.c,
+            (self.shape[0], self.shape[1]),
             blocks=self.blocks,
+            data_order = self.data_order,
             batch_size=self.batch_size,
             device=self.device
         )
@@ -2403,13 +2406,11 @@ class DemixingState(SignalProcessingState):
                 self.a,
                 self.c,
                 self.standard_correlation_image,
-                self.residual_correlation_image,
                 self.mask_ab,
             ) = delete_comp(
                 self.a,
                 self.c,
                 self.standard_correlation_image,
-                self.residual_correlation_image,
                 self.mask_ab,
                 temp,
                 "zero a!",
@@ -2442,13 +2443,11 @@ class DemixingState(SignalProcessingState):
                 self.a,
                 self.c,
                 self.standard_correlation_image,
-                self.residual_correlation_image,
                 self.mask_ab,
             ) = delete_comp(
                 self.a,
                 self.c,
                 self.standard_correlation_image,
-                self.residual_correlation_image,
                 self.mask_ab,
                 temp,
                 "zero c!",
@@ -2463,11 +2462,10 @@ class DemixingState(SignalProcessingState):
 
         # Currently using rigid mask
         self.mask_ab = self.a.bool()
-        corr_img_all_r = self.residual_correlation_image.reshape(
-            self.d1, self.d2, -1, order=self.data_order
-        )
+        residual_corr_img_3_d = self.residual_correlation_image[:].transpose(1,2,0)
+
         mask_a_rigid = make_mask_dynamic(
-            corr_img_all_r,
+            residual_corr_img_3_d,
             corr_th_fix,
             self.mask_ab.cpu().to_dense().numpy().astype("int"),
             data_order=self.data_order,
@@ -2486,7 +2484,8 @@ class DemixingState(SignalProcessingState):
 
         ## Now we delete components based on whether they have a 0 residual corr img with their supports or not...
 
-        mask_ab_corr = mask_a_rigid_scipy.multiply(self.residual_correlation_image)
+        mask_ab_corr = mask_a_rigid_scipy.multiply(
+            residual_corr_img_3_d.reshape((self.shape[0]*self.shape[1], -1), order = self.data_order))
         mask_ab_corr = np.array((mask_ab_corr > corr_th_del).sum(axis=0))
         mask_ab_corr = torch.from_numpy(mask_ab_corr).float().squeeze().to(self.device)
         temp = mask_ab_corr == 0
@@ -2500,13 +2499,11 @@ class DemixingState(SignalProcessingState):
                 self.a,
                 self.c,
                 self.standard_correlation_image,
-                self.residual_correlation_image,
                 self.mask_ab,
             ) = delete_comp(
                 self.a,
                 self.c,
                 self.standard_correlation_image,
-                self.residual_correlation_image,
                 self.mask_ab,
                 temp,
                 "zero mask!",
@@ -2595,6 +2592,8 @@ class DemixingState(SignalProcessingState):
                 self.merge_signals(merge_corr_thr, merge_overlap_thr, plot_en)
                 self.update_hals_scheduler()
 
+        self.compute_standard_correlation_image()
+        self.compute_residual_correlation_image()
         self._results = DemixingResults(self.u_sparse, self.r, self.s, self.factorized_ring_term, self.v,
                                self.a, self.c, self.b.squeeze(), self.residual_correlation_image,
                                         self.standard_correlation_image, self.data_order,
