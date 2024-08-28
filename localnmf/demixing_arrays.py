@@ -995,6 +995,10 @@ class ResidualCorrelationImages(FactorizedVideo):
     def shape(self) -> tuple[int, int, int]:
         return (self._c.shape[1], self._fov_dims[0], self._fov_dims[1])
 
+    @property
+    def support_correlation_values(self) -> torch.sparse_coo_tensor:
+        return self._support_correlation_values
+
 
     @property
     def order(self) -> str:
@@ -1206,7 +1210,13 @@ class StandardCorrelationImages(FactorizedVideo):
 
     @c.setter
     def c(self, new_tensor):
-        self._c = new_tensor
+        if new_tensor.shape[0] != self._v.shape[1]:
+            raise ValueError(f"Input temporal trace matrix has {new_tensor.shape[0]} frames"
+                             f"which is incompatible with the movie, which has {self._v.shape[1]} frames")
+        mean_zero = new_tensor - torch.mean(new_tensor, dim = 0, keepdim = True)
+        mean_zero /= torch.linalg.norm(mean_zero, dim = 0, keepdim = True)
+        mean_zero = torch.nan_to_num(mean_zero, nan = 0.0, posinf = 0.0, neginf = 0.0)
+        self._c = mean_zero
 
     @property
     def shape(self) -> tuple[int, int, int]:

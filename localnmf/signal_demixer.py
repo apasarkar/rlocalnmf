@@ -25,7 +25,7 @@ from localnmf.constrained_ring.cnmf_e import RingModel
 def make_mask_dynamic(corr_img_all_r: np.ndarray,
                       corr_percent: np.ndarray,
                       mask_a: np.ndarray,
-                      data_order: str="C"):
+                      data_order: str="C") -> np.ndarray:
     """
     update the spatial support: connected region in corr_img(corr(Y,c)) which is connected with previous spatial support
     """
@@ -1827,10 +1827,7 @@ def merge_components(
             (a.shape[0], c.shape[1]),
         ).coalesce()
 
-        c_norm = c - torch.mean(c, dim = 0)
-        c_norm /= torch.linalg.norm(c_norm, dim = 0)
-        c_norm = torch.nan_to_num(c_norm, nan = 0.0, neginf = 0.0, posinf = 0.0)
-        standard_correlation_image.c = c_norm
+        standard_correlation_image.c = c
     return a, c, a.bool(), standard_correlation_image
 
 
@@ -2444,12 +2441,46 @@ class DemixingState(SignalProcessingState):
             )
             self.update_hals_scheduler()
 
+
+    def _flag_components_for_deletion(self, deletion_threshold: float):
+        """
+        For each neuron, we check that its residual correlation image over its spatial support contains
+        at least one pixel whose correlation value is above a specified threshold.
+
+        Otherwise we tag this component for deletion
+
+        Args:
+            deletion_threshold (float): The threshold for deciding whether a component should be deleted or not
+
+        Returns:
+            indices_to_keep (torch.tensor): The indices of the neural signals we should keep.
+        """
+        if self.residual_correlation_image is None:
+            raise ValueError("Deletion Routine requires that a residual correlation image was calculated")
+
+        support_data = self.residual_correlation_image.support_correlation_values
+        rows, columns = support_data.indices()
+        values = (support_data.values() > deletion_threshold).long()
+
+        new_vector = torch.sparse_coo_tensor(torch.stack([rows * 0, columns]), values, (1, support_data.shape[1])).coalesce()
+        boolean_indices = new_vector.to_dense().squeeze().bool()
+        indices_to_keep = torch.arange(support_data.shape[1], device = self.device)[boolean_indices]
+
+        return indices_to_keep
+
+
     def support_update_prune_elements_apply_mask(
         self, corr_th_fix, corr_th_del, plot_en
     ):
+        self.compute_residual_correlation_image()
+        indices_to_keep = self._flag_components_for_deletion(corr_th_del)
+        if indices_to_keep.shape[0] < self.a.shape[1]:
+            self.a = torch.index_select(self.a, 1, indices_to_keep)
+            self.c = torch.index_select(self.c, 1, indices_to_keep)
+            self.standard_correlation_image.c = self.c
+            #Need to update the residual correlation image since the A/C terms changed
+            self.compute_residual_correlation_image()
 
-        if self.residual_correlation_image is None:
-            raise ValueError("Residual Correlation Image must be defined in order to perform support updates")
         # Currently using rigid mask
         self.mask_ab = self.a.bool()
         residual_corr_img_3_d = self.residual_correlation_image[:].transpose(1,2,0)
@@ -2472,36 +2503,6 @@ class DemixingState(SignalProcessingState):
             .to(self.device)
         )
 
-        ## Now we delete components based on whether they have a 0 residual corr img with their supports or not...
-
-        mask_ab_corr = mask_a_rigid_scipy.multiply(
-            residual_corr_img_3_d.reshape((self.shape[0]*self.shape[1], -1), order = self.data_order))
-        mask_ab_corr = np.array((mask_ab_corr > corr_th_del).sum(axis=0))
-        mask_ab_corr = torch.from_numpy(mask_ab_corr).float().squeeze().to(self.device)
-        temp = mask_ab_corr == 0
-        if torch.sum(temp):
-            print(
-                "we are at the mask update delete step... corr img is {}".format(
-                    corr_th_del
-                )
-            )
-            (
-                self.a,
-                self.c,
-                self.standard_correlation_image,
-                self.mask_ab,
-            ) = delete_comp(
-                self.a,
-                self.c,
-                self.standard_correlation_image,
-                self.mask_ab,
-                temp,
-                "zero mask!",
-                plot_en,
-                order=self.data_order,
-            )
-            self.update_hals_scheduler()
-
         ##Apply mask to existing 'a'
         a_scipy = ca_utils.torch_sparse_to_scipy_coo(self.a).tocsr()
 
@@ -2515,6 +2516,8 @@ class DemixingState(SignalProcessingState):
             .float()
             .to(self.device)
         )
+
+        self.residual_correlation_image = None
 
 
     def merge_signals(self, merge_corr_thr, merge_overlap_thr, plot_en):
@@ -2574,13 +2577,7 @@ class DemixingState(SignalProcessingState):
             if update_after and ((iters + 1) % update_after == 0):
                 ##First: Compute correlation images
                 self.compute_standard_correlation_image()
-                self.compute_residual_correlation_image()
-
                 self.support_update_prune_elements_apply_mask(corr_th_fix, corr_th_del, plot_en)
-
-
-                #Once the signal estimates are modified, the residual corr image is no longer well defined
-                self.residual_correlation_image = None
 
                 # TODO: Eliminate the need for moving a and c off GPU
                 self.merge_signals(merge_corr_thr, merge_overlap_thr, plot_en)
