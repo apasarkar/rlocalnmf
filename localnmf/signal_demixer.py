@@ -2468,9 +2468,109 @@ class DemixingState(SignalProcessingState):
 
         return indices_to_keep
 
+    def connected_comps(self,
+                             thresholded_images: torch.tensor,
+                             masks: torch.tensor,
+                             num_iters: int=30):
+        """
+        Args:
+            thresholded_images (torch.tensor): Shape (images, fov dim 1, fov dim 2). All binary
+            masks (torch.tensor): Shape (images, fov dim 1, fov dim 2). All binary
+        Returns:
+            updated_masks (torch.tensor): Shape (images, fov dim 1, fov dim 2)
+        """
+
+
+        for k in range(num_iters):
+            masks = torch.nn.functional.max_pool2d(masks, kernel_size=3, stride=1, padding=1)
+            masks = masks * thresholded_images
+        return masks
+
+
+    def _mask_expansion_routine(self,
+                                relative_correlation_fraction: float,
+                                mask: torch.sparse_coo_tensor,
+                                spatial_comps: torch.sparse_coo_tensor,
+                                residual_correlation_data: ResidualCorrelationImages
+    ) -> tuple[torch.sparse_coo_tensor, torch.sparse_coo_tensor]:
+
+        num_iters = math.ceil(spatial_comps.shape[1] / self.batch_size)
+
+        final_spatial_rows = []
+        final_spatial_cols = []
+        final_spatial_values = []
+
+        final_mask_rows = []
+        final_mask_cols = []
+
+        max_correlation_values = torch.zeros(spatial_comps.shape[1], device = self.device).float()
+        _, correlation_cols = residual_correlation_data.support_correlation_values.indices()
+        correlation_values = residual_correlation_data.support_correlation_values.values()
+
+        max_correlation_values.scatter_reduce_(0, correlation_cols, correlation_values, "amax", include_self=False)
+        max_correlation_thresholds = max_correlation_values * relative_correlation_fraction
+
+
+        for k in range(num_iters):
+            start = k * self.batch_size
+            end = min(spatial_comps.shape[1], start + self.batch_size)
+            neuron_indices = torch.arange(start, end, device = self.device).long()
+
+            curr_thresholds = max_correlation_thresholds[start:end]
+
+            curr_residual_images = residual_correlation_data.getitem_tensor(slice(start,end)) #Images x fov dim 1 x fov dim 2
+
+            curr_thresholded_residual_images = (curr_thresholds[:, None, None] < curr_residual_images).float()
+            curr_masks = torch.index_select(mask, 1, neuron_indices).to_dense().float()
+
+            if self.data_order == "F": #Torch uses reshape C, so we need to modify here
+                curr_masks = curr_masks.reshape((self.shape[1], self.shape[0], -1))
+                curr_masks = curr_masks.permute(1, 0, 2)
+            elif self.data_order == "C":
+                curr_masks = curr_masks.reshape((self.shape[0], self.shape[1], -1))
+            else:
+                raise ValueError(f"Error with data order")
+
+            curr_masks = curr_masks.permute(2, 0, 1)
+
+            new_masks = self.connected_comps(curr_thresholded_residual_images, curr_masks)
+
+            if self.data_order == "F":
+                new_masks = new_masks.permute(2, 1, 0) #This is now d2 x d1 x frames to account for C vs F reshape
+
+            new_masks = new_masks.reshape((self.shape[0]*self.shape[1], -1))
+
+            a_crop = torch.index_select(spatial_comps, 1, neuron_indices).coalesce()
+            curr_a_row, curr_a_col = a_crop.indices()
+            curr_a_new_values = a_crop.values() * new_masks[(curr_a_row, curr_a_col)]
+
+            final_spatial_rows.append(curr_a_row)
+            final_spatial_cols.append(start + curr_a_col)
+            final_spatial_values.append(curr_a_new_values)
+
+            curr_mask_row, curr_mask_col = torch.nonzero(new_masks, as_tuple = True)
+
+            final_mask_rows.append(curr_mask_row)
+            final_mask_cols.append(curr_mask_col)
+
+        #Construct the new mask
+        final_mask_rows = torch.cat(final_mask_rows, 0)
+        final_mask_cols = torch.cat(final_mask_cols, 0)
+        final_mask_values = torch.ones_like(final_mask_cols).float()
+        final_mask = torch.sparse_coo_tensor(torch.stack([final_mask_rows, final_mask_cols]),
+                                             final_mask_values, spatial_comps.shape).coalesce()
+
+        final_spatial_rows = torch.cat(final_spatial_rows, 0)
+        final_spatial_cols = torch.cat(final_spatial_cols, 0)
+        final_spatial_values = torch.cat(final_spatial_values, 0)
+        final_spatial = torch.sparse_coo_tensor(torch.stack([final_spatial_rows, final_spatial_cols]),
+                                             final_spatial_values, spatial_comps.shape).coalesce()
+
+        return final_mask, final_spatial
+
 
     def support_update_prune_elements_apply_mask(
-        self, corr_th_fix, corr_th_del, plot_en
+        self, relative_correlation_fraction: float, corr_th_del: float, plot_en
     ):
         self.compute_residual_correlation_image()
         indices_to_keep = self._flag_components_for_deletion(corr_th_del)
@@ -2485,37 +2585,10 @@ class DemixingState(SignalProcessingState):
         self.mask_ab = self.a.bool()
         residual_corr_img_3_d = self.residual_correlation_image[:].transpose(1,2,0)
 
-        mask_a_rigid = make_mask_dynamic(
-            residual_corr_img_3_d,
-            corr_th_fix,
-            self.mask_ab.cpu().to_dense().numpy().astype("int"),
-            data_order=self.data_order,
-        )
-        mask_a_rigid_scipy = scipy.sparse.coo_matrix(mask_a_rigid)
-        self.mask_ab = (
-            torch.sparse_coo_tensor(
-                np.array(mask_a_rigid_scipy.nonzero()),
-                mask_a_rigid_scipy.data,
-                mask_a_rigid_scipy.shape,
-            )
-            .coalesce()
-            .float()
-            .to(self.device)
-        )
-
-        ##Apply mask to existing 'a'
-        a_scipy = ca_utils.torch_sparse_to_scipy_coo(self.a).tocsr()
-
-        mask_ab_scipy = ca_utils.torch_sparse_to_scipy_coo(self.mask_ab).tocsr()
-        a_scipy = a_scipy.multiply(mask_ab_scipy)
-        self.a = (
-            torch.sparse_coo_tensor(
-                np.array(a_scipy.nonzero()), a_scipy.data, a_scipy.shape
-            )
-            .coalesce()
-            .float()
-            .to(self.device)
-        )
+        self.mask_ab, self.a = self._mask_expansion_routine(relative_correlation_fraction,
+                                                            self.mask_ab,
+                                                            self.a,
+                                                            self.residual_correlation_image)
 
         self.residual_correlation_image = None
 
