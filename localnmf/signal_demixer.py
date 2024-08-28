@@ -2288,7 +2288,7 @@ class DemixingState(SignalProcessingState):
                                                 device=self.device, dtype=torch.float32)
 
 
-    def compute_standard_correlation_image(self):
+    def initialize_standard_correlation_image(self):
         self.standard_correlation_image = _compute_standard_correlation_image(
             self.u_sparse,
             self.r,
@@ -2469,9 +2469,9 @@ class DemixingState(SignalProcessingState):
         return indices_to_keep
 
     def connected_comps(self,
-                             thresholded_images: torch.tensor,
-                             masks: torch.tensor,
-                             num_iters: int=30):
+                        thresholded_images: torch.tensor,
+                        masks: torch.tensor,
+                        num_iters: int=30):
         """
         Args:
             thresholded_images (torch.tensor): Shape (images, fov dim 1, fov dim 2). All binary
@@ -2569,7 +2569,7 @@ class DemixingState(SignalProcessingState):
         return final_mask, final_spatial
 
 
-    def support_update_prune_elements_apply_mask(
+    def support_update_routine(
         self, relative_correlation_fraction: float, corr_th_del: float, plot_en
     ):
         self.compute_residual_correlation_image()
@@ -2583,8 +2583,6 @@ class DemixingState(SignalProcessingState):
 
         # Currently using rigid mask
         self.mask_ab = self.a.bool()
-        residual_corr_img_3_d = self.residual_correlation_image[:].transpose(1,2,0)
-
         self.mask_ab, self.a = self._mask_expansion_routine(relative_correlation_fraction,
                                                             self.mask_ab,
                                                             self.a,
@@ -2618,7 +2616,7 @@ class DemixingState(SignalProcessingState):
         self.precompute_quantities()
         self.W = RingModel(self.shape[0], self.shape[1], ring_radius, self.device, self.data_order)
         self.update_hals_scheduler()
-        self.compute_standard_correlation_image()
+        self.initialize_standard_correlation_image()
         self.compute_residual_correlation_image()
 
 
@@ -2649,14 +2647,14 @@ class DemixingState(SignalProcessingState):
 
             if update_after and ((iters + 1) % update_after == 0):
                 ##First: Compute correlation images
-                self.compute_standard_correlation_image()
-                self.support_update_prune_elements_apply_mask(corr_th_fix, corr_th_del, plot_en)
+                self.standard_correlation_image.c = self.c
+                self.support_update_routine(corr_th_fix, corr_th_del, plot_en)
 
                 # TODO: Eliminate the need for moving a and c off GPU
                 self.merge_signals(merge_corr_thr, merge_overlap_thr, plot_en)
                 self.update_hals_scheduler()
 
-        self.compute_standard_correlation_image()
+        self.standard_correlation_image.c = self.c
         self.compute_residual_correlation_image()
         self._results = DemixingResults(self.u_sparse, self.r, self.s, self.factorized_ring_term, self.v,
                                self.a, self.c, self.b.squeeze(), self.residual_correlation_image,
