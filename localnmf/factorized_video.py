@@ -2,6 +2,7 @@ from typing import *
 from abc import ABC, abstractmethod
 import numpy as np
 
+
 class FactorizedVideo(ABC):
     """
     This captures the numpy array-like functionality for factorized videos in our NMF model.
@@ -32,9 +33,8 @@ class FactorizedVideo(ABC):
 
     @abstractmethod
     def __getitem__(
-            self,
-            item: Union[int, list, np.ndarray, Tuple[Union[int, np.ndarray, slice, range]]]
+        self,
+        item: Union[int, list, np.ndarray, Tuple[Union[int, np.ndarray, slice, range]]],
     ):
         # Step 1: index the frames (dimension 0)
         pass
-

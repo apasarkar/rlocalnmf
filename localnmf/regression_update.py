@@ -34,16 +34,16 @@ def baseline_update(uv_mean, a, c, to_torch=False):
 
 
 def spatial_update_hals(
-        u_sparse: torch.tensor,
-        r: torch.tensor,
-        s: torch.tensor,
-        v: torch.tensor,
-        a_sparse: torch.sparse_coo_tensor,
-        c: torch.tensor,
-        b: torch.tensor,
-        q: Optional[torch.tensor] = None,
-        blocks: Optional[Union[torch.tensor, list]]=None,
-        mask_ab: Optional[torch.sparse_coo_tensor]=None
+    u_sparse: torch.tensor,
+    r: torch.tensor,
+    s: torch.tensor,
+    v: torch.tensor,
+    a_sparse: torch.sparse_coo_tensor,
+    c: torch.tensor,
+    b: torch.tensor,
+    q: Optional[torch.tensor] = None,
+    blocks: Optional[Union[torch.tensor, list]] = None,
+    mask_ab: Optional[torch.sparse_coo_tensor] = None,
 ):
     """
     Computes a spatial HALS updates:
@@ -97,12 +97,16 @@ def spatial_update_hals(
     u_subset = torch.index_select(u_sparse, 0, nonzero_row_indices)
 
     if q is not None:
-        background_subtracted_projection = torch.sparse.mm(u_subset,
-                                                           torch.matmul(r, torch.matmul((torch.diag(s) - q), Vc)))
+        background_subtracted_projection = torch.sparse.mm(
+            u_subset, torch.matmul(r, torch.matmul((torch.diag(s) - q), Vc))
+        )
     else:
-        background_subtracted_projection = torch.sparse.mm(u_subset,
-                                                           torch.matmul(r * s.unsqueeze(0), Vc))
-    baseline_projection = torch.matmul(torch.index_select(b, 0, nonzero_row_indices), torch.matmul(e, Vc))
+        background_subtracted_projection = torch.sparse.mm(
+            u_subset, torch.matmul(r * s.unsqueeze(0), Vc)
+        )
+    baseline_projection = torch.matmul(
+        torch.index_select(b, 0, nonzero_row_indices), torch.matmul(e, Vc)
+    )
 
     cumulator = background_subtracted_projection - baseline_projection
 
@@ -133,11 +137,18 @@ def spatial_update_hals(
     return a_sparse
 
 
-def temporal_update_hals(u_sparse: torch.sparse_coo_tensor, r: torch.tensor, s: torch.tensor,
-                         v: torch.tensor, a_sparse: torch.sparse_coo_tensor,
-                         c: torch.tensor,
-                         b: torch.tensor, q: Optional[torch.tensor] = None,
-                         c_nonneg: bool=True, blocks: Optional[Union[torch.tensor, list]]=None):
+def temporal_update_hals(
+    u_sparse: torch.sparse_coo_tensor,
+    r: torch.tensor,
+    s: torch.tensor,
+    v: torch.tensor,
+    a_sparse: torch.sparse_coo_tensor,
+    c: torch.tensor,
+    b: torch.tensor,
+    q: Optional[torch.tensor] = None,
+    c_nonneg: bool = True,
+    blocks: Optional[Union[torch.tensor, list]] = None,
+):
     """
     Inputs:
          Note: The first four parameters are the "PMD" representation of the data: it is given in a traditional SVD form: URsV, where UR is the left orthogonal basis, 's' represents the diagonal matrix, and V is the right orthogonal basis.
@@ -176,7 +187,9 @@ def temporal_update_hals(u_sparse: torch.sparse_coo_tensor, r: torch.tensor, s: 
     static_background_projection = torch.matmul(aTb, e)
 
     # Step 3:
-    cumulator = fluctuating_background_subtracted_projection - static_background_projection
+    cumulator = (
+        fluctuating_background_subtracted_projection - static_background_projection
+    )
 
     cumulator = torch.matmul(cumulator, v)
 
@@ -197,7 +210,8 @@ def temporal_update_hals(u_sparse: torch.sparse_coo_tensor, r: torch.tensor, s: 
 
         curr_trace = torch.index_select(c, 1, index_to_select)
         curr_trace += (
-            (torch.index_select(cumulator, 0, index_to_select) - a_iaC) / torch.unsqueeze(diagonals[index_to_select], -1)
+            (torch.index_select(cumulator, 0, index_to_select) - a_iaC)
+            / torch.unsqueeze(diagonals[index_to_select], -1)
         ).t()
         curr_trace = threshold_function(curr_trace)
         c[:, index_to_select] = curr_trace

@@ -45,6 +45,7 @@ def construct_graph_from_sparse_tensor(adj_tensor: torch.sparse_coo_tensor) -> n
 
     return graph
 
+
 def color_and_get_tensors(graph: nx.Graph, device: str) -> List[torch.Tensor]:
     """
     Color the nodes of a graph using a greedy coloring algorithm and convert the
@@ -67,7 +68,8 @@ def color_and_get_tensors(graph: nx.Graph, device: str) -> List[torch.Tensor]:
 
     # Convert lists of nodes to PyTorch tensors
     color_to_tensors: List[torch.Tensor] = [
-        torch.tensor(nodes, dtype=torch.long).to(device) for nodes in color_to_nodes.values()
+        torch.tensor(nodes, dtype=torch.long).to(device)
+        for nodes in color_to_nodes.values()
     ]
 
     return color_to_tensors
@@ -79,49 +81,66 @@ def torch_sparse_to_scipy_coo(a):
     col = a.indices().cpu().detach().numpy()[1, :]
     return scipy.sparse.coo_matrix((data, (row, col)), a.shape)
 
+
 def show_img(ax, img):
     # Visualize local correlation, adapt from kelly's code
-    im = ax.imshow(img, cmap='jet')
+    im = ax.imshow(img, cmap="jet")
     divider = make_axes_locatable(ax)
     cax = divider.append_axes("right", size="5%", pad=0.1)
-    plt.colorbar(im, cax=cax, orientation='vertical', spacing='uniform')
+    plt.colorbar(im, cax=cax, orientation="vertical", spacing="uniform")
 
 
 def spatial_sum_plot(a, a_fin, patch_size, order="C", num_list_fin=None, text=False):
-    scale = np.maximum(1, (patch_size[1] / patch_size[0]));
-    fig = plt.figure(figsize=(16 * scale, 8));
-    ax = plt.subplot(1, 2, 1);
-    ax.imshow(a_fin.sum(axis=1).reshape(patch_size, order=order), cmap="jet");
+    scale = np.maximum(1, (patch_size[1] / patch_size[0]))
+    fig = plt.figure(figsize=(16 * scale, 8))
+    ax = plt.subplot(1, 2, 1)
+    ax.imshow(a_fin.sum(axis=1).reshape(patch_size, order=order), cmap="jet")
 
     if num_list_fin is None:
-        num_list_fin = np.arange(a_fin.shape[1]);
+        num_list_fin = np.arange(a_fin.shape[1])
     if text:
         for ii in range(a_fin.shape[1]):
-            temp = a_fin[:, ii].reshape(patch_size, order=order);
-            pos0 = np.where(temp == temp.max())[0][0];
-            pos1 = np.where(temp == temp.max())[1][0];
-            ax.text(pos1, pos0, f"{num_list_fin[ii] + 1}", verticalalignment='bottom', horizontalalignment='right',
-                    color='white', fontsize=15, fontweight="bold")
+            temp = a_fin[:, ii].reshape(patch_size, order=order)
+            pos0 = np.where(temp == temp.max())[0][0]
+            pos1 = np.where(temp == temp.max())[1][0]
+            ax.text(
+                pos1,
+                pos0,
+                f"{num_list_fin[ii] + 1}",
+                verticalalignment="bottom",
+                horizontalalignment="right",
+                color="white",
+                fontsize=15,
+                fontweight="bold",
+            )
 
     ax.set(title="more passes spatial components")
     ax.title.set_fontsize(15)
     ax.title.set_fontweight("bold")
 
-    ax1 = plt.subplot(1, 2, 2);
-    ax1.imshow(a.sum(axis=1).reshape(patch_size, order=order), cmap="jet");
+    ax1 = plt.subplot(1, 2, 2)
+    ax1.imshow(a.sum(axis=1).reshape(patch_size, order=order), cmap="jet")
 
     if text:
         for ii in range(a.shape[1]):
-            temp = a[:, ii].reshape(patch_size, order=order);
-            pos0 = np.where(temp == temp.max())[0][0];
-            pos1 = np.where(temp == temp.max())[1][0];
-            ax1.text(pos1, pos0, f"{ii + 1}", verticalalignment='bottom', horizontalalignment='right', color='white',
-                     fontsize=15, fontweight="bold")
+            temp = a[:, ii].reshape(patch_size, order=order)
+            pos0 = np.where(temp == temp.max())[0][0]
+            pos1 = np.where(temp == temp.max())[1][0]
+            ax1.text(
+                pos1,
+                pos0,
+                f"{ii + 1}",
+                verticalalignment="bottom",
+                horizontalalignment="right",
+                color="white",
+                fontsize=15,
+                fontweight="bold",
+            )
 
     ax1.set(title="1 pass spatial components")
     ax1.title.set_fontsize(15)
     ax1.title.set_fontweight("bold")
-    plt.tight_layout();
+    plt.tight_layout()
     plt.show()
     return fig
 
@@ -211,7 +230,7 @@ def denoise(ci):
     return ci_new
 
 
-def dim_1_matmul(A, B, device='cuda', batch_size=10000):
+def dim_1_matmul(A, B, device="cuda", batch_size=10000):
     """
     GPU-accelerated matmul of A x B and B x C matrix. Use this method when B is extremely large but A x C can fit on GPU
     """
@@ -223,13 +242,13 @@ def dim_1_matmul(A, B, device='cuda', batch_size=10000):
         interval_end = batch_size * (k + 1)
         A_t = torch.from_numpy(A[:, interval_start:interval_end]).to(device)
         B_t = torch.from_numpy(B[interval_start:interval_end, :]).to(device)
-        out = torch.matmul(A_t, B_t).to('cpu').detach().numpy()
+        out = torch.matmul(A_t, B_t).to("cpu").detach().numpy()
         accumulator += out
     torch.cuda.empty_cache()
     return accumulator
 
 
-def batch_subtract(A, sub_list, device='cuda', batch_size=10000):
+def batch_subtract(A, sub_list, device="cuda", batch_size=10000):
     """
     Routine for subtracting the sum of all matrices in sub_list from A
     Params:
@@ -246,15 +265,17 @@ def batch_subtract(A, sub_list, device='cuda', batch_size=10000):
         interval_end = batch_size * (k + 1)
         A_t = torch.from_numpy(A[interval_start:interval_end, :]).to(device)
         for elt in range(len(sub_list)):
-            curr_t = torch.from_numpy((sub_list[elt])[interval_start:interval_end, :]).to(device)
+            curr_t = torch.from_numpy(
+                (sub_list[elt])[interval_start:interval_end, :]
+            ).to(device)
             torch.sub(A_t, curr_t, out=A_t)
-        output[interval_start:interval_end, :] = A_t.to('cpu').detach().numpy()
+        output[interval_start:interval_end, :] = A_t.to("cpu").detach().numpy()
 
     torch.cuda.empty_cache()
     return output
 
 
-def batch_matmul(A, B, device='cuda', batch_size=10000):
+def batch_matmul(A, B, device="cuda", batch_size=10000):
     """
     Function to accelerate matrix multiplication between two numpy arrays
     Params:
@@ -276,7 +297,7 @@ def batch_matmul(A, B, device='cuda', batch_size=10000):
         interval_end = batch_size * (k + 1)
         A_t = torch.from_numpy(A[interval_start:interval_end, :]).to(device)
         out = torch.matmul(A_t, B_t)
-        product[interval_start:interval_end, :] = out.to('cpu').detach().numpy()
+        product[interval_start:interval_end, :] = out.to("cpu").detach().numpy()
     torch.cuda.empty_cache()
 
     return product
@@ -287,11 +308,14 @@ def construct_sparse(U):
     val = U[nonzeros]
     rows = nonzeros[0]
     cols = nonzeros[1]
-    U_sparse = scipy.sparse.coo_matrix((val, (rows, cols)), shape=(U.shape[0], U.shape[1]))
+    U_sparse = scipy.sparse.coo_matrix(
+        (val, (rows, cols)), shape=(U.shape[0], U.shape[1])
+    )
     return U_sparse
 
 
 ## Functionality for expanding the rowspan of the V matrix
+
 
 def check_1s_span(V):
     ones = torch.ones((V.shape[1], 1), device=V.device)
@@ -313,7 +337,9 @@ def get_distance_from_V(V):
 
     ones_vec = torch.ones((V.shape[1], 1), device=V.device)
 
-    projection = torch.matmul(V.T, torch.matmul(V, ones_vec))  # V.T.dot(V.dot(ones_vec))
+    projection = torch.matmul(
+        V.T, torch.matmul(V, ones_vec)
+    )  # V.T.dot(V.dot(ones_vec))
 
     perpendicular_comp = ones_vec - projection
 
@@ -342,12 +368,13 @@ def add_1s_to_rowspan(V):
 
 def parinit():
     import os
-    os.environ['MKL_NUM_THREADS'] = "1"
-    os.environ['OMP_NUM_THREADS'] = "1"
-    os.environ['OPENBLAS_NUM_THREADS'] = '1'
+
+    os.environ["MKL_NUM_THREADS"] = "1"
+    os.environ["OMP_NUM_THREADS"] = "1"
+    os.environ["OPENBLAS_NUM_THREADS"] = "1"
 
     num_cpu = multiprocessing.cpu_count()
-    os.system('taskset -cp 0-%d %s' % (num_cpu, os.getpid()))
+    os.system("taskset -cp 0-%d %s" % (num_cpu, os.getpid()))
 
 
 def runpar(f, X, nprocesses=None, **kwargs):

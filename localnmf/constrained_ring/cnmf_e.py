@@ -1,9 +1,11 @@
 import torch
 
+
 class RingModel:
 
-    def __init__(self, d1: int, d2: int, radius: int, device: str='cpu',
-                 order: str="F"):
+    def __init__(
+        self, d1: int, d2: int, radius: int, device: str = "cpu", order: str = "F"
+    ):
         """
         Ring Model object manages the state of the ring model during the model fit phase.
 
@@ -20,12 +22,16 @@ class RingModel:
         self._order = order
         self._kernel = self._construct_ring_kernel()
         self.weights = torch.ones((d1 * d2), device=device)
-        self.support = torch.ones((self.shape[0]*self.shape[1]), device=self.device, dtype=torch.float32)
+        self.support = torch.ones(
+            (self.shape[0] * self.shape[1]), device=self.device, dtype=torch.float32
+        )
 
     def _construct_ring_kernel(self) -> torch.tensor:
         # Create a grid of coordinates (y, x) relative to the center
-        range_values = torch.arange(2 * self.radius + 1,  device = self.device) #Guarantees kernel on right device
-        y, x = torch.meshgrid(range_values, range_values, indexing='ij')
+        range_values = torch.arange(
+            2 * self.radius + 1, device=self.device
+        )  # Guarantees kernel on right device
+        y, x = torch.meshgrid(range_values, range_values, indexing="ij")
         y = y - self.radius
         x = x - self.radius
 
@@ -74,11 +80,13 @@ class RingModel:
         Args:
             new_weights (torch.tensor): Shape (d1*d2)
         """
-        net_pixels = (self.shape[0] * self.shape[1])
+        net_pixels = self.shape[0] * self.shape[1]
         index_values = torch.arange(net_pixels, device=self.device, dtype=torch.long)
-        self._weights = torch.sparse_coo_tensor(torch.stack([index_values, index_values]), new_weights,
-                                             (net_pixels, net_pixels)).coalesce()
-
+        self._weights = torch.sparse_coo_tensor(
+            torch.stack([index_values, index_values]),
+            new_weights,
+            (net_pixels, net_pixels),
+        ).coalesce()
 
     @property
     def support(self):
@@ -97,10 +105,13 @@ class RingModel:
         Args:
             new_mask (torch.tensor): Shape (d1*d2), index i is 0 if pixel i contains neural signal, otherwise it is 0
         """
-        net_pixels = (self.shape[0]*self.shape[1])
+        net_pixels = self.shape[0] * self.shape[1]
         index_values = torch.arange(net_pixels, device=self.device, dtype=torch.long)
-        self._support = torch.sparse_coo_tensor(torch.stack([index_values, index_values]), new_mask,
-                                                (net_pixels, net_pixels)).coalesce()
+        self._support = torch.sparse_coo_tensor(
+            torch.stack([index_values, index_values]),
+            new_mask,
+            (net_pixels, net_pixels),
+        ).coalesce()
 
     def forward(self, images: torch.tensor):
         """
@@ -116,31 +127,42 @@ class RingModel:
         images_masked = torch.sparse.mm(self.support, images)
 
         if self.order == "F":
-            images_masked_3_d = torch.reshape(images_masked, (self.shape[1], self.shape[0], -1))
+            images_masked_3_d = torch.reshape(
+                images_masked, (self.shape[1], self.shape[0], -1)
+            )
             images_masked_3_d = torch.permute(images_masked_3_d, (1, 0, 2))
         elif self.order == "C":
-            images_masked_3_d = torch.reshape(images_masked, (self.shape[0], self.shape[1], -1))
+            images_masked_3_d = torch.reshape(
+                images_masked, (self.shape[0], self.shape[1], -1)
+            )
         else:
             raise ValueError(f"order is {self.order} which is not valid")
 
         images_masked_3_d = torch.permute(images_masked_3_d, (2, 0, 1))
         images_masked_3_d = images_masked_3_d.unsqueeze(1)
 
-        kernel = self.kernel.unsqueeze(0).unsqueeze(0)  # Add batch and channel dimensions
+        kernel = self.kernel.unsqueeze(0).unsqueeze(
+            0
+        )  # Add batch and channel dimensions
 
         # Apply convolution with appropriate padding
         # Padding of `radius` on all sides to preserve the image size
         padding = self.radius
-        convolved_stack = torch.nn.functional.conv2d(images_masked_3_d, kernel, stride = 1, padding=padding).squeeze()
+        convolved_stack = torch.nn.functional.conv2d(
+            images_masked_3_d, kernel, stride=1, padding=padding
+        ).squeeze()
 
-        #Reshape (frames, d1, d2) to (d1*d2, frames)
+        # Reshape (frames, d1, d2) to (d1*d2, frames)
         if self.order == "F":
-            convolved_stack = torch.permute(convolved_stack, (2, 1, 0)) #d2, d1, frames
+            convolved_stack = torch.permute(
+                convolved_stack, (2, 1, 0)
+            )  # d2, d1, frames
         else:
             convolved_stack = torch.permute(convolved_stack, (1, 2, 0))
-        convolved_stack = convolved_stack.reshape((self.shape[0]*self.shape[1], -1))
+        convolved_stack = convolved_stack.reshape((self.shape[0] * self.shape[1], -1))
 
         return torch.sparse.mm(self.weights, convolved_stack)
+
     # def _precompute_ring_info(self):
     #     d1, d2 = self.shape
     #     dim1_spread = torch.arange(-(self.radius + 1), (self.radius + 2), device=self.device)
