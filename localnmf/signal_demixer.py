@@ -2114,21 +2114,36 @@ class InitializingState(SignalProcessingState):
 
     def _initialize_signals_superpixels(
         self,
-        cut_off_point: float=0.9,
-        residual_cut: float=0.3,
-        length_cut: int=3,
-        th: int=1,
-        robust_corr_term: float=0.03,
+        mad_threshold: int = 1,
+        mad_correlation_threshold: float=0.9,
+        min_superpixel_size: int = 3,
+        residual_threshold: float=0.3,
+        patch_size: tuple[int, int] = (100, 100),
+        robust_corr_term: float = 0.03,
         text: bool=True,
-        plot_en: bool=False,
-        patch_size: tuple[int, int]=(100, 100),
+        plot_en: bool=False
     ):
         """
-        See superpixel_init function above for a clear explanation of what each of these parameters should be
+        Args:
+            mad_threshold (int): the threshold, th, which is used to run a maximum absolute deviation (MAD) threshold on
+                each time series y(t). We set all bins to 0 where y(t) < median(y(t)) + th(MAD(y(t)).
+            mad_correlation_threshold (float). Between 0 and 1. We compute temporal correlations between the
+                MAD thresholded versions of neighboring pixels.
+
+            min_superpixel_size (int): Minimum cluster size of highly correlated pixels which can form a "superpixel".
+            residual_threshold (float): Between 0 and 1. Each superpixel has a temporal estimate. "Pure" superpixels have
+                the property that their temporal estimates are "far away" from the linear subspace spanned by other
+                (spatially closeby) superpixel temporal estimates. This parameter quantifies this distance.
+                By setting a high residual_threshold, fewer superpixels qualify as "pure" superpixels.
+            patch_size (tuple): When determining pure superpixels, we compare superpixels within local patches; this
+                is the patch size (height, width).
+            robust_corr_term (float): A robust correlation parameter used in the superpixel calculations
+            text (bool): If plotting the superpixel image, this determines whether we assign numbers to the superpixels.
+            plot_en (bool): Used for debugging; whether to plot the superpixels and pure superpixel plots.
         """
-        if th != self._th or self._robust_corr_term != robust_corr_term:
+        if mad_threshold != self._th or self._robust_corr_term != robust_corr_term:
             print(
-                f"Computing correlation data structure with MAD threshold  {th}"
+                f"Computing correlation data structure with MAD threshold  {mad_threshold}"
                 f"and the robust corr term is {robust_corr_term}"
             )
             # This indicates that it is the first time we are running the superpixel init with this set of
@@ -2138,7 +2153,7 @@ class InitializingState(SignalProcessingState):
                     self.u_sparse,
                     torch.matmul(self.r * self.s[None, :], self.v),
                     self.shape,
-                    th,
+                    mad_threshold,
                     order=self.data_order,
                     batch_size=self.batch_size,
                     pseudo=robust_corr_term,
@@ -2146,7 +2161,7 @@ class InitializingState(SignalProcessingState):
                     c=self.c,
                 )
             )
-            self._th = th
+            self._th = mad_threshold
             self._robust_corr_term = robust_corr_term
 
         (
@@ -2164,9 +2179,9 @@ class InitializingState(SignalProcessingState):
             patch_size,
             self.data_order,
             self.shape,
-            cut_off_point,
-            residual_cut,
-            length_cut,
+            mad_correlation_threshold,
+            residual_threshold,
+            min_superpixel_size,
             self.device,
             self.dim1_coordinates,
             self.dim2_coordinates,
@@ -2197,12 +2212,14 @@ class InitializingState(SignalProcessingState):
     def initialize_signals(self, is_custom: bool=False, **init_kwargs: dict,
     ):
         """
-        Runs an initialization algorithm
+        Runs an initialization algorithm to get initial signal estimates.
 
         Args:
             is_custom (bool): Indicates whether custom init or regular init is used
             init_kwargs (dict): Dictionary of method-specific parameter values used in superpixel init
 
+
+        See the functions _initialize_signals_superpixels and _initialize_signals_custom for documentation
 
         Generates the following:
             tuple consisting of
@@ -2664,7 +2681,7 @@ class DemixingState(SignalProcessingState):
                 to be merged.
             update_frequency (int): Determines how frequently we perform  spatial support updates and delete and merge
                 neural signal estimates. For example, the default value of 4 means every 4 HALS iterations, we perform this step.
-            c_nonneg (bool): Indicates whether or not the temporal estimates are allowed to be negative;
+            c_nonneg (bool): Indicates whether the temporal estimates are allowed to be negative;
                 this is useful for e.g. in voltage imaging.
             denoise (Union[list, bool]): Indicates whether to run a denoiser at each HALS iteration on the temporal traces.
             plot_en (bool): Indicates whether plotting is enabled; this is only used for debugging purposes.
