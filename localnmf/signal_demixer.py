@@ -388,32 +388,35 @@ def get_median(tensor, axis):
     return tensor_med
 
 
-def threshold_data_inplace(Yd, th=2, axisVal=2):
+def threshold_data_inplace(movie_chunk, mad_threshold_value: int=2, dim: int=2):
     """
     Threshold data: in each pixel, compute the median and median absolute deviation (MAD),
-    then zero all bins (x,t) such that Yd(x,t) < med(x) + th * MAD(x).  Default value of th is 2.
-    Inputs:
-        Yd: torch.Tensor, shape (d1, d2, T)
-    Outputs:
+    then zero all bins (x,t) such that Yd(x,t) < med(x) + th * MAD(x). 
+    Min subtract and return the result. 
+    Args:
+        movie_chunk (torch.tensor). Shape (fov dim 1, fov dim 2, frames)
+        mad_threshold_value (int): "th", as described above. The number of median absolute deviations in the threshold.
+        dim (int): The axis over which operations are applied.
+    Returns:
         Yd: This is an in-place operation
     """
 
     # Get per-pixel medians
-    Yd_med = get_median(Yd, axis=axisVal)
-    diff = torch.sub(Yd, Yd_med)
+    movie_median = get_median(movie_chunk, axis=dim)
+    diff = torch.sub(movie_chunk, movie_median)
 
     # Calculate MAD values
     torch.abs(diff, out=diff)
-    MAD = get_median(diff, axis=axisVal)
+    movie_mad_values = get_median(diff, axis=dim)
 
     # Calculate actual threshold
-    torch.mul(MAD, th, out=MAD)
-    th_val = Yd_med.add(MAD)
+    torch.mul(movie_mad_values, mad_threshold_value, out=movie_mad_values)
+    th_val = movie_median.add(movie_mad_values)
 
     # Subtract threshold values
-    torch.sub(Yd, th_val, out=Yd)
-    torch.clamp(Yd, min=0, out=Yd)
-    return Yd
+    torch.sub(movie_chunk, th_val, out=movie_chunk)
+    torch.clamp(movie_chunk, min=0, out=movie_chunk)
+    return movie_chunk
 
 
 def reshape_fortran(x, shape):
@@ -1505,7 +1508,7 @@ def fit_large_spatial_support(
             ac_prod = torch.sparse.mm(a_subset, c)
             y_temp = torch.sub(y_temp, ac_prod)
 
-        y_temp = threshold_data_inplace(y_temp, th, axisVal=1)
+        y_temp = threshold_data_inplace(y_temp, th, dim=1)
 
         normalizer = torch.sum(c_init * c_init)
         elt_product = torch.sum(c_init[None, :] * y_temp, dim=1)
