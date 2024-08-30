@@ -2630,14 +2630,44 @@ class DemixingState(SignalProcessingState):
         )
 
 
-    def demix(self, maxiter: int=25, corr_th_fix: float=0.9, corr_th_fix_sec: float=0.7, corr_th_del: float=0.2,
-              switch_point: int= 5, skips: int= 5,
-              merge_corr_thr: float = 0.8, merge_overlap_thr: float=0.4, ring_radius: int = 10,
-              denoise: Union[list, bool] =None, plot_en: bool=False,
-              update_after: int=4, c_nonneg: bool=True):
+    def demix(self,
+              maxiter: int=25,
+              support_threshold: Union[list, float]=0.9,
+              deletion_threshold: float=0.2,
+              ring_model_start_pt: int= 5,
+              ring_radius: int = 10,
+              merge_threshold: float = 0.8,
+              merge_overlap_threshold: float=0.4,
+              update_frequency: int = 4,
+              c_nonneg: bool = True,
+              denoise: Union[list, bool]=None,
+              plot_en: bool=False
+              ):
         """
         Function for computing background, spatial and temporal components of neurons. Uses HALS updates to iteratively
         refine spatial and temporal estimates.
+
+        Args:
+            maxiter (int): Number of HALS iterations to be performed
+            support_threshold (Union[list, float]): Value between 0 and 1.
+                For each neuron, we take the max value of its correlation image and multiply it by this parameter.
+                This gives us a correlation cutoff used to set the new support.
+            deletion_threshold (float): We delete neurons whose residual correlation image over its support is below
+                this value.
+            ring_model_start_pt (int): How many HALS iterations to wait before fitting the ring model. To disable
+                the ring model set this to be greater than maxiter.
+            ring_radius (int): The radius of the ring model (if it is used)
+            merge_threshold (float): Between 0 and 1. We merge two signals based on the degree of overlap between their thresholded
+                correlation images. This parameter is the cutoff for computing those thresholded correlation images.
+            merge_overlap_threshold (float): Between 0 and 1. Specifies what fraction of a neuron's thresholded correlation
+                image must overlap with another candidate neuron's thresholded correlation image for the two signals
+                to be merged.
+            update_frequency (int): Determines how frequently we perform  spatial support updates and delete and merge
+                neural signal estimates. For example, the default value of 4 means every 4 HALS iterations, we perform this step.
+            c_nonneg (bool): Indicates whether or not the temporal estimates are allowed to be negative;
+                this is useful for e.g. in voltage imaging.
+            denoise (Union[list, bool]): Indicates whether to run a denoiser at each HALS iteration on the temporal traces.
+            plot_en (bool): Indicates whether plotting is enabled; this is only used for debugging purposes.
         """
         #Key: precompute_quantities is a setup function which must be run first in this routine
         self.precompute_quantities()
@@ -2645,6 +2675,15 @@ class DemixingState(SignalProcessingState):
         self.update_hals_scheduler()
         self.initialize_standard_correlation_image()
         self.compute_residual_correlation_image()
+
+
+        if isinstance(support_threshold, list):
+            if len(support_threshold) != maxiter:
+                raise ValueError(f"Length of list ``support_threshold`` is not equal to maxiter, which is {maxiter}")
+        elif isinstance(support_threshold, float):
+            support_threshold = [support_threshold] * maxiter
+        else:
+            raise ValueError(f"support_threshold has invalid type: {type(support_threshold)}")
 
 
         if denoise is None:
@@ -2656,12 +2695,10 @@ class DemixingState(SignalProcessingState):
             denoise = [False for i in range(maxiter)]
 
         for iters in tqdm(range(maxiter)):
-            if iters >= maxiter - switch_point:
-                corr_th_fix = corr_th_fix_sec
 
             self.static_baseline_update()
 
-            if iters >= skips:
+            if iters >= ring_model_start_pt:
                 self.fluctuating_baseline_update()
             else:
                 pass
@@ -2672,13 +2709,13 @@ class DemixingState(SignalProcessingState):
             denoise_flag = denoise[iters]
             self.temporal_update(denoise=denoise_flag, plot_en=plot_en, c_nonneg=c_nonneg)
 
-            if update_after and ((iters + 1) % update_after == 0):
+            if update_frequency and ((iters + 1) % update_frequency == 0):
                 ##First: Compute correlation images
                 self.standard_correlation_image.c = self.c
-                self.support_update_routine(corr_th_fix, corr_th_del, plot_en)
+                self.support_update_routine(support_threshold[iters], deletion_threshold, plot_en)
 
                 # TODO: Eliminate the need for moving a and c off GPU
-                self.merge_signals(merge_corr_thr, merge_overlap_thr, plot_en)
+                self.merge_signals(merge_threshold, merge_overlap_threshold, plot_en)
                 self.update_hals_scheduler()
 
         self.standard_correlation_image.c = self.c
