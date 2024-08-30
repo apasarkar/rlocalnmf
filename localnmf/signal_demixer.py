@@ -2329,7 +2329,32 @@ class DemixingState(SignalProcessingState):
         indicator = (torch.sparse.mm(self.a, ones_vec).squeeze() == 0).to(torch.float32)
         self.W.support = indicator
 
+
     def ring_model_weight_update(self):
+        self.W.weights = torch.ones((self.shape[0]*self.shape[1]), device = self.device).float()
+        ur = torch.sparse.mm(self.u_sparse, self.r)
+        e = torch.matmul(torch.ones([1, self.v.shape[1]], device=self.device), self.v.t())
+        x = torch.matmul(self.c.t(), self.v.t())
+        spatial_term = ur*self.s.unsqueeze(0)
+        spatial_term -= self.b @ e
+        spatial_term -=  torch.sparse.mm(self.a, x)
+        ring_output = self.W.forward(spatial_term)
+
+        numerator = torch.sum(spatial_term * ring_output, dim = 1)
+        denominator = torch.square(torch.linalg.norm(ring_output, dim=1))
+
+        weights = torch.nan_to_num(numerator/denominator, nan = 0.0, posinf = 0.0, neginf = 0.0)
+        threshold_function = torch.nn.ReLU()
+        weights = threshold_function(weights)
+        #Now export the ring model to its factorized form:
+        self.factorized_ring_term = ur.T @ (weights.unsqueeze(1) * ring_output)
+
+
+
+
+
+
+    def _old_ring_model_weight_update(self):
         num_pixels = self.shape[0] * self.shape[1]
         batches = math.ceil(num_pixels / self.batch_size)
         self.factorized_ring_term *= 0 #Reset the factorized ring term
@@ -2402,6 +2427,7 @@ class DemixingState(SignalProcessingState):
                 plot_en,
                 order=self.data_order,
             )
+            print(f"new shape of a is {self.a.shape}")
             self.update_hals_scheduler()
 
 
@@ -2579,6 +2605,7 @@ class DemixingState(SignalProcessingState):
             self.c = torch.index_select(self.c, 1, indices_to_keep)
             self.standard_correlation_image.c = self.c
             #Need to update the residual correlation image since the A/C terms changed
+            self.update_hals_scheduler()
             self.compute_residual_correlation_image()
 
         # Currently using rigid mask
