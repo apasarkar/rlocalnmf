@@ -21,14 +21,9 @@ class RingModel:
         self._kernel = self._construct_ring_kernel()
         self.weights = torch.ones((d1 * d2), device=device)
         self.support = torch.ones((self.shape[0]*self.shape[1]), device=self.device, dtype=torch.float32)
-        #
-        # self._dim1_ring, self._dim2_ring, self._ring_indices = self._precompute_ring_info()
-
 
     def _construct_ring_kernel(self) -> torch.tensor:
         # Create a grid of coordinates (y, x) relative to the center
-
-
         range_values = torch.arange(2 * self.radius + 1,  device = self.device) #Guarantees kernel on right device
         y, x = torch.meshgrid(range_values, range_values, indexing='ij')
         y = y - self.radius
