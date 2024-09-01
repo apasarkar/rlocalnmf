@@ -369,49 +369,53 @@ def PMD_setup_routine(U_sparse, R, s, V):
     return U_sparse, R, s, V
 
 
-def process_custom_signals(
-    a_init, U_sparse, R, s, V, order="C", c_nonneg=True, blocks=None
-):
+def process_custom_signals(a: torch.sparse_coo_tensor,
+                           u_sparse: torch.sparse_coo_tensor,
+                           r: torch.tensor,
+                           s: torch.tensor,
+                           v: torch.tensor,
+                           c_nonneg: bool=True,
+                           blocks=None
+    ) -> tuple[torch.sparse_coo_tensor, torch.sparse_coo_tensor, torch.tensor, torch.tensor]:
     """
-    Custom initialization: Given a set of neuron spatial footprints ('a'), this provides initial estimates to the other component (temporal traces, baseline, fluctuating background)
-    Terms:
-        d1, d2: the dimensions of the FOV
-        K: number of neurons identified
-        R: rank of the PMD decomposition
+    Given spatial footprints matrix "a", prepare a set of initialized signals (spatial footprints, masks,
+    temporal matrices, baselines) for running demixing in lieu of superpixelization.
+
+    Function creates a copy of the input "a" tensor to avoid unintended side effects to original input.
 
     Params:
-        a_init: np.ndarray, dimensions (d1, d2, N)
-        U_sparse: torch.sparse_coo_tensor, shape (d1*d2, K )
-        R: torch.Tensor. Shape roughly (K, K/4)
-        s: torch.Tensor. Shape min(K/4)
-        V: torch.Tensor, shape (K/4, T)
-        device: string; either 'cpu' or 'cuda'
-        order: order in which 3d data is reshaped to 2d
-
-
-    TODO: Eliminate awkward naming issues in 'process custom signals'
+        a (torch.sparse_coo_tensor): (shape (d1*d2, K) where K is number of neural signals
+        u_sparse (torch.sparse_coo_tensor): shape (d1*d2, rank 1) where rank 1 is larger PMD rank
+        r (torch.tensor): Shape (rank 1, rank 2) where rank 2 is smaller PMD rank.
+        s (torch.tensor): Shape (rank 2). Singular values of PMD decomposition.
+        V (torch.tensor): shape (rank 2, num_frames).
+        device (str): either 'cpu' or 'cuda'. Passed directly to pytorch "to" function for tensors to place data
+            on the correct device.
+        order (str): order in which 3d data is reshaped to 2d
     """
-    device = V.device
-    dims = (a_init.shape[0], a_init.shape[1], V.shape[1])
+    device = v.device
 
-    a = a_init.reshape(dims[0] * dims[1], -1, order=order)
+    if not a.is_coalesced():
+        a = a.coalesce()  # Coalesce to remove duplicate indices
 
-    # Cast the data to torch tensors
-    a_sp = scipy.sparse.csr_matrix(a)
-    a = (
-        torch.sparse_coo_tensor(np.array(a_sp.nonzero()), a_sp.data, a_sp.shape)
-        .coalesce()
-        .float()
-        .to(device)
-    )
-    c = torch.zeros([dims[2], a_init.shape[2]], device=device, dtype=torch.float)
+    new_indices = a.indices().clone().to(device)
+    new_values = a.values().clone().to(device)
+    dims = (u_sparse.shape[0], a.shape[1])
 
-    uv_mean = get_mean_data(U_sparse, R, s, V)
+    a = torch.sparse_coo_tensor(
+        indices=new_indices,
+        values=new_values,
+        size=dims
+    ).coalesce()
+
+    c = torch.zeros([v.shape[1], a.shape[1]], device=device, dtype=torch.float)
+
+    uv_mean = get_mean_data(u_sparse, r, s, v)
 
     # Baseline update followed by 'c' update:
     b = regression_update.baseline_update(uv_mean, a, c)
     c = regression_update.temporal_update_hals(
-        U_sparse, R, s, V, a, c, b, c_nonneg=c_nonneg, blocks=blocks
+        u_sparse, r, s, v, a, c, b, c_nonneg=c_nonneg, blocks=blocks
     )
 
     c_norm = torch.linalg.norm(c, dim=0)
@@ -2300,18 +2304,17 @@ class InitializingState(SignalProcessingState):
             c=self.c,
         )
 
-    def _initialize_signals_custom(self, custom_init):
-        if not custom_init["a"].shape[2] > 0:
+    def _initialize_signals_custom(self, a: torch.sparse_coo_tensor):
+        if not a.shape[1] > 0:
             raise ValueError("Must provide at least 1 spatial footprint")
 
         self.a_init, self.mask_a_init, self.c_init, self.b_init = (
             process_custom_signals(
-                custom_init["a"].copy(),
+                a,
                 self.u_sparse,
                 self.r,
                 self.s,
                 self.v,
-                order=self.data_order,
             )
         )
         self.diagnostic_image = None
