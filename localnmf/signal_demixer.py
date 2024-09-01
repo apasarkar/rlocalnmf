@@ -1820,8 +1820,8 @@ def merge_components(
     temp = torch.sum(cor, dim=[1, 2])
     temp[temp == 0] = 1  # For division safety
     cor_corr = torch.tensordot(
-        standard_correlation_image_full,
-        standard_correlation_image_full,
+        cor,
+        cor,
         dims=([1, 2], [1, 2]),
     )
     cor_corr = torch.triu(cor_corr, diagonal=1)
