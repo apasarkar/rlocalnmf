@@ -764,7 +764,7 @@ class ColorfulACArray(FactorizedVideo):
         """
         t = c.shape[0]
         self._a = a
-        self._c = c
+        self._c = c - torch.amin(c, dim = 0, keepdim=True)
         if not (self.a.device == self.c.device):
             raise ValueError(f"Input tensors not on same device")
         self._device = self.a.device
