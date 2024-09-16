@@ -2937,12 +2937,17 @@ class DemixingState(SignalProcessingState):
             if update_frequency and ((iters + 1) % update_frequency == 0):
                 ##First: Compute correlation images
                 self.standard_correlation_image.c = self.c
+
+                #Merge signals as needed and update the scheduler
+                original_shape = self.a.shape[1]
+                self.merge_signals(merge_threshold, merge_overlap_threshold, plot_en)
+                if self.a.shape[1] < original_shape:
+                    self.update_hals_scheduler()
+
                 self.support_update_routine(
                     support_threshold[iters], deletion_threshold, plot_en
                 )
 
-                # TODO: Eliminate the need for moving a and c off GPU
-                self.merge_signals(merge_threshold, merge_overlap_threshold, plot_en)
                 self.update_hals_scheduler()
 
         self.standard_correlation_image.c = self.c
