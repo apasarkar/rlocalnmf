@@ -1,8 +1,6 @@
 from typing import *
 import numpy as np
-import scipy.sparse
-from wgpu.structs import Color
-
+from enum import Enum
 from localnmf.factorized_video import FactorizedVideo
 import torch
 
@@ -962,6 +960,10 @@ class ColorfulACArray(FactorizedVideo):
         product = product.cpu().numpy().squeeze()
         return product
 
+class ResidCorrMode(Enum):
+    DEFAULT=0
+    MASKED=1
+    RESIDUAL=2
 
 class ResidualCorrelationImages(FactorizedVideo):
 
@@ -978,7 +980,7 @@ class ResidualCorrelationImages(FactorizedVideo):
         residual_movie_mean: torch.tensor,
         residual_movie_normalizer: torch.tensor,
         fov_dims: tuple[int, int],
-        zero_support: bool = False,
+        mode: ResidCorrMode = ResidCorrMode.DEFAULT,
         order: str = "F",
     ):
         """
@@ -1038,7 +1040,7 @@ class ResidualCorrelationImages(FactorizedVideo):
         self._index_values = torch.arange(self._c.shape[1], device=self.device).long()
         self._order = order
 
-        self._zero_support = zero_support
+        self._mode = mode
 
         self._ones_basis = (
             torch.ones([1, self._v.shape[1]], device=self.device) @ self._v.T
@@ -1050,16 +1052,19 @@ class ResidualCorrelationImages(FactorizedVideo):
         self.pixel_mat = torch.from_numpy(self.pixel_mat).long().to(self.device)
 
     @property
-    def zero_support(self) -> bool:
+    def mode(self) -> ResidCorrMode:
         """
-        It is very useful to be able to zero out the support of the resid correlation image to see what's "left".
-        This property indicates whether the residual corr array zeros out the support of the neurons or not
+        Sometimes we want to view slightly modified versions of this correlation image. Some examples:
+            - We want to zero out pixels belonging to the support of each neuron (ResidCorrMode.MASKED)
+            - We want to view the correlation between the i-th temporal component and the full resid movie (
+                as opposed to the i-th correlation image). In this case we use ResidCorrMode.RESIDUAL
+            - We want the i-th residual correlation image; we use ResidCorrMode.DEFAULT
         """
-        return self._zero_support
+        return self._mode
 
-    @zero_support.setter
-    def zero_support(self, new_flag):
-        self._zero_support = new_flag
+    @mode.setter
+    def mode(self, new_mode: ResidCorrMode):
+        self._mode= new_mode
 
     @property
     def device(self) -> str:
@@ -1210,9 +1215,12 @@ class ResidualCorrelationImages(FactorizedVideo):
 
         rows, cols = support_values_crop.indices()
         values = support_values_crop.values()
-        if self.zero_support:
-            values = values * 0
-        product[(rows, cols)] = values
+        if self.mode == ResidCorrMode.DEFAULT:
+            product[(rows, cols)] = values
+        elif self.mode == ResidCorrMode.MASKED:
+            product[(rows, cols)] = 0
+        elif self.mode == ResidCorrMode.RESIDUAL:
+            pass
 
         if used_order == "F":
             product = product.T.reshape((-1, implied_fov[1], implied_fov[0]))
@@ -1230,7 +1238,6 @@ class ResidualCorrelationImages(FactorizedVideo):
         product = self.getitem_tensor(item)
         product = product.cpu().numpy().astype(self.dtype).squeeze()
         return product
-
 
 class StandardCorrelationImages(FactorizedVideo):
 

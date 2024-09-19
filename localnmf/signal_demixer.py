@@ -18,7 +18,7 @@ from mpl_toolkits.axes_grid1 import make_axes_locatable
 from .demixing_arrays import (
     DemixingResults,
     StandardCorrelationImages,
-    ResidualCorrelationImages,
+    ResidualCorrelationImages, ResidCorrMode,
 )
 from localnmf import ca_utils
 from localnmf.ca_utils import (
@@ -181,7 +181,7 @@ def _compute_residual_correlation_image(
         m_baseline.squeeze(),
         residual_movie_norms.squeeze(),
         fov_dims,
-        zero_support=False,
+        mode=ResidCorrMode.DEFAULT,
         order=data_order,
     )
     return residual_array
