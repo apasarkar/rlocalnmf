@@ -66,6 +66,7 @@ def _compute_residual_correlation_image(
     r: torch.tensor,
     s: torch.tensor,
     v: torch.tensor,
+    factorized_ring_term: torch.tensor,
     spatial_comps: torch.sparse_coo_tensor,
     temporal_comps: torch.tensor,
     fov_dims: tuple[int, int],
@@ -77,9 +78,9 @@ def _compute_residual_correlation_image(
     """
     The residual correlation image for each neuron "i" can be broken up into two parts: the pixels that do
     not currently belong to the spatial support of neuron "i" and the pixels that do. For the former, we can compute
-    the correlation image via ((URs - AX^T)Vc_norm) and then divide each pixel by the norm of URs - AX^T
+    the correlation image via ((UR(s - q) - AX^T)Vc_norm) and then divide each pixel by the norm of URs - AX^T
 
-    For the latter, we need to compute (URs - AX + A_iX_i^T)(Vc_norm) and then divide each pixel by the norm of
+    For the latter, we need to compute (UR(s - q) - AX + A_iX_i^T)(Vc_norm) and then divide each pixel by the norm of
     URs - AX^T. Note that here we are only interested in the correlation values on the pixels belonging to support
     of A_i.
     """
@@ -96,8 +97,10 @@ def _compute_residual_correlation_image(
 
     x = c.T @ v.T
 
+    fluctuating_baseline_subtracted_term = torch.diag(s) - factorized_ring_term
+
     m_baseline = torch.sparse.mm(
-        u_sparse, (r @ (s.unsqueeze(1) * v_mean))
+        u_sparse, (r @ (fluctuating_baseline_subtracted_term @ v_mean))
     ) - torch.sparse.mm(spatial_comps, (x @ v_mean))
 
     num_iters = math.ceil(r.shape[1] / batch_size)
@@ -105,7 +108,7 @@ def _compute_residual_correlation_image(
         start = k * batch_size
         end = min(start + batch_size, r.shape[1])
         temp = (
-            torch.sparse.mm(u_sparse, r[:, start:end]) * s.unsqueeze(0)
+            torch.sparse.mm(u_sparse, r[:, start:end]) @ fluctuating_baseline_subtracted_term
             - torch.matmul(spatial_comps, x[:, start:end])
             - m_baseline @ e[:, start:end]
         )
@@ -142,7 +145,7 @@ def _compute_residual_correlation_image(
             + torch.sparse.mm(a_subset_rowcrop, x_crop) @ v_mean
         )
 
-        urs_term = torch.sparse.mm(u_rowcrop, r) * s.unsqueeze(0)
+        urs_term = torch.sparse.mm(u_rowcrop, r) @ fluctuating_baseline_subtracted_term
         ax_term = torch.sparse.mm(a_rowcrop, x)
         ax_keep_term = torch.sparse.mm(a_subset_rowcrop, x_crop)
         mean_sub_term = m_rowcrop @ e
@@ -174,6 +177,7 @@ def _compute_residual_correlation_image(
         r,
         s,
         v,
+        factorized_ring_term,
         spatial_comps,
         c,
         x,
@@ -2434,10 +2438,10 @@ class DemixingState(SignalProcessingState):
         """
         Radius of the ring model being used
         """
-        self.a = self._a_init
-        self.b = self._b_init
-        self.c = self._c_init
-        self.mask_ab = self._mask_a_init
+        self.a = self._a_init.clone()
+        self.b = self._b_init.clone()
+        self.c = self._c_init.clone()
+        self.mask_ab = self._mask_a_init.clone()
         if self.mask_ab is None:
             self.mask_ab = self.a.bool()
 
@@ -2464,6 +2468,7 @@ class DemixingState(SignalProcessingState):
             self.r,
             self.s,
             self.v,
+            self.factorized_ring_term,
             self.a,
             self.c,
             (self.shape[0], self.shape[1]),

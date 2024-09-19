@@ -973,6 +973,7 @@ class ResidualCorrelationImages(FactorizedVideo):
         r: torch.tensor,
         s: torch.tensor,
         v: torch.tensor,
+        factorized_ring_term: torch.tensor,
         a: torch.sparse_coo_tensor,
         c: torch.tensor,
         x: torch.tensor,
@@ -1012,16 +1013,17 @@ class ResidualCorrelationImages(FactorizedVideo):
         """
 
         if not (
-            u_sparse.device
-            == r.device
-            == s.device
-            == v.device
-            == c.device
-            == x.device
-            == a.device
-            == support_correlation_values.device
-            == residual_movie_mean.device
-            == residual_movie_normalizer.device
+                u_sparse.device
+                == r.device
+                == s.device
+                == v.device
+                == c.device
+                == x.device
+                == a.device
+                == factorized_ring_term.device
+                == support_correlation_values.device
+                == residual_movie_mean.device
+                == residual_movie_normalizer.device
         ):
             raise ValueError("Not all tensors are on same device")
 
@@ -1030,6 +1032,8 @@ class ResidualCorrelationImages(FactorizedVideo):
         self._r = r
         self._s = s
         self._v = v
+        self._factorized_ring_term = factorized_ring_term
+        self._background_subtracted_term = torch.diag(self._s) - self._factorized_ring_term
         self._c = c
         self._a = a
         self._x = x
@@ -1197,15 +1201,14 @@ class ResidualCorrelationImages(FactorizedVideo):
 
         # Temporal term is guaranteed to have nonzero "T" dimension below
         if np.prod(implied_fov) <= v_crop.shape[1]:
-            product = torch.sparse.mm(u_crop, self._r)
-            product *= self._s.unsqueeze(0)
+            product = torch.sparse.mm(u_crop, self._r) @ self._background_subtracted_term
             product = torch.matmul(product, v_crop)
             product -= torch.sparse.mm(a_crop, self._x)
             product -= (mean_crop.unsqueeze(1) @ self._ones_basis) @ v_crop
             product /= movie_normalizer_crop.unsqueeze(1)
 
         else:
-            product = self._s.unsqueeze(1) * v_crop
+            product = self._background_subtracted_term @ v_crop
             product = torch.matmul(self._r, product)
             product = torch.sparse.mm(u_crop, product)
             product -= torch.sparse.mm(a_crop, (self._x @ v_crop))
