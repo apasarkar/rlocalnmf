@@ -11,6 +11,7 @@ import scipy.sparse
 import scipy
 from typing import *
 import networkx as nx
+from scipy.sparse.linalg import factorized
 from tqdm import tqdm
 
 from mpl_toolkits.axes_grid1 import make_axes_locatable
@@ -2160,6 +2161,7 @@ class InitializingState(SignalProcessingState):
         a: Optional[torch.sparse_coo_tensor] = None,
         c: Optional[torch.tensor] = None,
         batch_size=40000,
+        factorized_ring_term: Optional[torch.tensor] = None,
     ):
         """
         Class for initializing the signals
@@ -2173,6 +2175,7 @@ class InitializingState(SignalProcessingState):
         self.r = r.to(self.device)
         self.s = s.to(self.device)
         self.v = v.to(self.device)
+        self.factorized_ring_term = factorized_ring_term
 
         self.a_init = None
         self.mask_a_init = None
@@ -2264,10 +2267,14 @@ class InitializingState(SignalProcessingState):
             )
             # This indicates that it is the first time we are running the superpixel init with this set of
             # pre-existing self.a and self.c values, so we need to compute the local correlation data
+            if self.factorized_ring_term is not None:
+                bg_subtract_term = torch.diag(self.s) - self.factorized_ring_term
+            else:
+                bg_subtract_term = torch.diag(self.s)
             self.dim1_coordinates, self.dim2_coordinates, self.correlations = (
                 get_local_correlation_structure(
                     self.u_sparse,
-                    torch.matmul(self.r * self.s[None, :], self.v),
+                    torch.matmul(self.r @ bg_subtract_term, self.v),
                     self.shape,
                     mad_threshold,
                     order=self.data_order,
@@ -2431,6 +2438,7 @@ class DemixingState(SignalProcessingState):
                 self.a,
                 self.c,
                 self.batch_size,
+                factorized_ring_term = self.factorized_ring_term
             )
             print("Now in the initialization state")
 
