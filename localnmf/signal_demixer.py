@@ -1999,11 +1999,15 @@ def _temporal_fit_routine(a_merge, c_merge, spatial_component):
     return least_squares_fits.T
 
 
-def spatial_comp_plot(a, corr_img_all_r, ini=False, order="C"):
+def spatial_comp_plot(a: np.ndarray,
+                      standard_correlation_image: np.ndarray,
+                      ini: bool=False,
+                      order: str="C"):
     print("DISPLAYING SOME OF THE COMPONENTS")
-    num = min(3, a.shape[1])
-    patch_size = corr_img_all_r.shape[:2]
-    scale = np.maximum(1, (corr_img_all_r.shape[1] / corr_img_all_r.shape[0]))
+    max_neurons = 5
+    num = min(max_neurons, a.shape[1])
+    patch_size = standard_correlation_image.shape[1:]
+    scale = np.maximum(1, (standard_correlation_image.shape[2] / standard_correlation_image.shape[1]))
     fig = plt.figure(figsize=(8 * scale, 4 * num))
     neuron_numbering = np.arange(num)
     for ii in range(num):
@@ -2016,7 +2020,7 @@ def spatial_comp_plot(a, corr_img_all_r, ini=False, order="C"):
             else:
                 plt.title("Spatial components", fontweight="bold", fontsize=15)
         ax1 = plt.subplot(num, 2, 2 * (ii + 1))
-        show_img(ax1, corr_img_all_r[:, :, ii])
+        show_img(ax1, standard_correlation_image[ii, :, :])
         if ii == 0:
             ax1.set(title="corr image")
             ax1.title.set_fontsize(15)
