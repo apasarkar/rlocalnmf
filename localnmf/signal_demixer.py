@@ -1,4 +1,4 @@
-from abc import ABC
+from abc import ABC, abstractmethod
 import torch
 import numpy as np
 import math
@@ -200,7 +200,7 @@ def _compute_standard_correlation_image(
     temporal_traces: torch.tensor,
     fov_dims: tuple[int, int],
     data_order: str = "F",
-    batch_size: int = 1000,
+    frame_batch_size: int = 1000,
     device: str = "cpu",
 ) -> StandardCorrelationImages:
     """
@@ -215,7 +215,7 @@ def _compute_standard_correlation_image(
             decomposition.
         temporal_traces (torch.tensor): shape (number of frames, number of neural signals). Temporal traces currently
             extracted
-        batch_size (int): The number of frames we expand at any given time (pixels x frames) to avoid OOM errors
+        frame_batch_size (int): The number of frames we expand at any given time (pixels x frames) to avoid OOM errors
         device (str): The device on which computations occur (given to pytorch to move tensors around).
 
     Returns:
@@ -244,10 +244,10 @@ def _compute_standard_correlation_image(
     ## Step 4c: Get diag(U*R*R^t*U^t)
     data_norms = torch.zeros([u_sparse.shape[0], 1], device=device)
 
-    batch_iters = math.ceil(r.shape[1] / batch_size)
+    batch_iters = math.ceil(r.shape[1] / frame_batch_size)
     for k in range(batch_iters):
-        start = batch_size * k
-        end = min(start + batch_size, u_sparse.shape[0])
+        start = frame_batch_size * k
+        end = min(start + frame_batch_size, u_sparse.shape[0])
         data_chunk = (
             torch.sparse.mm(u_sparse, r[:, start:end]) * s.unsqueeze(0)
             - m @ e[:, start:end]
@@ -2031,6 +2031,40 @@ def spatial_comp_plot(a: np.ndarray,
 
 
 class SignalProcessingState(ABC):
+    def __init__(self, pixel_batch_size: int, frame_batch_size: int):
+        """Constructor to initialize pixel_batch_size and frame_batch_size."""
+        if not isinstance(pixel_batch_size, int) or pixel_batch_size <= 0:
+            raise ValueError("pixel_batch_size must be a positive integer.")
+        if not isinstance(frame_batch_size, int) or frame_batch_size <= 0:
+            raise ValueError("frame_batch_size must be a positive integer.")
+
+        self._pixel_batch_size = pixel_batch_size
+        self._frame_batch_size = frame_batch_size
+
+    @property
+    def pixel_batch_size(self):
+        """Get the pixel batch size."""
+        return self._pixel_batch_size
+
+    @pixel_batch_size.setter
+    def pixel_batch_size(self, value):
+        """Set the pixel batch size."""
+        if not isinstance(value, int) or value <= 0:
+            raise ValueError("pixel_batch_size must be a positive integer.")
+        self._pixel_batch_size = value
+
+    @property
+    def frame_batch_size(self):
+        """Get the frame batch size."""
+        return self._frame_batch_size
+
+    @frame_batch_size.setter
+    def frame_batch_size(self, value):
+        """Set the frame batch size."""
+        if not isinstance(value, int) or value <= 0:
+            raise ValueError("frame_batch_size must be a positive integer.")
+        self._frame_batch_size = value
+
     def initialize_signals(self, **kwargs):
         """Initialize signals based on provided parameters."""
         raise NotImplementedError(
@@ -2050,7 +2084,7 @@ class SignalProcessingState(ABC):
 
     @property
     def results(self):
-        """Returns the results from any given state"""
+        """Return the results from any given state."""
         raise NotImplementedError("This is not implemented for the current state.")
 
     def lock_results_and_continue(self, context):
@@ -2058,7 +2092,6 @@ class SignalProcessingState(ABC):
         raise NotImplementedError(
             "This method is not implemented for the current state."
         )
-
 
 class SignalDemixer:
 
@@ -2071,6 +2104,8 @@ class SignalDemixer:
         dimensions: tuple[int, int, int],
         data_order: str = "F",
         device: str = "cpu",
+        frame_batch_size: int = 5000,
+        pixel_batch_size: int = 10000
     ):
         """
         A class to manage the state and execution of the maskNMF demixing pipeline
@@ -2088,6 +2123,8 @@ class SignalDemixer:
             dimensions (tuple): (frames, fov dimension 1, fov dimension 2).
             data_order (str): The order in which n-dimensional vectors are flattened to 1D
             device (str): Indicator for pytorch for which device to use ("cpu" or "cuda")
+            frame_batch_size (int): Number of full frames of data we load onto the GPU at a time
+            pixel_batch_size (int): Number of full pixels of data we load onto the GPU at a time
         """
         self.device = device
         self.data_order = data_order
@@ -2124,6 +2161,8 @@ class SignalDemixer:
             device=self.device,
             a=None,
             c=None,
+            frame_batch_size = frame_batch_size,
+            pixel_batch_size = pixel_batch_size
         )
 
     @property
@@ -2164,9 +2203,11 @@ class InitializingState(SignalProcessingState):
         device: str = "cpu",
         a: Optional[torch.sparse_coo_tensor] = None,
         c: Optional[torch.tensor] = None,
-        batch_size=40000,
+        pixel_batch_size: int=40000,
+        frame_batch_size: int=2000,
         factorized_ring_term: Optional[torch.tensor] = None,
     ):
+        super().__init__(pixel_batch_size, frame_batch_size)
         """
         Class for initializing the signals
         """
@@ -2202,10 +2243,27 @@ class InitializingState(SignalProcessingState):
         # Superpixel-specific initializers, move to new class
         self._th = None
         self._robust_corr_term = None
-        self.batch_size = batch_size
         self.dim1_coordinates = None
         self.dim2_coordinates = None
         self.correlations = None
+
+    @property
+    def frame_batch_size(self):
+        return self._frame_batch_size
+
+    @frame_batch_size.setter
+    def frame_batch_size(self,
+                         new_batch_size: int):
+        self._frame_batch_size = new_batch_size
+
+    @property
+    def pixel_batch_size(self):
+        return self._pixel_batch_size
+
+    @pixel_batch_size.setter
+    def pixel_batch_size(self,
+                         new_batch_size: int):
+        self._pixel_batch_size = new_batch_size
 
     @property
     def results(self):
@@ -2227,7 +2285,7 @@ class InitializingState(SignalProcessingState):
                 (self.d1, self.d2, self.T),
                 self.data_order,
                 self.device,
-                self.batch_size,
+                self.frame_batch_size,
             )
             print("Now in demixing state")
 
@@ -2282,7 +2340,7 @@ class InitializingState(SignalProcessingState):
                     self.shape,
                     mad_threshold,
                     order=self.data_order,
-                    batch_size=self.batch_size,
+                    batch_size=self.pixel_batch_size,
                     pseudo=robust_corr_term,
                     a=self.a,
                     c=self.c,
@@ -2379,8 +2437,10 @@ class DemixingState(SignalProcessingState):
         dimensions: tuple[int, int, int],
         data_order: str = "F",
         device: str = "cpu",
-        batch_size: int = 50000,
+        pixel_batch_size: int = 10000,
+        frame_batch_size: int = 10000,
     ):
+        super().__init__(pixel_batch_size, frame_batch_size)
         # Define the data dimensions, data ordering scheme, and device
         self.d1, self.d2, self.T = dimensions
         self.shape = (self.d1, self.d2, self.T)
@@ -2397,7 +2457,6 @@ class DemixingState(SignalProcessingState):
         self._a_init = a_init.to(device)
         self._b_init = b_init.to(device)
         self._c_init = c_init.to(device)
-        self.batch_size = batch_size
         self.a = None
         self.b = None
         self.c = None
@@ -2441,7 +2500,8 @@ class DemixingState(SignalProcessingState):
                 self.device,
                 self.a,
                 self.c,
-                self.batch_size,
+                pixel_batch_size = self.pixel_batch_size,
+                frame_batch_size = self.frame_batch_size,
                 factorized_ring_term = self.factorized_ring_term
             )
             print("Now in the initialization state")
@@ -2470,7 +2530,7 @@ class DemixingState(SignalProcessingState):
             self.c,
             (self.shape[0], self.shape[1]),
             self.data_order,
-            batch_size=self.batch_size,
+            frame_batch_size=self.frame_batch_size,
             device=self.device,
         )
 
@@ -2486,7 +2546,7 @@ class DemixingState(SignalProcessingState):
             (self.shape[0], self.shape[1]),
             blocks=self.blocks,
             data_order=self.data_order,
-            batch_size=self.batch_size,
+            batch_size=self.frame_batch_size,
             device=self.device,
         )
 
@@ -2527,55 +2587,6 @@ class DemixingState(SignalProcessingState):
         weights = threshold_function(weights)
         # Now export the ring model to its factorized form:
         self.factorized_ring_term = ur.T @ (weights.unsqueeze(1) * ring_output)
-
-    def _old_ring_model_weight_update(self):
-        num_pixels = self.shape[0] * self.shape[1]
-        batches = math.ceil(num_pixels / self.batch_size)
-        self.factorized_ring_term *= 0  # Reset the factorized ring term
-        e = torch.matmul(
-            torch.ones([1, self.v.shape[1]], device=self.device), self.v.t()
-        )
-        x = torch.matmul(self.c.t(), self.v.t())
-
-        support_u = torch.sparse.mm(self.W.support, self.u_sparse)
-        support_b = torch.sparse.mm(self.W.support, self.b)
-        weights = torch.zeros(num_pixels, device=self.device)
-        for k in range(batches):
-            start = self.batch_size * k
-            end = min(num_pixels, start + self.batch_size)
-            curr_indices = torch.arange(
-                start, end, dtype=torch.long, device=self.device
-            )
-            curr_w_mat = self.W.construct_ring_matrix(curr_indices)
-
-            u_curr = torch.index_select(self.u_sparse, 0, curr_indices)
-            a_curr = torch.index_select(self.a, 0, curr_indices)
-            ur_curr = torch.sparse.mm(u_curr, self.r)
-            urs_curr = ur_curr * self.s.unsqueeze(0)
-            ac_curr = torch.sparse.mm(a_curr, x)
-
-            be_curr = torch.index_select(self.b, 0, curr_indices) @ e
-
-            term1 = urs_curr - ac_curr - be_curr
-            term2 = (
-                torch.sparse.mm(torch.sparse.mm(curr_w_mat, support_u), self.r)
-                * self.s.unsqueeze(0)
-                - torch.sparse.mm(curr_w_mat, support_b) @ e
-            )
-
-            curr_weights = torch.sum(term1 * term2, dim=1) / torch.square(
-                torch.linalg.norm(term2, dim=1)
-            )
-            curr_weights = torch.nan_to_num(
-                curr_weights, nan=0.0, posinf=0.0, neginf=0.0
-            )
-            threshold_function = torch.nn.ReLU()
-            curr_weights = threshold_function(curr_weights)
-            weights[start:end] = curr_weights
-
-            self.factorized_ring_term += (ur_curr * curr_weights.unsqueeze(1)).T @ term2
-
-        self.W.weights = weights
 
     def static_baseline_update(self):
         self.b = regression_update.baseline_update(self.uv_mean, self.a, self.c)
@@ -2727,7 +2738,7 @@ class DemixingState(SignalProcessingState):
         residual_correlation_data: ResidualCorrelationImages,
     ) -> tuple[torch.sparse_coo_tensor, torch.sparse_coo_tensor]:
 
-        num_iters = math.ceil(spatial_comps.shape[1] / self.batch_size)
+        num_iters = math.ceil(spatial_comps.shape[1] / self.frame_batch_size)
 
         final_spatial_rows = []
         final_spatial_cols = []
@@ -2754,8 +2765,8 @@ class DemixingState(SignalProcessingState):
         )
 
         for k in range(num_iters):
-            start = k * self.batch_size
-            end = min(spatial_comps.shape[1], start + self.batch_size)
+            start = k * self.frame_batch_size
+            end = min(spatial_comps.shape[1], start + self.frame_batch_size)
             neuron_indices = torch.arange(start, end, device=self.device).long()
 
             curr_thresholds = max_correlation_thresholds[start:end]
