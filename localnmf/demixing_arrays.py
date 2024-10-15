@@ -762,7 +762,7 @@ class ColorfulACArray(FactorizedVideo):
         """
         t = c.shape[0]
         self._a = a
-        self._c = c - torch.amin(c, dim = 0, keepdim=True)
+        self._c = c - torch.amin(c, dim=0, keepdim=True)
         if not (self.a.device == self.c.device):
             raise ValueError(f"Input tensors not on same device")
         self._device = self.a.device
@@ -960,10 +960,12 @@ class ColorfulACArray(FactorizedVideo):
         product = product.cpu().numpy().squeeze()
         return product
 
+
 class ResidCorrMode(Enum):
-    DEFAULT=0
-    MASKED=1
-    RESIDUAL=2
+    DEFAULT = 0
+    MASKED = 1
+    RESIDUAL = 2
+
 
 class ResidualCorrelationImages(FactorizedVideo):
 
@@ -1013,17 +1015,17 @@ class ResidualCorrelationImages(FactorizedVideo):
         """
 
         if not (
-                u_sparse.device
-                == r.device
-                == s.device
-                == v.device
-                == c.device
-                == x.device
-                == a.device
-                == factorized_ring_term.device
-                == support_correlation_values.device
-                == residual_movie_mean.device
-                == residual_movie_normalizer.device
+            u_sparse.device
+            == r.device
+            == s.device
+            == v.device
+            == c.device
+            == x.device
+            == a.device
+            == factorized_ring_term.device
+            == support_correlation_values.device
+            == residual_movie_mean.device
+            == residual_movie_normalizer.device
         ):
             raise ValueError("Not all tensors are on same device")
 
@@ -1033,7 +1035,9 @@ class ResidualCorrelationImages(FactorizedVideo):
         self._s = s
         self._v = v
         self._factorized_ring_term = factorized_ring_term
-        self._background_subtracted_term = torch.diag(self._s) - self._factorized_ring_term
+        self._background_subtracted_term = (
+            torch.diag(self._s) - self._factorized_ring_term
+        )
         self._c = c
         self._a = a
         self._x = x
@@ -1068,7 +1072,7 @@ class ResidualCorrelationImages(FactorizedVideo):
 
     @mode.setter
     def mode(self, new_mode: ResidCorrMode):
-        self._mode= new_mode
+        self._mode = new_mode
 
     @property
     def device(self) -> str:
@@ -1201,7 +1205,9 @@ class ResidualCorrelationImages(FactorizedVideo):
 
         # Temporal term is guaranteed to have nonzero "T" dimension below
         if np.prod(implied_fov) <= v_crop.shape[1]:
-            product = torch.sparse.mm(u_crop, self._r) @ self._background_subtracted_term
+            product = (
+                torch.sparse.mm(u_crop, self._r) @ self._background_subtracted_term
+            )
             product = torch.matmul(product, v_crop)
             product -= torch.sparse.mm(a_crop, self._x)
             product -= (mean_crop.unsqueeze(1) @ self._ones_basis) @ v_crop
@@ -1241,6 +1247,7 @@ class ResidualCorrelationImages(FactorizedVideo):
         product = self.getitem_tensor(item)
         product = product.cpu().numpy().astype(self.dtype).squeeze()
         return product
+
 
 class StandardCorrelationImages(FactorizedVideo):
 

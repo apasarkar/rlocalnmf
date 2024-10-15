@@ -19,13 +19,17 @@ from mpl_toolkits.axes_grid1 import make_axes_locatable
 from .demixing_arrays import (
     DemixingResults,
     StandardCorrelationImages,
-    ResidualCorrelationImages, ResidCorrMode,
+    ResidualCorrelationImages,
+    ResidCorrMode,
 )
-from localnmf import ca_utils
-from localnmf.ca_utils import (
+from localnmf import utils
+from localnmf.utils import (
     add_1s_to_rowspan,
     construct_graph_from_sparse_tensor,
     color_and_get_tensors,
+    ndarray_to_torch_sparse_coo,
+    scipy_sparse_to_torch,
+    torch_dense_to_sparse_coo,
 )
 from localnmf import regression_update
 from localnmf.constrained_ring.cnmf_e import RingModel
@@ -109,7 +113,8 @@ def _compute_residual_correlation_image(
         start = k * batch_size
         end = min(start + batch_size, r.shape[1])
         temp = (
-            torch.sparse.mm(u_sparse, r[:, start:end]) @ fluctuating_baseline_subtracted_term
+            torch.sparse.mm(u_sparse, r[:, start:end])
+            @ fluctuating_baseline_subtracted_term
             - torch.matmul(spatial_comps, x[:, start:end])
             - m_baseline @ e[:, start:end]
         )
@@ -374,14 +379,17 @@ def PMD_setup_routine(U_sparse, R, s, V):
     return U_sparse, R, s, V
 
 
-def process_custom_signals(a: torch.sparse_coo_tensor,
-                           u_sparse: torch.sparse_coo_tensor,
-                           r: torch.tensor,
-                           s: torch.tensor,
-                           v: torch.tensor,
-                           c_nonneg: bool=True,
-                           blocks=None
-    ) -> tuple[torch.sparse_coo_tensor, torch.sparse_coo_tensor, torch.tensor, torch.tensor]:
+def process_custom_signals(
+    a: torch.sparse_coo_tensor,
+    u_sparse: torch.sparse_coo_tensor,
+    r: torch.tensor,
+    s: torch.tensor,
+    v: torch.tensor,
+    c_nonneg: bool = True,
+    blocks=None,
+) -> tuple[
+    torch.sparse_coo_tensor, torch.sparse_coo_tensor, torch.tensor, torch.tensor
+]:
     """
     Given spatial footprints matrix "a", prepare a set of initialized signals (spatial footprints, masks,
     temporal matrices, baselines) for running demixing in lieu of superpixelization.
@@ -408,9 +416,7 @@ def process_custom_signals(a: torch.sparse_coo_tensor,
     dims = (u_sparse.shape[0], a.shape[1])
 
     a = torch.sparse_coo_tensor(
-        indices=new_indices,
-        values=new_values,
-        size=dims
+        indices=new_indices, values=new_values, size=dims
     ).coalesce()
 
     c = torch.zeros([v.shape[1], a.shape[1]], device=device, dtype=torch.float)
@@ -1999,15 +2005,19 @@ def _temporal_fit_routine(a_merge, c_merge, spatial_component):
     return least_squares_fits.T
 
 
-def spatial_comp_plot(a: np.ndarray,
-                      standard_correlation_image: np.ndarray,
-                      ini: bool=False,
-                      order: str="C"):
+def spatial_comp_plot(
+    a: np.ndarray,
+    standard_correlation_image: np.ndarray,
+    ini: bool = False,
+    order: str = "C",
+):
     print("DISPLAYING SOME OF THE COMPONENTS")
     max_neurons = 5
     num = min(max_neurons, a.shape[1])
     patch_size = standard_correlation_image.shape[1:]
-    scale = np.maximum(1, (standard_correlation_image.shape[2] / standard_correlation_image.shape[1]))
+    scale = np.maximum(
+        1, (standard_correlation_image.shape[2] / standard_correlation_image.shape[1])
+    )
     fig = plt.figure(figsize=(8 * scale, 4 * num))
     neuron_numbering = np.arange(num)
     for ii in range(num):
@@ -2093,6 +2103,7 @@ class SignalProcessingState(ABC):
             "This method is not implemented for the current state."
         )
 
+
 class SignalDemixer:
 
     def __init__(
@@ -2105,7 +2116,7 @@ class SignalDemixer:
         data_order: str = "F",
         device: str = "cpu",
         frame_batch_size: int = 5000,
-        pixel_batch_size: int = 10000
+        pixel_batch_size: int = 10000,
     ):
         """
         A class to manage the state and execution of the maskNMF demixing pipeline
@@ -2161,8 +2172,8 @@ class SignalDemixer:
             device=self.device,
             a=None,
             c=None,
-            frame_batch_size = frame_batch_size,
-            pixel_batch_size = pixel_batch_size
+            frame_batch_size=frame_batch_size,
+            pixel_batch_size=pixel_batch_size,
         )
 
     @property
@@ -2203,8 +2214,8 @@ class InitializingState(SignalProcessingState):
         device: str = "cpu",
         a: Optional[torch.sparse_coo_tensor] = None,
         c: Optional[torch.tensor] = None,
-        pixel_batch_size: int=40000,
-        frame_batch_size: int=2000,
+        pixel_batch_size: int = 40000,
+        frame_batch_size: int = 2000,
         factorized_ring_term: Optional[torch.tensor] = None,
     ):
         super().__init__(pixel_batch_size, frame_batch_size)
@@ -2252,8 +2263,7 @@ class InitializingState(SignalProcessingState):
         return self._frame_batch_size
 
     @frame_batch_size.setter
-    def frame_batch_size(self,
-                         new_batch_size: int):
+    def frame_batch_size(self, new_batch_size: int):
         self._frame_batch_size = new_batch_size
 
     @property
@@ -2261,8 +2271,7 @@ class InitializingState(SignalProcessingState):
         return self._pixel_batch_size
 
     @pixel_batch_size.setter
-    def pixel_batch_size(self,
-                         new_batch_size: int):
+    def pixel_batch_size(self, new_batch_size: int):
         self._pixel_batch_size = new_batch_size
 
     @property
@@ -2377,13 +2386,80 @@ class InitializingState(SignalProcessingState):
             c=self.c,
         )
 
-    def _initialize_signals_custom(self, a: torch.sparse_coo_tensor):
-        if not a.shape[1] > 0:
-            raise ValueError("Must provide at least 1 spatial footprint")
+    def _initialize_signals_custom(
+        self, spatial_footprints: Union[torch.sparse_coo_tensor, np.ndarray]
+    ):
+        """
+        Given a set of spatial footprints, initialize all of the signals.
+        Args:
+            spatial_footprints (Union[torch.sparse_coo_tensor, torch.tensor, np.ndarray, scipy.sparse.spmatrix]):
+                A set of footprints, either 2D (fov dim 1 * fov dim 2, number of neurons) or 3D (fov dim 1, fov dim 2,
+                number of neurons). If it is 2D, the assumption is that the 2D frames have been flattened into
+                1D vectors in the same "order" (i.e. "C" or "F" ordering) in which the input video has been reordered.
+        """
+        if isinstance(spatial_footprints, np.ndarray):
+            if spatial_footprints.ndim == 3:
+                # Shape is (fov dim 1, fov dim 2, number of neurons)
+                spatial_2d = spatial_footprints.reshape(
+                    (self.d1 * self.d2, -1), order=self.data_order
+                )
+
+            elif spatial_footprints.ndim == 2:
+                spatial_2d = spatial_footprints
+            else:
+                raise ValueError(
+                    f"Spatial footprint array should have shape (fov dim 1, fov dim 2, "
+                    f"number of neurons) or (fov dim 1 * fov dim 2, number of neurons. "
+                    f"Input array here had shape {spatial_footprints.shape}"
+                )
+            processed_spatial_tensor = ndarray_to_torch_sparse_coo(spatial_2d).to(
+                self.device
+            )
+
+        elif isinstance(spatial_footprints, torch.Tensor):
+            if spatial_footprints.is_sparse:
+                processed_spatial_tensor = spatial_footprints.to(self.device)
+            else:
+                if spatial_footprints.ndim == 3:
+                    print(
+                        f"Passed in 3D dense torch.tensor for custom initialization. This "
+                        f"will be slower because the code will convert to numpy, reshape to 2D, and then "
+                        f"construct the sparse torch tensor. For faster processing pass in a torch.sparse_coo_tensor"
+                        f"of shape (fov dim 1 * fov dim 2, number of neurons)"
+                    )
+                    spatial_2d = spatial_footprints.cpu().detach().numpy()
+                    spatial_2d = spatial_2d.reshape(
+                        (self.d1 * self.d2, -1), order=self.data_order
+                    )
+                    processed_spatial_tensor = ndarray_to_torch_sparse_coo(
+                        spatial_2d
+                    ).to(self.device)
+
+                elif spatial_footprints.ndim == 2:
+                    processed_spatial_tensor = torch_dense_to_sparse_coo(
+                        spatial_footprints
+                    ).to(self.device)
+
+                else:
+                    raise ValueError(
+                        f"Passed in a {spatial_footprints.ndim}D dense tensor."
+                        f"Initialization routine only accepts 2D and 3D tensors."
+                    )
+
+        elif isinstance(spatial_footprints, scipy.sparse.spmatrix):
+            processed_spatial_tensor = scipy_sparse_to_torch(spatial_footprints).to(
+                self.device
+            )
+
+        else:
+            raise ValueError(
+                f"Provided input array of type {type(spatial_footprints)},"
+                f"which is not supported"
+            )
 
         self.a_init, self.mask_a_init, self.c_init, self.b_init = (
             process_custom_signals(
-                a,
+                processed_spatial_tensor,
                 self.u_sparse,
                 self.r,
                 self.s,
@@ -2500,9 +2576,9 @@ class DemixingState(SignalProcessingState):
                 self.device,
                 self.a,
                 self.c,
-                pixel_batch_size = self.pixel_batch_size,
-                frame_batch_size = self.frame_batch_size,
-                factorized_ring_term = self.factorized_ring_term
+                pixel_batch_size=self.pixel_batch_size,
+                frame_batch_size=self.frame_batch_size,
+                factorized_ring_term=self.factorized_ring_term,
             )
             print("Now in the initialization state")
 
@@ -2966,7 +3042,7 @@ class DemixingState(SignalProcessingState):
                 ##First: Compute correlation images
                 self.standard_correlation_image.c = self.c
 
-                #Merge signals as needed and update the scheduler
+                # Merge signals as needed and update the scheduler
                 original_shape = self.a.shape[1]
                 self.merge_signals(merge_threshold, merge_overlap_threshold, plot_en)
                 if self.a.shape[1] < original_shape:

@@ -82,6 +82,97 @@ def torch_sparse_to_scipy_coo(a):
     return scipy.sparse.coo_matrix((data, (row, col)), a.shape)
 
 
+def ndarray_to_torch_sparse_coo(my_array: np.ndarray):
+    """
+    Args:
+        my_array (np.ndarray):
+    Returns:
+        torch.sparse_coo_tensor: A torch.sparse_coo_tensor from the input array
+    """
+    rows, cols = my_array.nonzero()
+    values = my_array[rows, cols]
+
+    # Create the indices tensor (2 x N, where N is the number of non-zero elements)
+    indices = torch.tensor(np.vstack([rows, cols]), dtype=torch.long)
+    values = torch.tensor(values, dtype=torch.float32)
+
+    # Create the sparse COO tensor
+    torch_sparse_representation = torch.sparse_coo_tensor(
+        indices, values, my_array.shape
+    )
+    return torch_sparse_representation
+
+
+def scipy_sparse_to_torch(scipy_sparse):
+    """
+    Converts a scipy sparse matrix (any format) to a PyTorch sparse COO tensor.
+
+    Args:
+        scipy_sparse (scipy.sparse.spmatrix): The input sparse matrix in any scipy sparse format (CSR, CSC, COO, etc.).
+
+    Returns:
+        torch.sparse_coo_tensor: The corresponding PyTorch sparse COO tensor.
+
+    Raises:
+        TypeError: If the input is not a scipy.sparse.spmatrix.
+    """
+    # Type checking
+    if not isinstance(scipy_sparse, scipy.sparse.spmatrix):
+        raise TypeError(
+            f"Expected input to be a scipy.sparse.spmatrix, but got {type(scipy_sparse)}"
+        )
+
+    # Convert to COO format if it's not already
+    scipy_coo = scipy_sparse.tocoo()
+
+    # Extract row, column indices and values
+    row = torch.tensor(scipy_coo.row, dtype=torch.long)
+    col = torch.tensor(scipy_coo.col, dtype=torch.long)
+    values = torch.tensor(scipy_coo.data, dtype=torch.float32)
+
+    # Stack row and column into a 2 x N indices tensor
+    indices = torch.stack([row, col], dim=0)
+
+    # Create the torch sparse COO tensor
+    sparse_tensor = torch.sparse_coo_tensor(indices, values, scipy_sparse.shape)
+
+    return sparse_tensor
+
+
+def torch_dense_to_sparse_coo(dense_tensor):
+    """
+    Converts a 2D dense PyTorch tensor to a sparse COO tensor.
+
+    Args:
+        dense_tensor (torch.Tensor): The input dense tensor (must be 2D).
+
+    Returns:
+        torch.sparse_coo_tensor: A PyTorch sparse COO tensor representing the input tensor.
+
+    Raises:
+        ValueError: If the input tensor is not 2D.
+    """
+    # Ensure the input is a 2D tensor
+    if dense_tensor.dim() != 2:
+        raise ValueError(
+            f"Expected a 2D tensor, but got a tensor with {dense_tensor.dim()} dimensions."
+        )
+
+    # Get the non-zero indices
+    non_zero_indices = dense_tensor.nonzero(as_tuple=True)
+
+    # Stack the indices (rows and columns) to create the indices tensor
+    indices = torch.stack(non_zero_indices, dim=0)
+
+    # Get the non-zero values from the dense tensor
+    values = dense_tensor[non_zero_indices]
+
+    # Create the sparse COO tensor using the indices, values, and shape of the dense tensor
+    sparse_tensor = torch.sparse_coo_tensor(indices, values, dense_tensor.shape)
+
+    return sparse_tensor
+
+
 def show_img(ax, img):
     # Visualize local correlation, adapt from kelly's code
     im = ax.imshow(img, cmap="jet")
