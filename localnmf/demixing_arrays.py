@@ -1478,7 +1478,7 @@ class DemixingResults:
         a: torch.sparse_coo_tensor,
         c: torch.tensor,
         b: torch.tensor,
-        residual_correlation_image: np.ndarray,
+        residual_correlation_image: ResidualCorrelationImages,
         standard_correlation_image: StandardCorrelationImages,
         order: str,
         data_shape: tuple[int, int, int],
@@ -1494,7 +1494,7 @@ class DemixingResults:
             a (torch.sparse_coo_tensor): shape (pixels, number of neural signals)
             c (torch.tensor): shape (number of frames, number of neural signals)
             b (torch.tensor): shape (pixels)
-            residual_correlation_image (np.ndarray): TODO add
+            residual_correlation_image (ResidualCorrelationImages): Shape (number of neural signals, FOV dim 1, FOV dim 2)
             standard_correlation_image (StandardCorrelationImages): Shape (number of neural signals,
                 FOV dim 1, FOV dim 2)
             order (str): order used to reshape data from 2D to 1D
@@ -1524,7 +1524,7 @@ class DemixingResults:
         return self._standard_correlation_image
 
     @property
-    def residual_correlation_image(self) -> np.ndarray:
+    def residual_correlation_image(self) -> ResidualCorrelationImages:
         return self._residual_correlation_image
 
     @property
