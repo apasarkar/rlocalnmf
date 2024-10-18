@@ -143,9 +143,9 @@ def _compute_residual_correlation_image(
         )
 
         a_subset_rowcrop = torch.index_select(a_subset, 0, rows_to_keep).coalesce()
-        a_rowcrop = torch.index_select(spatial_comps, 0, rows_to_keep)
+        a_rowcrop = torch.index_select(spatial_comps, 0, rows_to_keep).coalesce()
         x_crop = torch.index_select(x, 0, index_select_tensor)
-        u_rowcrop = torch.index_select(u_sparse, 0, rows_to_keep)
+        u_rowcrop = torch.index_select(u_sparse, 0, rows_to_keep).coalesce()
         m_rowcrop = (
             torch.index_select(m_baseline, 0, rows_to_keep)
             + torch.sparse.mm(a_subset_rowcrop, x_crop) @ v_mean
@@ -173,11 +173,11 @@ def _compute_residual_correlation_image(
 
     final_rows = torch.cat(final_rows, 0)
     final_cols = torch.cat(final_cols, 0)
-    final_values = torch.cat(final_values, 0)
+    final_values = torch.cat(final_values, 0).to(device)
+    resid_corr_indices = torch.stack([final_rows, final_cols]).to(device)
     resid_corr_on_support = torch.sparse_coo_tensor(
-        torch.stack([final_rows, final_cols]), final_values, spatial_comps.shape
+        resid_corr_indices, final_values, spatial_comps.size()
     ).coalesce()
-
     residual_array = ResidualCorrelationImages(
         u_sparse,
         r,
@@ -2240,7 +2240,7 @@ class InitializingState(SignalProcessingState):
         self.diagnostic_image = None
 
         if a is not None:
-            self.a = a.to(self.device)
+            self.a = a.to(self.device).coalesce()
         else:
             self.a = None
 
@@ -2530,7 +2530,7 @@ class DemixingState(SignalProcessingState):
         self.v = v.to(device)
 
         self._mask_a_init = mask_init
-        self._a_init = a_init.to(device)
+        self._a_init = a_init.to(device).coalesce()
         self._b_init = b_init.to(device)
         self._c_init = c_init.to(device)
         self.a = None
@@ -2586,12 +2586,15 @@ class DemixingState(SignalProcessingState):
         """
         Radius of the ring model being used
         """
-        self.a = self._a_init.clone()
+
+        a_indices = self._a_init.indices().clone()
+        a_values = self._a_init.values().clone()
+        self.a = torch.sparse_coo_tensor(a_indices, a_values, self._a_init.size()).to(self.device).coalesce()
         self.b = self._b_init.clone()
         self.c = self._c_init.clone()
-        self.mask_ab = self._mask_a_init.clone()
+        self.mask_ab = self._mask_a_init.clone().coalesce()
         if self.mask_ab is None:
-            self.mask_ab = self.a.bool()
+            self.mask_ab = self.a.bool().coalesce()
 
         self.factorized_ring_term = torch.zeros(
             (self.r.shape[1], self.r.shape[1]), device=self.device, dtype=torch.float32
@@ -2648,17 +2651,19 @@ class DemixingState(SignalProcessingState):
             torch.ones([1, self.v.shape[1]], device=self.device), self.v.t()
         )
         x = torch.matmul(self.c.t(), self.v.t())
+
         spatial_term = ur * self.s.unsqueeze(0)
         spatial_term -= self.b @ e
-        spatial_term -= torch.sparse.mm(self.a, x)
+        full_residual = spatial_term - torch.sparse.mm(self.a, x)
         ring_output = self.W.forward(spatial_term)
 
-        numerator = torch.sum(spatial_term * ring_output, dim=1)
+        numerator = torch.sum(full_residual * ring_output, dim=1)
         denominator = torch.square(torch.linalg.norm(ring_output, dim=1))
 
         weights = torch.nan_to_num(
             numerator / denominator, nan=0.0, posinf=0.0, neginf=0.0
         )
+
         threshold_function = torch.nn.ReLU()
         weights = threshold_function(weights)
         # Now export the ring model to its factorized form:
@@ -2919,7 +2924,7 @@ class DemixingState(SignalProcessingState):
         self.compute_residual_correlation_image()
         indices_to_keep = self._flag_components_for_deletion(corr_th_del)
         if indices_to_keep.shape[0] < self.a.shape[1]:
-            self.a = torch.index_select(self.a, 1, indices_to_keep)
+            self.a = torch.index_select(self.a, 1, indices_to_keep).coalesce()
             self.c = torch.index_select(self.c, 1, indices_to_keep)
             self.standard_correlation_image.c = self.c
             # Need to update the residual correlation image since the A/C terms changed
@@ -3022,7 +3027,6 @@ class DemixingState(SignalProcessingState):
             denoise = [False for i in range(maxiter)]
 
         for iters in tqdm(range(maxiter)):
-
             self.static_baseline_update()
 
             if iters >= ring_model_start_pt:
