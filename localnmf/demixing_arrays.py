@@ -978,7 +978,6 @@ class ResidualCorrelationImages(FactorizedVideo):
         factorized_ring_term: torch.tensor,
         a: torch.sparse_coo_tensor,
         c: torch.tensor,
-        x: torch.tensor,
         support_correlation_values: torch.sparse_coo_tensor,
         residual_movie_mean: torch.tensor,
         residual_movie_normalizer: torch.tensor,
@@ -1002,9 +1001,7 @@ class ResidualCorrelationImages(FactorizedVideo):
             s (torch.tensor): shape (rank 2)
             v (torch.tensor): shape (rank 2, frames)
             a (torch.sparse_coo_tensor): shape (pixels, number of neural signals). Spatial components
-            c (torch.tensor): shape (frames, number of neural signals). This is the temporal traces matrix, where every
-                column has mean 0 and Frobenius norm 1.
-            x (torch.tensor): shape (number of neural signals, rank 2). AXV approximates AC^T, the signal movie
+            c (torch.tensor): shape (frames, number of neural signals). This is the temporal traces matrix
             support_correlation_values (torch.sparse_coo_tensor): Shape (pixels, number of neural signals). The i-th
                 gives the residual correlation image for neural signal "i" on its spatial support.
             residual_movie_mean (torch.tensor): shape (pixels)
@@ -1020,7 +1017,6 @@ class ResidualCorrelationImages(FactorizedVideo):
             == s.device
             == v.device
             == c.device
-            == x.device
             == a.device
             == factorized_ring_term.device
             == support_correlation_values.device
@@ -1039,8 +1035,9 @@ class ResidualCorrelationImages(FactorizedVideo):
             torch.diag(self._s) - self._factorized_ring_term
         )
         self._c = c
+        self._c_norm = self._c - torch.mean(self._c, dim = 0, keepdim=True)
+        self._c_norm = self._c_norm / torch.linalg.norm(self._c_norm, dim = 0, keepdim = True)
         self._a = a
-        self._x = x
         self._residual_movie_mean = residual_movie_mean
         self._support_correlation_values = support_correlation_values
         self._residual_movie_normalizer = residual_movie_normalizer
@@ -1166,11 +1163,12 @@ class ResidualCorrelationImages(FactorizedVideo):
             )
 
         # Step 3: Now slice the data with frame_indexer (careful: if the ndims has shrunk, add a dim)
-        c_crop = self._c[:, frame_indexer]
-        if c_crop.ndim < self._c.ndim:
+        c_crop = self._c_norm[:, frame_indexer]
+        if c_crop.ndim < self._c_norm.ndim:
             c_crop = c_crop.unsqueeze(1)
 
         v_crop = self._v @ c_crop
+        cc_crop = self._c.T @ c_crop
         selected_neurons = self._index_values[frame_indexer]
         if selected_neurons.ndim < 1:
             selected_neurons = selected_neurons.unsqueeze(0)
@@ -1209,15 +1207,15 @@ class ResidualCorrelationImages(FactorizedVideo):
                 torch.sparse.mm(u_crop, self._r) @ self._background_subtracted_term
             )
             product = torch.matmul(product, v_crop)
-            product -= torch.sparse.mm(a_crop, self._x)
             product -= (mean_crop.unsqueeze(1) @ self._ones_basis) @ v_crop
+            product -= torch.sparse.mm(a_crop, cc_crop)
             product /= movie_normalizer_crop.unsqueeze(1)
 
         else:
             product = self._background_subtracted_term @ v_crop
             product = torch.matmul(self._r, product)
             product = torch.sparse.mm(u_crop, product)
-            product -= torch.sparse.mm(a_crop, (self._x @ v_crop))
+            product -= torch.sparse.mm(a_crop, cc_crop)
             product -= mean_crop.unsqueeze(1) @ (self._ones_basis @ v_crop)
 
             product /= movie_normalizer_crop.unsqueeze(1)
