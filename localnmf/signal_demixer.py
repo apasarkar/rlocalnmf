@@ -103,7 +103,7 @@ def _compute_residual_correlation_image(
 
     x = temporal_comps.T @ v.T
     c_orth_v = temporal_comps.T - x @ v
-    c_U, c_s, Z = torch.linalg.svd(c_orth_v, full_matrices = False)
+    c_U, c_s, Z = torch.linalg.svd(c_orth_v, full_matrices=False)
     y = c_U @ torch.diag_embed(c_s)
 
     """
@@ -169,9 +169,8 @@ def _compute_residual_correlation_image(
         x_crop = torch.index_select(x, 0, index_select_tensor)
         y_crop = torch.index_select(y, 0, index_select_tensor)
         u_rowcrop = torch.index_select(u_sparse, 0, rows_to_keep).coalesce()
-        m_rowcrop = (
-            torch.index_select(m_baseline, 0, rows_to_keep)
-            + torch.sparse.mm(a_subset_rowcrop, c_mean_subset)
+        m_rowcrop = torch.index_select(m_baseline, 0, rows_to_keep) + torch.sparse.mm(
+            a_subset_rowcrop, c_mean_subset
         )
 
         urs_term = torch.sparse.mm(u_rowcrop, r) @ fluctuating_baseline_subtracted_term
@@ -179,16 +178,22 @@ def _compute_residual_correlation_image(
         ax_keep_term = torch.sparse.mm(a_subset_rowcrop, x_crop)
         mean_sub_term = m_rowcrop @ e
         net_spatial_basis_V = urs_term - ax_term + ax_keep_term - mean_sub_term
-        curr_norm_V = torch.square(torch.linalg.norm(net_spatial_basis_V, dim=1, keepdim=True))
+        curr_norm_V = torch.square(
+            torch.linalg.norm(net_spatial_basis_V, dim=1, keepdim=True)
+        )
 
         ay_term = torch.sparse.mm(a_rowcrop, y)
         ay_keep_term = torch.sparse.mm(a_subset_rowcrop, y_crop)
-        net_spatial_basis_Z = -1*ay_term + ay_keep_term
-        curr_norm_Z = torch.square(torch.linalg.norm(net_spatial_basis_Z, dim = 1, keepdim=True))
+        net_spatial_basis_Z = -1 * ay_term + ay_keep_term
+        curr_norm_Z = torch.square(
+            torch.linalg.norm(net_spatial_basis_Z, dim=1, keepdim=True)
+        )
 
         curr_norm = torch.sqrt(curr_norm_V + curr_norm_Z)
 
-        corr_img = net_spatial_basis_V @ v @ c_select + net_spatial_basis_Z @ Z @ c_select
+        corr_img = (
+            net_spatial_basis_V @ v @ c_select + net_spatial_basis_Z @ Z @ c_select
+        )
         corr_img /= curr_norm
         corr_img = torch.nan_to_num(corr_img, nan=0.0, posinf=0.0, neginf=0.0)
 
@@ -2617,7 +2622,11 @@ class DemixingState(SignalProcessingState):
 
         a_indices = self._a_init.indices().clone()
         a_values = self._a_init.values().clone()
-        self.a = torch.sparse_coo_tensor(a_indices, a_values, self._a_init.size()).to(self.device).coalesce()
+        self.a = (
+            torch.sparse_coo_tensor(a_indices, a_values, self._a_init.size())
+            .to(self.device)
+            .coalesce()
+        )
         self.b = self._b_init.clone()
         self.c = self._c_init.clone()
         self.mask_ab = self._mask_a_init.clone().coalesce()

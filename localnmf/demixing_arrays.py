@@ -1035,8 +1035,10 @@ class ResidualCorrelationImages(FactorizedVideo):
             torch.diag(self._s) - self._factorized_ring_term
         )
         self._c = c
-        self._c_norm = self._c - torch.mean(self._c, dim = 0, keepdim=True)
-        self._c_norm = self._c_norm / torch.linalg.norm(self._c_norm, dim = 0, keepdim = True)
+        self._c_norm = self._c - torch.mean(self._c, dim=0, keepdim=True)
+        self._c_norm = self._c_norm / torch.linalg.norm(
+            self._c_norm, dim=0, keepdim=True
+        )
         self._a = a
         self._residual_movie_mean = residual_movie_mean
         self._support_correlation_values = support_correlation_values
