@@ -967,11 +967,15 @@ def delete_comp(
         raise ValueError("All Components are slated to be deleted")
 
     pos_for_cpu = pos.cpu().numpy()
+
     if plot_en:
+        corr_values = standard_correlation_image[pos_for_cpu]
+        if corr_values.ndim < standard_correlation_image.ndim:
+            corr_values = np.expand_dims(corr_values, 0)
         a_used = spatial_components.cpu().to_dense().numpy()
         spatial_comp_plot(
             a_used[:, pos_for_cpu],
-            standard_correlation_image[pos_for_cpu].numpy(),
+            corr_values,
             ini=False,
             order=order,
         )
@@ -2325,9 +2329,10 @@ class InitializingState(SignalProcessingState):
                 self.c_init,
                 self.mask_a_init,
                 (self.d1, self.d2, self.T),
-                self.data_order,
-                self.device,
-                self.frame_batch_size,
+                factorized_ring_term=self.factorized_ring_term,
+                data_order = self.data_order,
+                device = self.device,
+                frame_batch_size = self.frame_batch_size
             )
             print("Now in demixing state")
 
@@ -2544,6 +2549,7 @@ class DemixingState(SignalProcessingState):
         c_init,
         mask_init,
         dimensions: tuple[int, int, int],
+        factorized_ring_term: Optional[torch.tensor] = None,
         data_order: str = "F",
         device: str = "cpu",
         pixel_batch_size: int = 10000,
@@ -2574,9 +2580,15 @@ class DemixingState(SignalProcessingState):
         self.residual_correlation_image = None
         self.uv_mean = get_mean_data(self.u_sparse, self.r, self.s, self.v)
 
-        self.factorized_ring_term = torch.zeros(
-            [self.r.shape[1], self.v.shape[0]], device=self.device
-        )
+        if factorized_ring_term is None:
+            self._factorized_ring_term_init = torch.zeros(
+                [self.r.shape[1], self.v.shape[0]], device=self.device
+            )
+        else:
+            self._factorized_ring_term_init = factorized_ring_term.to(self.device)
+            self._validate_factorized_ring_term()
+        self.factorized_ring_term = None
+
         self.W = None
 
         self.a_summand = torch.ones((self.d1 * self.d2, 1)).to(self.device)
@@ -2617,7 +2629,7 @@ class DemixingState(SignalProcessingState):
 
     def precompute_quantities(self):
         """
-        Radius of the ring model being used
+        Move relevant data to the GPU
         """
 
         a_indices = self._a_init.indices().clone()
@@ -2633,9 +2645,17 @@ class DemixingState(SignalProcessingState):
         if self.mask_ab is None:
             self.mask_ab = self.a.bool().coalesce()
 
-        self.factorized_ring_term = torch.zeros(
-            (self.r.shape[1], self.r.shape[1]), device=self.device, dtype=torch.float32
-        )
+        self.factorized_ring_term = self._factorized_ring_term_init.clone()
+
+    def _validate_factorized_ring_term(self):
+        """Checks that the factorized ring term at the initialization is valid"""
+        expected_dimensions = self.r.shape[1], self.v.shape[0]
+        if not isinstance(self._factorized_ring_term_init, torch.Tensor):
+            raise ValueError(f"Expected data of type {torch.Tensor} for factorized ring term but got type"
+                             f"{type(self._factorized_ring_term_init)}")
+        if self.r.shape[1] != self._factorized_ring_term_init.shape[0] or self.v.shape[0] != self._factorized_ring_term_init.shape[1]:
+            raise ValueError(f"Shape of factorized_background_term is {self._factorized_ring_term_init.shape}"
+                             f"expected shape is {expected_dimensions}")
 
     def initialize_standard_correlation_image(self):
         self.standard_correlation_image = _compute_standard_correlation_image(
