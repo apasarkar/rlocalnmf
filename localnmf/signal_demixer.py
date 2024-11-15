@@ -2751,9 +2751,9 @@ class DemixingState(SignalProcessingState):
         )
 
         ## Delete Bad Components
-        temp = (
-            torch.sparse.mm(self.a.t(), self.a_summand).t() == 0
-        )  # Identify which columns of 'a' are all zeros
+        temp = torch.squeeze(
+            torch.sparse.mm(self.a.t(), self.a_summand) == 0
+        ).long()  # Identify which columns of 'a' are all zeros
         if torch.sum(temp):
             (
                 self.a,
@@ -2799,7 +2799,7 @@ class DemixingState(SignalProcessingState):
             self.c = torch.from_numpy(c).float().to(self.device)
 
         # Delete bad components
-        temp = torch.sum(self.c, dim=0) == 0
+        temp = torch.squeeze(torch.sum(self.c, dim=0) == 0).long()
         if torch.sum(temp):
             (
                 self.a,
