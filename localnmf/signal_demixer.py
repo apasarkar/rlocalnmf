@@ -967,11 +967,15 @@ def delete_comp(
         raise ValueError("All Components are slated to be deleted")
 
     pos_for_cpu = pos.cpu().numpy()
+
     if plot_en:
+        corr_values = standard_correlation_image[pos_for_cpu]
+        if corr_values.ndim < standard_correlation_image.ndim:
+            corr_values = np.expand_dims(corr_values, 0)
         a_used = spatial_components.cpu().to_dense().numpy()
         spatial_comp_plot(
             a_used[:, pos_for_cpu],
-            standard_correlation_image[pos_for_cpu].numpy(),
+            corr_values,
             ini=False,
             order=order,
         )
@@ -2311,10 +2315,14 @@ class InitializingState(SignalProcessingState):
     def results(self):
         return self.a_init, self.mask_a_init, self.c_init, self.b_init
 
-    def lock_results_and_continue(self, context: SignalDemixer):
+    def lock_results_and_continue(self, context: SignalDemixer, carry_background: bool = True):
         if any(element is None for element in self.results):
             raise ValueError("Results do not exist. Run initialize signals first.")
         else:  # Initiate state transition
+            if carry_background:
+                background_term = self.factorized_ring_term
+            else:
+                background_term = None
             context.state = DemixingState(
                 self.u_sparse,
                 self.r,
@@ -2325,9 +2333,10 @@ class InitializingState(SignalProcessingState):
                 self.c_init,
                 self.mask_a_init,
                 (self.d1, self.d2, self.T),
-                self.data_order,
-                self.device,
-                self.frame_batch_size,
+                factorized_ring_term = background_term,
+                data_order = self.data_order,
+                device = self.device,
+                frame_batch_size = self.frame_batch_size
             )
             print("Now in demixing state")
 
@@ -2544,6 +2553,7 @@ class DemixingState(SignalProcessingState):
         c_init,
         mask_init,
         dimensions: tuple[int, int, int],
+        factorized_ring_term: Optional[torch.tensor] = None,
         data_order: str = "F",
         device: str = "cpu",
         pixel_batch_size: int = 10000,
@@ -2574,9 +2584,15 @@ class DemixingState(SignalProcessingState):
         self.residual_correlation_image = None
         self.uv_mean = get_mean_data(self.u_sparse, self.r, self.s, self.v)
 
-        self.factorized_ring_term = torch.zeros(
-            [self.r.shape[1], self.v.shape[0]], device=self.device
-        )
+        if factorized_ring_term is None:
+            self._factorized_ring_term_init = torch.zeros(
+                [self.r.shape[1], self.v.shape[0]], device=self.device
+            )
+        else:
+            self._factorized_ring_term_init = factorized_ring_term.to(self.device)
+            self._validate_factorized_ring_term()
+        self.factorized_ring_term = None
+
         self.W = None
 
         self.a_summand = torch.ones((self.d1 * self.d2, 1)).to(self.device)
@@ -2593,12 +2609,22 @@ class DemixingState(SignalProcessingState):
     def results(self):
         return self._results
 
-    def lock_results_and_continue(self, context):
+    def lock_results_and_continue(self, context: SignalDemixer, carry_background: bool = True):
+        """
+        Args:
+            context (SignalDemixer): The context that manages and delegates work to all states.
+                As per the state model, the state constructs the next object and updates the context's state.
+            carry_background (bool): Whether to carry the fluctuating background term to the next state or not.
+        """
         if self.results is None:
             raise ValueError(
                 "Results do not exist. Run demixing signals before moving to next step."
             )
         else:
+            if carry_background:
+                background_term = self.factorized_ring_term
+            else:
+                background_term = None
             context.state = InitializingState(
                 self.u_sparse,
                 self.r,
@@ -2611,13 +2637,13 @@ class DemixingState(SignalProcessingState):
                 self.c,
                 pixel_batch_size=self.pixel_batch_size,
                 frame_batch_size=self.frame_batch_size,
-                factorized_ring_term=self.factorized_ring_term,
+                factorized_ring_term=background_term,
             )
             print("Now in the initialization state")
 
     def precompute_quantities(self):
         """
-        Radius of the ring model being used
+        Move relevant data to the GPU
         """
 
         a_indices = self._a_init.indices().clone()
@@ -2633,9 +2659,17 @@ class DemixingState(SignalProcessingState):
         if self.mask_ab is None:
             self.mask_ab = self.a.bool().coalesce()
 
-        self.factorized_ring_term = torch.zeros(
-            (self.r.shape[1], self.r.shape[1]), device=self.device, dtype=torch.float32
-        )
+        self.factorized_ring_term = self._factorized_ring_term_init.clone()
+
+    def _validate_factorized_ring_term(self):
+        """Checks that the factorized ring term at the initialization is valid"""
+        expected_dimensions = self.r.shape[1], self.v.shape[0]
+        if not isinstance(self._factorized_ring_term_init, torch.Tensor):
+            raise ValueError(f"Expected data of type {torch.Tensor} for factorized ring term but got type"
+                             f"{type(self._factorized_ring_term_init)}")
+        if self.r.shape[1] != self._factorized_ring_term_init.shape[0] or self.v.shape[0] != self._factorized_ring_term_init.shape[1]:
+            raise ValueError(f"Shape of factorized_background_term is {self._factorized_ring_term_init.shape}"
+                             f"expected shape is {expected_dimensions}")
 
     def initialize_standard_correlation_image(self):
         self.standard_correlation_image = _compute_standard_correlation_image(
@@ -2731,9 +2765,9 @@ class DemixingState(SignalProcessingState):
         )
 
         ## Delete Bad Components
-        temp = (
-            torch.sparse.mm(self.a.t(), self.a_summand).t() == 0
-        )  # Identify which columns of 'a' are all zeros
+        temp = torch.squeeze(
+            torch.sparse.mm(self.a.t(), self.a_summand) == 0
+        ).long()  # Identify which columns of 'a' are all zeros
         if torch.sum(temp):
             (
                 self.a,
@@ -2779,7 +2813,7 @@ class DemixingState(SignalProcessingState):
             self.c = torch.from_numpy(c).float().to(self.device)
 
         # Delete bad components
-        temp = torch.sum(self.c, dim=0) == 0
+        temp = torch.squeeze(torch.sum(self.c, dim=0) == 0).long()
         if torch.sum(temp):
             (
                 self.a,

@@ -165,7 +165,7 @@ class ACArray(FactorizedVideo):
         if isinstance(frame_indexer, np.ndarray):
             pass
 
-        if isinstance(frame_indexer, list):
+        elif isinstance(frame_indexer, list):
             pass
 
         elif isinstance(frame_indexer, int):
@@ -355,9 +355,9 @@ class PMDArray(FactorizedVideo):
         # Step 2: Do some basic error handling for frame_indexer before using it to slice
 
         if isinstance(frame_indexer, np.ndarray):
-            frame_indexer = frame_indexer
+            pass
 
-        if isinstance(frame_indexer, list):
+        elif isinstance(frame_indexer, list):
             pass
 
         elif isinstance(frame_indexer, int):
@@ -562,7 +562,7 @@ class FluctuatingBackgroundArray(FactorizedVideo):
         if isinstance(frame_indexer, np.ndarray):
             frame_indexer = frame_indexer
 
-        if isinstance(frame_indexer, list):
+        elif isinstance(frame_indexer, list):
             pass
 
         elif isinstance(frame_indexer, int):
@@ -862,7 +862,7 @@ class ColorfulACArray(FactorizedVideo):
         if isinstance(frame_indexer, np.ndarray):
             pass
 
-        if isinstance(frame_indexer, list):
+        elif isinstance(frame_indexer, list):
             pass
 
         elif isinstance(frame_indexer, int):
@@ -1122,7 +1122,7 @@ class ResidualCorrelationImages(FactorizedVideo):
         if isinstance(frame_indexer, np.ndarray):
             pass
 
-        if isinstance(frame_indexer, list):
+        elif isinstance(frame_indexer, list):
             pass
 
         elif isinstance(frame_indexer, int):
@@ -1362,7 +1362,7 @@ class StandardCorrelationImages(FactorizedVideo):
         if isinstance(frame_indexer, np.ndarray):
             pass
 
-        if isinstance(frame_indexer, list):
+        elif isinstance(frame_indexer, list):
             pass
 
         elif isinstance(frame_indexer, int):
