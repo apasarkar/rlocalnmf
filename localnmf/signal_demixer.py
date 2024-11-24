@@ -2315,10 +2315,14 @@ class InitializingState(SignalProcessingState):
     def results(self):
         return self.a_init, self.mask_a_init, self.c_init, self.b_init
 
-    def lock_results_and_continue(self, context: SignalDemixer):
+    def lock_results_and_continue(self, context: SignalDemixer, carry_background: bool = True):
         if any(element is None for element in self.results):
             raise ValueError("Results do not exist. Run initialize signals first.")
         else:  # Initiate state transition
+            if carry_background:
+                background_term = self.factorized_ring_term
+            else:
+                background_term = None
             context.state = DemixingState(
                 self.u_sparse,
                 self.r,
@@ -2329,7 +2333,7 @@ class InitializingState(SignalProcessingState):
                 self.c_init,
                 self.mask_a_init,
                 (self.d1, self.d2, self.T),
-                factorized_ring_term=self.factorized_ring_term,
+                factorized_ring_term = background_term,
                 data_order = self.data_order,
                 device = self.device,
                 frame_batch_size = self.frame_batch_size
@@ -2605,12 +2609,22 @@ class DemixingState(SignalProcessingState):
     def results(self):
         return self._results
 
-    def lock_results_and_continue(self, context):
+    def lock_results_and_continue(self, context: SignalDemixer, carry_background: bool = True):
+        """
+        Args:
+            context (SignalDemixer): The context that manages and delegates work to all states.
+                As per the state model, the state constructs the next object and updates the context's state.
+            carry_background (bool): Whether to carry the fluctuating background term to the next state or not.
+        """
         if self.results is None:
             raise ValueError(
                 "Results do not exist. Run demixing signals before moving to next step."
             )
         else:
+            if carry_background:
+                background_term = self.factorized_ring_term
+            else:
+                background_term = None
             context.state = InitializingState(
                 self.u_sparse,
                 self.r,
@@ -2623,7 +2637,7 @@ class DemixingState(SignalProcessingState):
                 self.c,
                 pixel_batch_size=self.pixel_batch_size,
                 frame_batch_size=self.frame_batch_size,
-                factorized_ring_term=self.factorized_ring_term,
+                factorized_ring_term=background_term,
             )
             print("Now in the initialization state")
 
