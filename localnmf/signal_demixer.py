@@ -89,7 +89,6 @@ def _compute_residual_correlation_image(
     URs - AX^T. Note that here we are only interested in the correlation values on the pixels belonging to support
     of A_i.
     """
-
     residual_movie_norms = torch.zeros(
         (u_sparse.shape[0], 1), device=device, dtype=torch.float32
     )
@@ -152,58 +151,65 @@ def _compute_residual_correlation_image(
 
     if blocks is None:
         blocks = torch.arange(c.shape[1], device=device).unsqueeze(1)
-    for index_select_tensor in blocks:
-        a_subset = torch.index_select(spatial_comps, 1, index_select_tensor).coalesce()
-        c_mean_subset = torch.index_select(c_mean, 0, index_select_tensor)
-        c_select = torch.index_select(c, 1, index_select_tensor)
-        rows_to_keep = (
-            torch.sparse.mm(a_subset, torch.ones((a_subset.shape[1], 1), device=device))
-            .squeeze()
-            .nonzero()
-            .squeeze()
-        )
+    for index_select_tensor_net in blocks:
+        # print(f"index select tensor net {index_select_tensor_net}")
+        num_batches = math.ceil(index_select_tensor_net.shape[0] / batch_size)
+        for batch_index in range(num_batches):
 
-        a_subset_rowcrop = torch.index_select(a_subset, 0, rows_to_keep).coalesce()
-        a_rowcrop = torch.index_select(spatial_comps, 0, rows_to_keep).coalesce()
+            start_batch = batch_index * batch_size
+            end_batch = min(start_batch + batch_size, index_select_tensor_net.shape[0])
+            index_select_tensor = index_select_tensor_net[start_batch:end_batch]
+            # print(f"index select tensor here is {index_select_tensor}")
+            a_subset = torch.index_select(spatial_comps, 1, index_select_tensor).coalesce().to_dense()
+            c_mean_subset = torch.index_select(c_mean, 0, index_select_tensor)
+            c_select = torch.index_select(c, 1, index_select_tensor)
+            rows_to_keep = (
+                torch.matmul(a_subset, torch.ones((a_subset.shape[1], 1), device=device))
+                .squeeze()
+                .nonzero()
+                .squeeze()
+            )
+            a_subset_rowcrop = torch.index_select(a_subset, 0, rows_to_keep)
+            a_rowcrop = torch.index_select(spatial_comps, 0, rows_to_keep).coalesce()
 
-        x_crop = torch.index_select(x, 0, index_select_tensor)
-        y_crop = torch.index_select(y, 0, index_select_tensor)
-        u_rowcrop = torch.index_select(u_sparse, 0, rows_to_keep).coalesce()
-        m_rowcrop = torch.index_select(m_baseline, 0, rows_to_keep) + torch.sparse.mm(
-            a_subset_rowcrop, c_mean_subset
-        )
+            x_crop = torch.index_select(x, 0, index_select_tensor)
+            y_crop = torch.index_select(y, 0, index_select_tensor)
+            u_rowcrop = torch.index_select(u_sparse, 0, rows_to_keep).coalesce()
+            m_rowcrop = torch.index_select(m_baseline, 0, rows_to_keep) + torch.mm(
+                a_subset_rowcrop, c_mean_subset
+            )
 
-        urs_term = torch.sparse.mm(u_rowcrop, r) @ fluctuating_baseline_subtracted_term
-        ax_term = torch.sparse.mm(a_rowcrop, x)
-        ax_keep_term = torch.sparse.mm(a_subset_rowcrop, x_crop)
-        mean_sub_term = m_rowcrop @ e
-        net_spatial_basis_V = urs_term - ax_term + ax_keep_term - mean_sub_term
-        curr_norm_V = torch.square(
-            torch.linalg.norm(net_spatial_basis_V, dim=1, keepdim=True)
-        )
+            urs_term = torch.sparse.mm(u_rowcrop, r) @ fluctuating_baseline_subtracted_term
+            ax_term = torch.sparse.mm(a_rowcrop, x)
+            ax_keep_term = torch.matmul(a_subset_rowcrop, x_crop)
+            mean_sub_term = m_rowcrop @ e
+            net_spatial_basis_V = urs_term - ax_term + ax_keep_term - mean_sub_term
+            curr_norm_V = torch.square(
+                torch.linalg.norm(net_spatial_basis_V, dim=1, keepdim=True)
+            )
 
-        ay_term = torch.sparse.mm(a_rowcrop, y)
-        ay_keep_term = torch.sparse.mm(a_subset_rowcrop, y_crop)
-        net_spatial_basis_Z = -1 * ay_term + ay_keep_term
-        curr_norm_Z = torch.square(
-            torch.linalg.norm(net_spatial_basis_Z, dim=1, keepdim=True)
-        )
+            ay_term = torch.sparse.mm(a_rowcrop, y)
+            ay_keep_term = torch.mm(a_subset_rowcrop, y_crop)
+            net_spatial_basis_Z = -1 * ay_term + ay_keep_term
+            curr_norm_Z = torch.square(
+                torch.linalg.norm(net_spatial_basis_Z, dim=1, keepdim=True)
+            )
 
-        curr_norm = torch.sqrt(curr_norm_V + curr_norm_Z)
 
-        corr_img = (
-            net_spatial_basis_V @ v @ c_select + net_spatial_basis_Z @ Z @ c_select
-        )
-        corr_img /= curr_norm
-        corr_img = torch.nan_to_num(corr_img, nan=0.0, posinf=0.0, neginf=0.0)
+            curr_norm = torch.sqrt(curr_norm_V + curr_norm_Z)
 
-        local_rows, local_cols = a_subset_rowcrop.indices()
-        local_values = corr_img[(local_rows, local_cols)]
-        real_rows = rows_to_keep[local_rows]
-        real_cols = index_select_tensor[local_cols]
-        final_rows.append(real_rows)
-        final_cols.append(real_cols)
-        final_values.append(local_values)
+            corr_img = (
+                net_spatial_basis_V @ v @ c_select + net_spatial_basis_Z @ Z @ c_select
+            )
+            corr_img /= curr_norm
+            corr_img = torch.nan_to_num(corr_img, nan=0.0, posinf=0.0, neginf=0.0)
+            local_rows, local_cols = a_subset_rowcrop.nonzero(as_tuple=True)
+            local_values = corr_img[(local_rows, local_cols)]
+            real_rows = rows_to_keep[local_rows]
+            real_cols = index_select_tensor[local_cols]
+            final_rows.append(real_rows)
+            final_cols.append(real_cols)
+            final_values.append(local_values)
 
     final_rows = torch.cat(final_rows, 0)
     final_cols = torch.cat(final_cols, 0)
@@ -2134,7 +2140,7 @@ class SignalProcessingState(ABC):
         """Return the results from any given state."""
         raise NotImplementedError("This is not implemented for the current state.")
 
-    def lock_results_and_continue(self, context):
+    def lock_results_and_continue(self, context, carry_background: bool):
         """Lock in the current results and transition context object to new state."""
         raise NotImplementedError(
             "This method is not implemented for the current state."
@@ -2231,11 +2237,11 @@ class SignalDemixer:
     def demix(self, **kwargs):
         self._state.demix(**kwargs)
 
-    def lock_results_and_continue(self):
+    def lock_results_and_continue(self, carry_background: bool = False):
         """
         The state initiates the transition to a new state, updating this object via its state setter
         """
-        self._state.lock_results_and_continue(self)
+        self._state.lock_results_and_continue(self, carry_background = carry_background)
 
 
 class InitializingState(SignalProcessingState):
