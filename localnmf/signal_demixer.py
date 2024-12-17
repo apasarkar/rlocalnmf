@@ -121,8 +121,7 @@ def _compute_residual_correlation_image(
         start = k * batch_size
         end = min(start + batch_size, r.shape[1])
         temp = (
-            torch.sparse.mm(u_sparse, r[:, start:end])
-            @ fluctuating_baseline_subtracted_term
+            torch.sparse.mm(u_sparse, (r @ fluctuating_baseline_subtracted_term[:, start:end]))
             - torch.matmul(spatial_comps, x[:, start:end])
             - m_baseline @ e[:, start:end]
         )
@@ -293,7 +292,7 @@ def _compute_standard_correlation_image(
         start = frame_batch_size * k
         end = min(start + frame_batch_size, u_sparse.shape[0])
         data_chunk = (
-            torch.sparse.mm(u_sparse, r[:, start:end]) * s.unsqueeze(0)
+            torch.sparse.mm(u_sparse, r[:, start:end]) * s[start:end].unsqueeze(0)
             - m @ e[:, start:end]
         )
         data_norms += torch.square(torch.linalg.norm(data_chunk, dim=1, keepdim=True))
@@ -373,6 +372,9 @@ def PMD_setup_routine(U_sparse, R, s, V):
             - V has orthonormal rows
             - s describes the diagonal of an otherwise empty matrix
     """
+    if s.shape[0] == min(U_sparse.shape[0], V.shape[1]):
+        print("Full rank SVD provided; no need to modify anything")
+        return U_sparse, R, s, V
     device = V.device
     pad_flag, V = add_1s_to_rowspan(V)
     if pad_flag:
