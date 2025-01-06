@@ -92,7 +92,8 @@ def _compute_residual_correlation_image(
     residual_movie_norms = torch.zeros(
         (u_sparse.shape[0], 1), device=device, dtype=torch.float32
     )
-    c = temporal_comps - torch.mean(temporal_comps, dim=1, keepdim=True)
+
+    c = temporal_comps - torch.mean(temporal_comps, dim=0, keepdim=True)
     c /= torch.linalg.norm(c, dim=0, keepdim=True)
     c = torch.nan_to_num(c, nan=0, posinf=0, neginf=0)
 
