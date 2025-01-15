@@ -117,6 +117,20 @@ class ACArray(FactorizedVideo):
         """
         return self._a
 
+    def export_a(self) -> np.ndarray:
+        """
+        returns the spatial components, where each component is a 2D image. output shape (fov dim1, fov dim 2, n_frames)
+        """
+        output = self.a.cpu().numpy().to_dense()
+        output = output.reshape((self.shape[1], self.shape[2], -1), order=self.order)
+        return output
+
+    def export_c(self) -> np.ndarray:
+        """
+        returns the temporal traces, where each trace is a n_frames-shaped time series. output shape (n_frames, n_components)
+        """
+        return self.c.cpu().numpy()
+
     @property
     def order(self) -> str:
         """
