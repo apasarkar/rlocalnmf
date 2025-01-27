@@ -121,7 +121,7 @@ class ACArray(FactorizedVideo):
         """
         returns the spatial components, where each component is a 2D image. output shape (fov dim1, fov dim 2, n_frames)
         """
-        output = self.a.cpu().numpy().to_dense()
+        output = self.a.cpu().to_dense().numpy()
         output = output.reshape((self.shape[1], self.shape[2], -1), order=self.order)
         return output
 
